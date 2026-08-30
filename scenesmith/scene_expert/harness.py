@@ -78,6 +78,7 @@ class Harness:
         memory_pack: MemoryPack,
         stage_brief: StageBrief | None = None,
         relation_context: StageRelationContext | None = None,
+        stage_policy: str = "auto",
     ) -> HarnessContext:
         """Assemble the HarnessContext for a stage execution.
 
@@ -92,6 +93,11 @@ class Harness:
         """
         if stage not in STAGE_ORDER:
             raise ValueError(f"Unknown stage: {stage}. Valid stages: {STAGE_ORDER}")
+        if stage_policy not in {"auto", "required_only"}:
+            raise ValueError(
+                "stage_policy must be 'auto' or 'required_only', "
+                f"got {stage_policy!r}"
+            )
 
         budget = self._get_stage_budget(stage)
         return HarnessContext(
@@ -102,6 +108,7 @@ class Harness:
             stage_brief=stage_brief,
             stage_budget=budget,
             allowed_scene_smith_stage=stage,
+            stage_policy=stage_policy,
         )
 
     def decide_repair(

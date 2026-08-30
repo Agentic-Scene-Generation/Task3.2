@@ -21,7 +21,9 @@ from scenesmith.scenebenchmark_critic.intent_contract import (
     _normalize_selector_category,
     bound_ids,
     contract_constraints,
+    relation_candidate_ids,
     selected_ids,
+    semantic_selector_matches,
     selector_match_count,
 )
 from scenesmith.scenebenchmark_critic.relation_registry import (
@@ -45,6 +47,13 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface
     assign_work_seats_to_surfaces,
     room_bounds_from_case_pack,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.profiles import (
+    object_function_profile,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.support_scoring import (
+    build_support_surface_candidates,
+)
+from scenesmith.scenebenchmark_critic.object_taxonomy import generation_owner
 
 
 _ENTRANCE_CATEGORIES = frozenset({"door", "entrance", "entry"})
@@ -81,11 +90,16 @@ def evaluate_intent_contract_extensions(
         if isinstance(item, dict) and item.get("id")
     ]
     results: list[dict[str, Any]] = []
+    results.extend(_evaluate_coverage_requirements(case_pack, objects))
     for constraint in contract_constraints(case_pack):
         relation = str(constraint.get("relation") or "")
         if relation == "edge_distribution":
             # The dedicated edge evaluator owns complete subject binding and
             # slot assignment.  It must run before generic relation binding.
+            continue
+        readiness = _evaluate_support_readiness(case_pack, constraint, objects)
+        if readiness:
+            results.extend(readiness)
             continue
         binding_result = _binding_state_result(case_pack, constraint, objects)
         if binding_result is not None:
@@ -97,6 +111,387 @@ def evaluate_intent_contract_extensions(
         result = evaluator(constraint, geometry, objects, case_pack, "core")
         if result is not None:
             results.extend(result if isinstance(result, list) else [result])
+    return results
+
+
+def _evaluate_coverage_requirements(
+    case_pack: dict[str, Any], objects: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Evaluate explicit requirements that have no pairwise relation evaluator."""
+
+    contract = case_pack.get("intent_contract") or {}
+    requirements = contract.get("coverage_requirements") or []
+    if not isinstance(requirements, list):
+        return []
+    stage = _normalized_stage(str(case_pack.get("stage") or "adhoc"))
+    geometry = case_pack.get("scene_geometry") or {}
+    results: list[dict[str, Any]] = []
+    for requirement in requirements:
+        if not isinstance(requirement, dict) or not requirement.get("requirement_id"):
+            continue
+        kind = str(requirement.get("kind") or "")
+        normalized = str(requirement.get("normalized") or "")
+        earliest = str(requirement.get("earliest_stage") or "floor_plan")
+        if earliest not in STAGE_ORDER:
+            earliest = "floor_plan"
+        synthetic = dict(requirement)
+        synthetic["constraint_id"] = str(requirement["requirement_id"])
+        synthetic["relation"] = f"coverage_{kind}"
+        if STAGE_ORDER.index(stage) < STAGE_ORDER.index(earliest):
+            results.append(
+                _result(
+                    synthetic,
+                    suffix="pending",
+                    label="unknown",
+                    primary=str(requirement["requirement_id"]),
+                    related=[],
+                    relation_type="coverage",
+                    tier="auxiliary",
+                    contract_state="pending",
+                    reason=(
+                        f"Coverage requirement `{normalized}` is pending until "
+                        f"stage `{earliest}`; it is not treated as a pass."
+                    ),
+                    diagnostics={
+                        "coverage_status": "pending",
+                        "requirement_id": str(requirement["requirement_id"]),
+                        "kind": kind,
+                        "normalized": normalized,
+                        "current_stage": stage,
+                        "earliest_stage": earliest,
+                        "evidence_span": str(requirement.get("evidence_span") or ""),
+                    },
+                )
+            )
+            continue
+
+        if kind == "forbidden_inventory":
+            selector = {"category": normalized, "quantifier": "all"}
+            matched_ids = selected_ids(selector, objects)
+            match_details = semantic_selector_matches(selector, objects)
+            if not geometry or not isinstance(geometry.get("objects"), list):
+                label, tier, state = "unknown", "auxiliary", "unknown"
+                reason = (
+                    f"Forbidden inventory `{normalized}` is unknown because scene "
+                    "object evidence is unavailable."
+                )
+            elif matched_ids:
+                label, tier, state = "fail", "core", "evaluated"
+                reason = (
+                    f"Explicitly forbidden inventory `{normalized}` is present: "
+                    + ", ".join(matched_ids)
+                    + "."
+                )
+            else:
+                label, tier, state = "pass", "core", "evaluated"
+                reason = (
+                    f"No object matches explicitly forbidden inventory `{normalized}`."
+                )
+            results.append(
+                _result(
+                    synthetic,
+                    suffix="forbidden_inventory",
+                    label=label,
+                    primary=str(requirement["requirement_id"]),
+                    related=matched_ids,
+                    relation_type="forbidden_inventory",
+                    tier=tier,
+                    contract_state=state,
+                    reason=reason,
+                    diagnostics={
+                        "coverage_status": state,
+                        "requirement_id": str(requirement["requirement_id"]),
+                        "requested_category": normalized,
+                        "observed_count": len(matched_ids),
+                        "matched_object_ids": matched_ids,
+                        "matched_categories": sorted(
+                            {
+                                str(row.get("observed_category") or "")
+                                for row in match_details
+                                if row.get("context_matched")
+                            }
+                            - {""}
+                        ),
+                        "match_details": match_details,
+                        "evidence_span": str(requirement.get("evidence_span") or ""),
+                    },
+                )
+            )
+            continue
+
+        if kind == "unsupported_relation":
+            results.append(
+                _result(
+                    synthetic,
+                    suffix="unsupported",
+                    label="degraded",
+                    primary=str(requirement["requirement_id"]),
+                    related=[],
+                    relation_type="coverage",
+                    tier="core",
+                    contract_state="degraded",
+                    reason=(
+                        f"Explicit requirement `{normalized}` is visible in the prompt, "
+                        "but no deterministic critic evaluator is registered for it."
+                    ),
+                    diagnostics={
+                        "coverage_status": "degraded",
+                        "requirement_id": str(requirement["requirement_id"]),
+                        "kind": kind,
+                        "normalized": normalized,
+                        "current_stage": stage,
+                        "evidence_span": str(requirement.get("evidence_span") or ""),
+                        "evidence_refs": ["original_prompt"],
+                    },
+                )
+            )
+            continue
+
+        evidence_state, evidence = _functional_requirement_evidence(
+            requirement, geometry, objects
+        )
+        if evidence_state == "unknown":
+            label, tier, state = "unknown", "auxiliary", "unknown"
+            reason = (
+                f"Coverage for `{normalized}` is unknown because structural scene "
+                "evidence is unavailable."
+            )
+        elif evidence_state == "pass":
+            label, tier, state = "pass", "core", "evaluated"
+            reason = (
+                f"Structural evidence confirms explicit requirement `{normalized}`."
+            )
+        else:
+            label, tier, state = "fail", "core", "evaluated"
+            reason = (
+                f"Structural evidence does not confirm explicit requirement `{normalized}`; "
+                "furniture clustering is insufficient evidence."
+            )
+        results.append(
+            _result(
+                synthetic,
+                suffix="evaluated",
+                label=label,
+                primary=str(requirement["requirement_id"]),
+                related=[],
+                relation_type="coverage",
+                tier=tier,
+                contract_state=state,
+                reason=reason,
+                diagnostics={
+                    "coverage_status": evidence_state,
+                    "requirement_id": str(requirement["requirement_id"]),
+                    "kind": kind,
+                    "normalized": normalized,
+                    "current_stage": stage,
+                    "evidence_span": str(requirement.get("evidence_span") or ""),
+                    "evidence_refs": evidence.get("evidence_refs") or [],
+                    "matched_room_ids": evidence.get("matched_room_ids") or [],
+                    "matched_object_ids": evidence.get("matched_object_ids") or [],
+                },
+            )
+        )
+    return results
+
+
+def _functional_requirement_evidence(
+    requirement: dict[str, Any],
+    geometry: dict[str, Any],
+    objects: list[dict[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    """Return pass/fail/unknown using room or architectural evidence only."""
+
+    if not isinstance(geometry, dict) or not geometry:
+        return "unknown", {}
+    rooms = [row for row in geometry.get("rooms") or [] if isinstance(row, dict)]
+    if not rooms and not objects:
+        return "unknown", {}
+    normalized = " ".join(
+        str(requirement.get("normalized") or "").replace("_", " ").split()
+    ).casefold()
+    matched_room_ids: list[str] = []
+    matched_object_ids: list[str] = []
+    for room in rooms:
+        room_text = (
+            " ".join(
+                str(room.get(field) or "")
+                for field in ("id", "room_id", "room_type", "type", "functional_zone")
+            )
+            .replace("_", " ")
+            .casefold()
+        )
+        zones = " ".join(
+            str(value or "") for value in room.get("functional_zones") or []
+        )
+        room_text = f"{room_text} {zones.replace('_', ' ').casefold()}"
+        if normalized and normalized in room_text:
+            matched_room_ids.append(str(room.get("id") or room.get("room_id") or ""))
+
+    architectural_tokens = ("partition", "enclosure", "closet", "architectural")
+    for obj in objects:
+        category = (
+            str(obj.get("category_norm") or obj.get("category") or "")
+            .replace("_", " ")
+            .casefold()
+        )
+        metadata = obj.get("metadata") or {}
+        role = str(
+            metadata.get("architectural_role") or metadata.get("semantic_role") or ""
+        )
+        if (
+            normalized
+            and normalized in f"{category} {role.replace('_', ' ').casefold()}"
+        ):
+            if any(
+                token in category or token in role.casefold()
+                for token in architectural_tokens
+            ):
+                matched_object_ids.append(str(obj.get("id") or ""))
+
+    evidence_refs: list[str] = []
+    if matched_room_ids:
+        evidence_refs.append("scene_geometry.rooms")
+    if matched_object_ids:
+        evidence_refs.append("scene_geometry.objects.architectural_metadata")
+    if matched_room_ids or matched_object_ids:
+        return "pass", {
+            "evidence_refs": evidence_refs,
+            "matched_room_ids": matched_room_ids,
+            "matched_object_ids": matched_object_ids,
+        }
+    if not rooms and not any(obj.get("metadata") for obj in objects):
+        return "unknown", {"evidence_refs": ["scene_geometry"]}
+    return "fail", {
+        "evidence_refs": ["scene_geometry.rooms", "scene_geometry.objects"],
+    }
+
+
+def _evaluate_support_readiness(
+    case_pack: dict[str, Any],
+    constraint: dict[str, Any],
+    objects: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Check a present support target before a later manipuland is generated."""
+    if str(constraint.get("relation") or "") != "on_top_of":
+        return []
+    stage = _normalized_stage(str(case_pack.get("stage") or "adhoc"))
+    subject_selector = constraint.get("subjects") or {}
+    target_selector = constraint.get("targets") or {}
+    subject_category = str(subject_selector.get("category") or "")
+    target_category = str(target_selector.get("category") or "")
+    declared_subject_stage = str(subject_selector.get("stage") or "")
+    if not declared_subject_stage and str(constraint.get("stage") or "") in {
+        "wall_mounted",
+        "ceiling_mounted",
+        "manipuland",
+    }:
+        declared_subject_stage = str(constraint.get("stage") or "")
+    subject_owner = generation_owner(
+        subject_category,
+        relation="on_top_of",
+        endpoint="subject",
+        declared_owner=declared_subject_stage,
+    )
+    target_owner = generation_owner(
+        target_category,
+        relation="on_top_of",
+        endpoint="target",
+        declared_owner=str(target_selector.get("stage") or ""),
+    )
+    if subject_owner not in STAGE_ORDER or target_owner not in STAGE_ORDER:
+        return []
+    if STAGE_ORDER.index(subject_owner) <= STAGE_ORDER.index(stage):
+        return []
+    if STAGE_ORDER.index(stage) < STAGE_ORDER.index(target_owner):
+        return []
+    subject_ids = bound_ids(subject_selector, objects)
+    target_ids = bound_ids(target_selector, objects)
+    if subject_ids or not target_ids:
+        return []
+
+    results: list[dict[str, Any]] = []
+    for target_id in target_ids:
+        target = next(
+            (item for item in objects if str(item.get("id")) == target_id), None
+        )
+        if target is None:
+            continue
+        profile = object_function_profile(target)
+        candidates = build_support_surface_candidates(target, profile)
+        verified_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.source == "support_region"
+        ]
+        inferred_candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.source != "support_region"
+        ]
+        bbox = target.get("bbox_world") or {}
+        has_bbox = len(bbox.get("min") or []) >= 3 and len(bbox.get("max") or []) >= 3
+        has_support_declaration = any(
+            key in target
+            for key in (
+                "support_surfaces",
+                "support_regions",
+                "object_function_profile",
+            )
+        )
+        if verified_candidates:
+            label = "pass"
+            reason = (
+                f"Support target `{target_id}` exposes {len(verified_candidates)} verified "
+                f"surface candidate(s) before `{subject_category}` is generated."
+            )
+        elif inferred_candidates:
+            label = "unknown"
+            reason = (
+                f"Support readiness for `{target_id}` is unknown: only inferred "
+                "bbox/profile surfaces are available, not consumer-compatible "
+                "support-region evidence."
+            )
+        elif not has_bbox or not has_support_declaration:
+            label = "unknown"
+            reason = (
+                f"Support readiness for `{target_id}` is unknown: target geometry or "
+                "support metadata is incomplete."
+            )
+        else:
+            label = "fail"
+            reason = (
+                f"Support target `{target_id}` has no verified surface compatible "
+                f"with future `{subject_category}` placement."
+            )
+        results.append(
+            _result(
+                constraint,
+                suffix=f"support_readiness__{target_id}",
+                label=label,
+                primary=target_id,
+                related=[],
+                relation_type="support_readiness",
+                tier="core" if label != "unknown" else "auxiliary",
+                reason=reason,
+                diagnostics={
+                    "support_readiness": True,
+                    "current_stage": stage,
+                    "target_stage": target_owner,
+                    "earliest_stage": target_owner,
+                    "dependent_stage": subject_owner,
+                    "target_id": target_id,
+                    "target_category": target_category,
+                    "surface_candidate_count": len(verified_candidates),
+                    "inferred_surface_candidate_count": len(inferred_candidates),
+                    "surface_candidate_sources": sorted(
+                        {candidate.source for candidate in candidates}
+                    ),
+                    "support_profile_source": profile.source,
+                    "has_bbox": has_bbox,
+                    "has_support_declaration": has_support_declaration,
+                },
+            )
+        )
     return results
 
 
@@ -908,11 +1303,14 @@ def _evaluate_axial_relation(
     relation also denotes the same centerline, preventing a disconnected
     lateral placement.
     """
-    subject_ids = bound_ids(constraint.get("subjects"), objects)
+    subject_ids = relation_candidate_ids(constraint, objects)
     target_ids = bound_ids(constraint.get("targets"), objects)
     target_is_existential = str(
         (constraint.get("targets") or {}).get("quantifier") or ""
     ) in {"at_least", "minimum"}
+    collective_target_group = _complete_collective_axial_target_group(
+        constraint, subject_ids, target_ids
+    )
     paired_targets: dict[str, str] = {}
     if len(target_ids) > 1 and not target_is_existential:
         paired_targets = _hard_paired_axial_targets(
@@ -932,6 +1330,7 @@ def _evaluate_axial_relation(
         or (
             len(target_ids) != 1
             and not target_is_existential
+            and not collective_target_group
             and len(paired_targets) != len(subject_ids)
         )
     ):
@@ -945,23 +1344,41 @@ def _evaluate_axial_relation(
         subject_center = bbox_center_xy(subject)
         if subject is None or subject_center is None:
             continue
-        candidate_target_ids = (
-            [paired_targets[subject_id]] if subject_id in paired_targets else target_ids
-        )
-        candidates = [
-            candidate
-            for target_id in candidate_target_ids
-            if (
-                candidate := _axial_candidate(
+        if collective_target_group:
+            # ``all`` over a counted target cohort is a group relation.  Do
+            # not choose the best member (which would silently turn it into
+            # an existential relation); the group evaluator checks every
+            # target's forward clearance and uses the cohort centroid for
+            # lateral alignment.
+            candidates = [
+                _collective_axial_candidate(
                     subject,
                     subject_center,
-                    by_id.get(target_id),
-                    target_id,
+                    [by_id.get(target_id) for target_id in target_ids],
+                    target_ids,
                     behind=behind,
                 )
+            ]
+        else:
+            candidate_target_ids = (
+                [paired_targets[subject_id]]
+                if subject_id in paired_targets
+                else target_ids
             )
-            is not None
-        ]
+            candidates = [
+                candidate
+                for target_id in candidate_target_ids
+                if (
+                    candidate := _axial_candidate(
+                        subject,
+                        subject_center,
+                        by_id.get(target_id),
+                        target_id,
+                        behind=behind,
+                    )
+                )
+                is not None
+            ]
         if not candidates:
             continue
         candidate = min(
@@ -984,18 +1401,24 @@ def _evaluate_axial_relation(
         lateral_tolerance = candidate["lateral_tolerance"]
         label = candidate["label"]
 
-        repair_object_id, repair_center = _front_alignment_repair_pose(
-            subject_id=subject_id,
-            subject_center=subject_center,
-            target_id=target_id,
-            target_center=target_center,
-            front=front,
-            side=side,
-            forward_distance=forward_distance,
-            lateral_signed=lateral_signed,
-            minimum_forward_distance=min_forward,
-            centered_anchor_ids=centered_anchor_ids,
-        )
+        if collective_target_group:
+            # A cohort has no physical object that can safely receive a
+            # single-object repair pose.  Leave repair to the stage designer
+            # when the group-level relation is not satisfied.
+            repair_object_id, repair_center = None, None
+        else:
+            repair_object_id, repair_center = _front_alignment_repair_pose(
+                subject_id=subject_id,
+                subject_center=subject_center,
+                target_id=target_id,
+                target_center=target_center,
+                front=front,
+                side=side,
+                forward_distance=forward_distance,
+                lateral_signed=lateral_signed,
+                minimum_forward_distance=min_forward,
+                centered_anchor_ids=centered_anchor_ids,
+            )
         diagnostics: dict[str, Any] = {
             "subject_id": subject_id,
             "target_id": target_id,
@@ -1012,7 +1435,24 @@ def _evaluate_axial_relation(
             diagnostics["paired_target_id"] = target_id
         elif len(target_ids) > 1:
             diagnostics["candidate_target_ids"] = list(target_ids)
-            diagnostics["existential_target_selection"] = True
+            diagnostics["existential_target_selection"] = target_is_existential
+            diagnostics["collective_target_selection"] = collective_target_group
+            if collective_target_group:
+                diagnostics["collective_target_count"] = len(target_ids)
+                diagnostics["collective_axis_error_deg"] = round(
+                    float(candidate.get("axis_error") or 0.0), 6
+                )
+                diagnostics["collective_forward_distances_m"] = [
+                    round(float(value), 6)
+                    for value in candidate.get("forward_distances", [])
+                ]
+                diagnostics["collective_minimum_forwards_m"] = [
+                    round(float(value), 6)
+                    for value in candidate.get("minimum_forwards", [])
+                ]
+                diagnostics["collective_anchor_center_xy_m"] = [
+                    round(float(value), 6) for value in candidate["group_center"]
+                ]
         if repair_object_id is not None and repair_center is not None:
             diagnostics["repair_object_id"] = repair_object_id
             diagnostics["repair_target_center_xy_m"] = [
@@ -1025,7 +1465,7 @@ def _evaluate_axial_relation(
                 suffix=f"{subject_id}__{target_id}",
                 label=label,
                 primary=subject_id,
-                related=[target_id],
+                related=list(target_ids) if collective_target_group else [target_id],
                 relation_type=(
                     "rear_axis_alignment" if behind else "front_axis_alignment"
                 ),
@@ -1041,6 +1481,159 @@ def _evaluate_axial_relation(
             )
         )
     return results
+
+
+def _complete_collective_axial_target_group(
+    constraint: dict[str, Any],
+    subject_ids: list[str],
+    target_ids: list[str],
+) -> bool:
+    """Allow a singleton subject to evaluate an explicitly complete target group.
+
+    A phrase such as "three shelves with a sofa in front" names one subject
+    relative to a complete cohort.  It is safe to choose the best target axis
+    only when the contract supplies the cohort cardinality and every member
+    binds; an unbounded repeated selector remains ambiguous.
+    """
+    if str(constraint.get("relation") or "") not in {"in_front_of", "behind"}:
+        return False
+    if len(subject_ids) != 1 or len(target_ids) <= 1:
+        return False
+    targets = constraint.get("targets") or {}
+    if str(targets.get("quantifier") or "all").strip().lower() != "all":
+        return False
+    try:
+        target_count = int(targets.get("count"))
+    except (TypeError, ValueError):
+        return False
+    return target_count == len(target_ids) and target_count > 1
+
+
+def _collective_axial_candidate(
+    subject: dict[str, Any],
+    subject_center: tuple[float, float],
+    targets: list[dict[str, Any] | None],
+    target_ids: list[str],
+    *,
+    behind: bool,
+) -> dict[str, Any] | None:
+    """Evaluate an explicitly complete axial target cohort as one relation.
+
+    The target objects must agree on a usable front axis.  Every member then
+    contributes to the required forward clearance, while the cohort centroid
+    supplies the stable lateral anchor.  This preserves universal semantics
+    for ``quantifier=all`` without inventing a pair for an unpaired group.
+    """
+    if len(targets) != len(target_ids) or not targets:
+        return None
+    if any(target is None or bbox_center_xy(target) is None for target in targets):
+        return None
+
+    fronts: list[tuple[float, float]] = []
+    centers: list[tuple[float, float]] = []
+    for target in targets:
+        assert target is not None
+        center = bbox_center_xy(target)
+        raw_front = front_vector(target)
+        norm = math.hypot(*raw_front)
+        if center is None or norm <= 1e-6:
+            return None
+        front = (raw_front[0] / norm, raw_front[1] / norm)
+        if behind:
+            front = (-front[0], -front[1])
+        fronts.append(front)
+        centers.append(center)
+
+    reference_front = (
+        sum(front[0] for front in fronts),
+        sum(front[1] for front in fronts),
+    )
+    reference_norm = math.hypot(*reference_front)
+    if reference_norm <= 1e-6:
+        return None
+    reference_front = (
+        reference_front[0] / reference_norm,
+        reference_front[1] / reference_norm,
+    )
+    # A single group axis is only meaningful when every member faces within
+    # the same 30-degree half-plane.  Divergent orientations remain a strict
+    # failure instead of selecting whichever member happens to score best.
+    axis_error = max(_vector_angle_deg(front, reference_front) for front in fronts)
+    side = (-reference_front[1], reference_front[0])
+    group_center = (
+        sum(center[0] for center in centers) / len(centers),
+        sum(center[1] for center in centers) / len(centers),
+    )
+    subject_half_front = _projected_half_extent(subject, reference_front)
+    subject_half_side = _projected_half_extent(subject, side)
+    forward_distances: list[float] = []
+    minimum_forwards: list[float] = []
+    lateral_spread = 0.0
+    for target, target_center in zip(targets, centers):
+        assert target is not None
+        delta = (
+            subject_center[0] - target_center[0],
+            subject_center[1] - target_center[1],
+        )
+        forward_distances.append(
+            delta[0] * reference_front[0] + delta[1] * reference_front[1]
+        )
+        minimum_forwards.append(
+            max(
+                0.15,
+                _projected_half_extent(target, reference_front)
+                + subject_half_front
+                + 0.03,
+            )
+        )
+        lateral_spread = max(
+            lateral_spread,
+            abs(
+                (target_center[0] - group_center[0]) * side[0]
+                + (target_center[1] - group_center[1]) * side[1]
+            )
+            + _projected_half_extent(target, side),
+        )
+    lateral_signed = (subject_center[0] - group_center[0]) * side[0] + (
+        subject_center[1] - group_center[1]
+    ) * side[1]
+    lateral_tolerance = max(
+        0.18,
+        min(0.40, 0.15 * (subject_half_side + lateral_spread)),
+    )
+    forward_distance = min(forward_distances)
+    minimum_forward = max(minimum_forwards)
+    forward_pass = all(
+        distance + 1e-6 >= required
+        for distance, required in zip(forward_distances, minimum_forwards)
+    )
+    forward_nonnegative = all(distance >= 0.0 for distance in forward_distances)
+    if axis_error > 30.0:
+        label = "fail"
+    elif forward_pass and abs(lateral_signed) <= lateral_tolerance:
+        label = "pass"
+    elif forward_nonnegative and abs(lateral_signed) <= lateral_tolerance * 2.0:
+        label = "degraded"
+    else:
+        label = "fail"
+    return {
+        "target_id": f"cohort:{','.join(target_ids)}",
+        "target_center": group_center,
+        "front": reference_front,
+        "side": side,
+        "min_forward": minimum_forward,
+        "forward_distance": forward_distance,
+        "lateral_signed": lateral_signed,
+        "lateral_error": abs(lateral_signed),
+        "lateral_tolerance": lateral_tolerance,
+        "forward_error": max(0.0, minimum_forward - forward_distance),
+        "label": label,
+        "axis_error": axis_error,
+        "forward_distances": forward_distances,
+        "minimum_forwards": minimum_forwards,
+        "group_center": group_center,
+        "group_lateral_half_extent": lateral_spread,
+    }
 
 
 def _hard_paired_axial_targets(
@@ -1352,7 +1945,7 @@ def _binding_state_result(
         subject_ids = subject_matches
     else:
         subject_matches = selected_ids(subject_selector, objects)
-        subject_ids = bound_ids(subject_selector, objects)
+        subject_ids = relation_candidate_ids(constraint, objects)
         if not subject_matches and subject_ids:
             subject_matches = subject_ids
     virtual_targets = {"room", "ceiling"}
@@ -1449,6 +2042,9 @@ def _binding_state_result(
             )
         )
     )
+    collective_axial_target_group = _complete_collective_axial_target_group(
+        constraint, subject_ids, target_ids
+    )
     same_category_anchor_pair = (
         relation in {"between", "centered_between"}
         and str(target_selector.get("category") or "") == secondary_category
@@ -1463,6 +2059,7 @@ def _binding_state_result(
     ):
         ambiguous = ambiguous or (
             not same_category_anchor_pair
+            and not collective_axial_target_group
             and (len(target_ids) > 1 or len(secondary_ids) > 1)
         )
     if not missing and not ambiguous:
@@ -1652,32 +2249,37 @@ def _evaluate_corner_of_room(
     bounds = _room_bounds(geometry)
     if bounds is None:
         return []
-    corners = (
-        (bounds[0], bounds[1]),
-        (bounds[0], bounds[3]),
-        (bounds[2], bounds[1]),
-        (bounds[2], bounds[3]),
-    )
     allowed = max(0.5, 0.12 * math.hypot(bounds[2] - bounds[0], bounds[3] - bounds[1]))
     by_id = {str(obj["id"]): obj for obj in objects}
     results = []
     for object_id in bound_ids(constraint.get("subjects"), objects):
-        center = bbox_center_xy(by_id.get(object_id))
-        if center is None:
+        corner = _nearest_footprint_corner(by_id.get(object_id), bounds)
+        if corner is None:
             continue
-        distance = min(math.hypot(center[0] - x, center[1] - y) for x, y in corners)
+        distance, wall_x_distance, wall_y_distance, corner_xy = corner
+        passed = (
+            distance <= allowed
+            and wall_x_distance <= allowed
+            and wall_y_distance <= allowed
+        )
         results.append(
             _result(
                 constraint,
                 suffix=object_id,
-                label="pass" if distance <= allowed else "fail",
+                label="pass" if passed else "fail",
                 primary=object_id,
                 related=[],
                 relation_type="corner_of_room",
                 tier=tier,
-                reason=f"`{object_id}` is {distance:.2f}m from its nearest room corner (allowed {allowed:.2f}m).",
+                reason=(
+                    f"`{object_id}` footprint is {distance:.2f}m from its nearest "
+                    f"room corner (allowed {allowed:.2f}m)."
+                ),
                 diagnostics={
                     "nearest_corner_distance_m": distance,
+                    "nearest_corner_xy_m": list(corner_xy),
+                    "nearest_wall_x_distance_m": wall_x_distance,
+                    "nearest_wall_y_distance_m": wall_y_distance,
                     "allowed_distance_m": allowed,
                 },
             )
@@ -1704,17 +2306,18 @@ def _evaluate_corner_distribution(
     if not subject_ids:
         return []
     by_id = {str(obj["id"]): obj for obj in objects}
-    centers = [bbox_center_xy(by_id.get(object_id)) for object_id in subject_ids]
-    if any(center is None for center in centers) or len(subject_ids) > len(corners):
+    corner_distances = [
+        _footprint_corner_distances(by_id.get(object_id), bounds)
+        for object_id in subject_ids
+    ]
+    if any(not distances for distances in corner_distances) or len(subject_ids) > len(
+        corners
+    ):
         return []
-    typed_centers = [center for center in centers if center is not None]
     best: tuple[float, tuple[int, ...]] | None = None
     for assignment in permutations(range(len(corners)), len(subject_ids)):
         cost = sum(
-            math.hypot(
-                typed_centers[index][0] - corners[corner_index][0],
-                typed_centers[index][1] - corners[corner_index][1],
-            )
+            corner_distances[index][corner_index][0]
             for index, corner_index in enumerate(assignment)
         )
         if best is None or cost < best[0]:
@@ -1727,9 +2330,15 @@ def _evaluate_corner_distribution(
     )
     results: list[dict[str, Any]] = []
     for index, corner_index in enumerate(best[1]):
-        center = typed_centers[index]
         corner = corners[corner_index]
-        distance = math.hypot(center[0] - corner[0], center[1] - corner[1])
+        distance, wall_x_distance, wall_y_distance = corner_distances[index][
+            corner_index
+        ]
+        passed = (
+            distance <= allowed
+            and wall_x_distance <= allowed
+            and wall_y_distance <= allowed
+        )
         assignment = {
             "object_id": subject_ids[index],
             "corner_index": corner_index,
@@ -1740,7 +2349,7 @@ def _evaluate_corner_distribution(
             _result(
                 constraint,
                 suffix=subject_ids[index],
-                label="pass" if distance <= allowed else "fail",
+                label="pass" if passed else "fail",
                 primary=subject_ids[index],
                 related=[
                     object_id
@@ -1755,12 +2364,64 @@ def _evaluate_corner_distribution(
                 ),
                 diagnostics={
                     "assignment": assignment,
+                    "nearest_wall_x_distance_m": wall_x_distance,
+                    "nearest_wall_y_distance_m": wall_y_distance,
                     "distinct_corner_count": len(set(best[1])),
                     "allowed_distance_m": allowed,
                 },
             )
         )
     return results
+
+
+def _footprint_corner_distances(
+    obj: dict[str, Any] | None, bounds: tuple[float, float, float, float]
+) -> list[tuple[float, float, float]]:
+    if not isinstance(obj, dict):
+        return []
+    footprint_values = object_footprint_polygon(obj)
+    try:
+        footprint = Polygon(footprint_values)
+    except (TypeError, ValueError):
+        footprint = Polygon()
+    if footprint.is_empty or not footprint.is_valid:
+        center = bbox_center_xy(obj)
+        if center is None:
+            return []
+        footprint = Point(center)
+    corners = (
+        (bounds[0], bounds[1]),
+        (bounds[0], bounds[3]),
+        (bounds[2], bounds[1]),
+        (bounds[2], bounds[3]),
+    )
+    result: list[tuple[float, float, float]] = []
+    for x, y in corners:
+        corner_point = Point(x, y)
+        wall_x = abs(
+            float(footprint.distance(LineString([(x, bounds[1]), (x, bounds[3])])))
+        )
+        wall_y = abs(
+            float(footprint.distance(LineString([(bounds[0], y), (bounds[2], y)])))
+        )
+        result.append((float(footprint.distance(corner_point)), wall_x, wall_y))
+    return result
+
+
+def _nearest_footprint_corner(
+    obj: dict[str, Any] | None, bounds: tuple[float, float, float, float]
+) -> tuple[float, float, float, tuple[float, float]] | None:
+    distances = _footprint_corner_distances(obj, bounds)
+    if not distances:
+        return None
+    corners = (
+        (bounds[0], bounds[1]),
+        (bounds[0], bounds[3]),
+        (bounds[2], bounds[1]),
+        (bounds[2], bounds[3]),
+    )
+    index, value = min(enumerate(distances), key=lambda item: item[1][0])
+    return (*value, corners[index])
 
 
 def _evaluate_one_per_support(

@@ -85,6 +85,35 @@ def format_markdown_report(payload: dict[str, Any]) -> str:
             f"subjects={subjects}; targets={targets}; dependencies={dependencies}; "
             f"repair={row.get('repair_strategy') or 'none'}{provenance_text}"
         )
+    coverage_requirements = (
+        (payload.get("case_pack") or {}).get("intent_contract") or {}
+    ).get("coverage_requirements") or []
+    coverage_results = {
+        str((result.get("diagnostics") or {}).get("requirement_id")): result
+        for result in payload.get("results") or []
+        if (result.get("diagnostics") or {}).get("requirement_id")
+    }
+    lines.extend(["", "## Coverage Requirements", ""])
+    if not coverage_requirements:
+        lines.append("No explicit coverage requirements.")
+    for requirement in coverage_requirements:
+        if not isinstance(requirement, dict):
+            continue
+        requirement_id = str(requirement.get("requirement_id") or "")
+        result = coverage_results.get(requirement_id) or {}
+        diagnostics = result.get("diagnostics") or {}
+        status = str(diagnostics.get("coverage_status") or "unreported")
+        label = str(result.get("label") or "unknown")
+        evidence_span = str(
+            requirement.get("evidence_span") or diagnostics.get("evidence_span") or ""
+        ).strip()
+        evidence_text = f"; evidence={evidence_span}" if evidence_span else ""
+        lines.append(
+            f"- `{requirement_id}` [{requirement.get('kind')}] "
+            f"`{requirement.get('normalized')}`: status=`{status}`, "
+            f"label=`{label}`, stage=`{requirement.get('earliest_stage')}`"
+            f"{evidence_text}"
+        )
     lines.extend(["", "## Issues", ""])
     issue_rows = [
         result for result in payload.get("results") or [] if _is_prompt_issue(result)
@@ -191,6 +220,9 @@ def _format_dependency_states(
 
 
 def _is_prompt_issue(result: dict[str, Any]) -> bool:
+    diagnostics = result.get("diagnostics") or {}
+    if diagnostics.get("requirement_id"):
+        return result.get("label") in {"fail", "degraded", "unknown"}
     if result.get("prompt_actionable_auxiliary"):
         return result.get("label") in {"fail", "degraded", "unknown"}
     constraint = (result.get("evidence") or {}).get("intent_constraint") or {}

@@ -135,7 +135,6 @@ DEFAULT_ALIASES = {
         "tvs",
         "flat-screen television",
         "flat-screen tv",
-        "display",
     ],
     "sideboard": ["sideboard", "sideboards", "buffet cabinet"],
     "water_dispenser": [
@@ -416,8 +415,78 @@ def _contains_alias(
             normalized, match.end() - 1
         ):
             continue
+        if category == "television" and _is_non_standalone_television_mention(
+            normalized, match, alias
+        ):
+            continue
         return True
     return False
+
+
+def _is_negated_inventory_mention(text: str, start: int) -> bool:
+    """Return whether an inventory alias is directly negated in its clause."""
+    prefix = text[:start]
+    if start < len(text) and not text[start].isalnum():
+        prefix += text[start]
+    clause = re.split(r"[.!?;]", prefix)[-1]
+    # "not only a TV ..." introduces a positive item, and must not be
+    # mistaken for the standalone negator "not".
+    if re.search(
+        r"\bnot\s+only\s+(?:(?:a|an|any|one|the)\s+)?" r"(?:[a-z0-9-]+\s+){0,3}$",
+        clause,
+    ):
+        return False
+
+    # Evaluate the words between the last negator and the alias.  A
+    # ``and``/``but`` end a negated inventory phrase (for example, "no sofa
+    # and a TV"). ``or`` continues it: "no TV or television" negates both
+    # aliases and must not reintroduce television through its second mention.
+    for negation in reversed(
+        list(re.finditer(r"\b(?:no|without|neither|not)\b", clause))
+    ):
+        suffix = clause[negation.end() :]
+        if re.search(r"\b(?:and|but)\b", suffix):
+            continue
+        if re.fullmatch(
+            r"\s+(?:(?:a|an|any|one|the)\s+)?(?:[a-z0-9-]+\s+){0,3}",
+            suffix,
+        ):
+            return True
+
+    for directive in reversed(
+        list(
+            re.finditer(
+                r"\b(?:do not|does not|don't|doesn't)\s+"
+                r"(?:include|contain|have|feature|show)\b",
+                clause,
+            )
+        )
+    ):
+        suffix = clause[directive.end() :]
+        if re.search(r"\b(?:and|but)\b", suffix):
+            continue
+        if re.fullmatch(
+            r"\s+(?:(?:a|an|any|one|the)\s+)?(?:[a-z0-9-]+\s+){0,3}",
+            suffix,
+        ):
+            return True
+    return False
+
+
+def _is_non_standalone_television_mention(
+    text: str, match: re.Match[str], alias: str
+) -> bool:
+    """Exclude TV/television when it names a stand or console, not a display."""
+    alias_text = alias.lower().replace("_", " ")
+    matched_text = text[match.start() : match.end()]
+    alias_offset = matched_text.lower().rfind(alias_text)
+    if alias_offset < 0:
+        return False
+    alias_start = match.start() + alias_offset
+    alias_end = alias_start + len(alias_text)
+    if _is_negated_inventory_mention(text, alias_start):
+        return True
+    return re.match(r"\s+(?:stand|console)\b", text[alias_end:]) is not None
 
 
 def infer_furniture_category(text: str) -> str | None:
@@ -495,12 +564,24 @@ def furniture_object_category_matches(
     required_category: str,
 ) -> bool:
     """Return whether a structured scene object satisfies an inventory category."""
+    normalized_required = str(required_category).lower().replace("_", " ")
+    identity_text = f"{object_id} {name}"
     if str(
         required_category
     ).lower() == "storage_cabinet" and _is_explicit_non_storage_cabinet(
         f"{object_id} {name}"
     ):
         return False
+    # SceneTaskSpec categories can be more specific than this controller's
+    # legacy alias table (for example, ``fridge`` or ``pantry_shelf``).  A
+    # structured object id/name is authoritative enough to satisfy those
+    # categories even when the free-form description uses a synonym.
+    if normalized_required not in {
+        alias.lower().replace("_", " ") for alias in DEFAULT_ALIASES
+    } and _contains_alias(
+        identity_text, normalized_required, category=required_category
+    ):
+        return True
     object_category = infer_furniture_object_category(object_id, name, description)
     if object_category is not None:
         return furniture_category_satisfies(object_category, required_category)
@@ -768,6 +849,11 @@ class FurnitureSafetyController:
                     rf"([^a-z0-9]|$)"
                 )
                 for match in re.finditer(pattern, text):
+                    if (
+                        canonical == "television"
+                        and _is_non_standalone_television_mention(text, match, alias)
+                    ):
+                        continue
                     if canonical == "table" and _is_non_furniture_table_reference(
                         text, match.end() - 1
                     ):

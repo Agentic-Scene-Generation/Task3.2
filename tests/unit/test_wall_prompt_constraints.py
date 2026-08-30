@@ -1,13 +1,14 @@
 import asyncio
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
+from agents.exceptions import MaxTurnsExceeded
+from scenesmith.wall_agents import stateful_wall_agent
 from scenesmith.wall_agents.prompt_constraints import (
     build_required_wall_object_constraints,
     converge_cross_stage_media_inventory,
 )
-from scenesmith.wall_agents import stateful_wall_agent
 from scenesmith.wall_agents.stateful_wall_agent import StatefulWallAgent
 
 
@@ -67,7 +68,8 @@ Designer constraints:
     )
 
     assert "No explicit wall-object obligations" in constraints
-    assert "Do not create" in constraints
+    assert "not an empty-stage signal" in constraints
+    assert "appropriate optional wall objects" in constraints
     assert "REQUIRED media display" not in constraints
 
 
@@ -126,12 +128,14 @@ def test_wall_prepass_counts_as_initial_design_for_planner_recovery(
     agent = object.__new__(StatefulWallAgent)
     agent.required_wall_object_constraints = "REQUIRED wall object: chalkboard"
     agent.scene = SimpleNamespace(
-        get_objects_by_type=lambda _: [], content_hash=lambda: "scene"
+        get_objects_by_type=lambda _: [],
+        content_hash=Mock(side_effect=["before", "after", "after"]),
     )
     agent.cfg = SimpleNamespace(
         agents=SimpleNamespace(planner_agent=SimpleNamespace(max_turns=2))
     )
     agent._planner_initial_design_tool_calls = 0
+    agent._planner_successful_designer_mutations = 0
     agent._request_initial_design_impl = AsyncMock(return_value="placed")
     agent.prompt_registry = SimpleNamespace(get_prompt=lambda **_: "start")
     agent._run_planner_workflow = AsyncMock(
@@ -145,4 +149,68 @@ def test_wall_prepass_counts_as_initial_design_for_planner_recovery(
     asyncio.run(agent._run_wall_workflow())
 
     assert agent._planner_initial_design_tool_calls == 1
+    assert agent._planner_successful_designer_mutations == 1
     agent._run_planner_workflow.assert_awaited_once()
+
+
+def test_wall_prepass_noop_does_not_suppress_planner_initial_design(
+    monkeypatch,
+) -> None:
+    agent = object.__new__(StatefulWallAgent)
+    agent.required_wall_object_constraints = "REQUIRED wall object: chalkboard"
+    agent.scene = SimpleNamespace(
+        get_objects_by_type=lambda _: [], content_hash=lambda: "unchanged"
+    )
+    agent.cfg = SimpleNamespace(
+        agents=SimpleNamespace(planner_agent=SimpleNamespace(max_turns=2))
+    )
+    agent._planner_initial_design_tool_calls = 0
+    agent._planner_successful_designer_mutations = 0
+    agent._request_initial_design_impl = AsyncMock(return_value="no changes")
+    agent.prompt_registry = SimpleNamespace(get_prompt=lambda **_: "start")
+    agent._run_planner_workflow = AsyncMock(
+        return_value=SimpleNamespace(final_output="finished")
+    )
+    agent._can_skip_final_critique = lambda _: True
+    agent._finalize_scene_and_scores = AsyncMock()
+    monkeypatch.setattr(stateful_wall_agent, "log_agent_usage", lambda **_: None)
+    monkeypatch.setattr(stateful_wall_agent, "log_agent_response", lambda **_: None)
+
+    asyncio.run(agent._run_wall_workflow())
+
+    assert agent._planner_initial_design_tool_calls == 0
+    assert agent._planner_successful_designer_mutations == 0
+    assert (
+        "already run"
+        not in agent._run_planner_workflow.await_args.kwargs["runner_input"]
+    )
+
+
+def test_wall_prepass_counts_partial_mutation_before_turn_limit(monkeypatch) -> None:
+    agent = object.__new__(StatefulWallAgent)
+    agent.required_wall_object_constraints = "REQUIRED wall object: chalkboard"
+    agent.scene = SimpleNamespace(
+        get_objects_by_type=lambda _: [],
+        content_hash=Mock(side_effect=["before", "after", "after"]),
+    )
+    agent.cfg = SimpleNamespace(
+        agents=SimpleNamespace(planner_agent=SimpleNamespace(max_turns=2))
+    )
+    agent._planner_initial_design_tool_calls = 0
+    agent._planner_successful_designer_mutations = 0
+    agent._request_initial_design_impl = AsyncMock(
+        side_effect=MaxTurnsExceeded("designer turn limit")
+    )
+    agent.prompt_registry = SimpleNamespace(get_prompt=lambda **_: "start")
+    agent._run_planner_workflow = AsyncMock(
+        return_value=SimpleNamespace(final_output="finished")
+    )
+    agent._can_skip_final_critique = lambda _: True
+    agent._finalize_scene_and_scores = AsyncMock()
+    monkeypatch.setattr(stateful_wall_agent, "log_agent_usage", lambda **_: None)
+    monkeypatch.setattr(stateful_wall_agent, "log_agent_response", lambda **_: None)
+
+    asyncio.run(agent._run_wall_workflow())
+
+    assert agent._planner_initial_design_tool_calls == 1
+    assert agent._planner_successful_designer_mutations == 1

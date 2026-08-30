@@ -60,6 +60,18 @@ Stages in order: floor_plan → furniture → wall_mounted → ceiling_mounted �
 You MUST output valid JSON matching this exact schema:
 {
   "stage": "string — current stage name",
+  "stage_policy": "auto or required_only — echo the supplied policy",
+  "optional_assets_allowed": true,
+  "required_objects": ["copy the prompt-explicit hard minimum for this stage"],
+  "optional_asset_recommendations": [
+    {
+      "name": "same-stage asset category",
+      "count": 1,
+      "priority": "low, medium, or high",
+      "rationale": "why this improves this specific room",
+      "placement_guidance": "capacity-aware placement guidance"
+    }
+  ],
   "stage_objective": "string — one clear sentence describing the goal for this stage",
   "recommended_skills": ["list of skill names from memory to apply, can be empty"],
   "constraints_for_designer": [
@@ -103,8 +115,16 @@ Guidelines:
   reinterpret an object assigned to another stage. A non-empty "Required objects
   for this stage" inventory is a minimum, not an exhaustive list: same-stage
   supporting objects may be suggested when they improve function or completeness,
-  unless the Immutable User Task explicitly forbids them. When that inventory is
-  empty, emit an observation-only brief with no object-placement instruction.
+  unless the Immutable User Task explicitly forbids them.
+- Under stage_policy=auto, always preserve every required object and independently
+  recommend 0-6 useful OPTIONAL same-stage assets based on room type, style, usable
+  capacity, openings, circulation, support surfaces, and already placed objects.
+  An empty required inventory means there is no hard minimum; it never disables
+  the stage and never makes the brief observation-only.
+- Under stage_policy=required_only, return no optional recommendations. The native
+  stage still executes and verifies the required inventory, even when it is empty.
+- Optional recommendations are soft. Never phrase them as required, never let them
+  displace a required asset, and omit them when capacity or constraints are unsafe.
 - Never turn a non-empty required inventory into an "only these objects" rule
   unless that exclusivity appears explicitly in the Immutable User Task.
 - Keep constraints_for_designer to 3-6 items max. More is not better.
@@ -695,6 +715,59 @@ def _stage_required_objects(task_spec: SceneTaskSpec, stage: str) -> list[str]:
     )
 
 
+def _brief_required_objects(task_spec: SceneTaskSpec, stage: str) -> list[str]:
+    """Return assets actually created by ``stage``, not downstream capacity."""
+    if stage == "floor_plan":
+        return list(task_spec.required_architectural_features)
+    return _stage_required_objects(task_spec, stage)
+
+
+def _apply_stage_policy(
+    brief: StageBrief,
+    context: HarnessContext,
+    *,
+    original_task: str = "",
+) -> StageBrief:
+    """Make policy semantics deterministic after the model-generated proposal."""
+    policy = context.stage_policy
+    required = _brief_required_objects(context.task_spec, context.stage)
+    inventory_closed = _task_explicitly_closes_inventory(original_task, required)
+    optional = (
+        list(brief.optional_asset_recommendations)
+        if policy == "auto" and not inventory_closed
+        else []
+    )
+    constraints = list(brief.constraints_for_designer)
+    if inventory_closed:
+        policy_rule = (
+            "The immutable user task explicitly closes this stage inventory. "
+            "Complete its required assets without optional additions, but still "
+            "execute and verify the native stage."
+        )
+    elif policy == "auto":
+        policy_rule = (
+            "Treat prompt-required assets as the non-negotiable minimum, then use "
+            "native designer judgment for useful same-stage optional assets that fit "
+            "the room type, style, usable capacity, circulation, and existing scene."
+        )
+    else:
+        policy_rule = (
+            "This required_only ablation disables optional asset proposals, but the "
+            "native stage must still execute and verify every prompt-required asset."
+        )
+    if policy_rule not in constraints:
+        constraints = [*constraints[:5], policy_rule]
+    return brief.model_copy(
+        update={
+            "stage_policy": policy,
+            "optional_assets_allowed": bool(policy == "auto" and not inventory_closed),
+            "required_objects": required,
+            "optional_asset_recommendations": optional,
+            "constraints_for_designer": constraints,
+        }
+    )
+
+
 def _format_task_spec(task_spec: SceneTaskSpec, stage: str) -> str:
     """Format task spec focusing on stage-relevant requirements."""
     lines = [
@@ -797,33 +870,6 @@ class GlobalPlanner:
         stage = context.stage
         console_logger.info(f"GlobalPlanner: generating StageBrief for stage '{stage}'")
 
-        # Empty inventories must be a true no-op.  Letting an LLM read the
-        # original prompt here can otherwise recreate a manipuland or furniture
-        # object in the wall stage, contradicting the compiled contract.
-        hard_constraints = (
-            context.relation_context.hard_constraints
-            if context.relation_context is not None
-            else []
-        )
-        if (
-            not _stage_required_objects(context.task_spec, stage)
-            and not hard_constraints
-        ):
-            console_logger.info(
-                "GlobalPlanner: %s has no TaskCompiler-owned objects; using no-op brief",
-                stage,
-            )
-            self.last_trace = {
-                "status": "no_op",
-                "stage": stage,
-                "attempts": [],
-                "hard_constraint_ids": [],
-                "hard_constraint_coverage": 1.0,
-            }
-            return _add_floor_plan_reservation_guidance(
-                self._fallback_brief(context), context
-            )
-
         user_message = self._build_user_message(
             context,
             scene_state_summary,
@@ -861,10 +907,21 @@ class GlobalPlanner:
                     functional_zones=context.task_spec.functional_zones,
                 )
                 brief = enforce_stage_brief_scope(brief, context.task_spec)
+                brief = _apply_stage_policy(
+                    brief,
+                    context,
+                    original_task=original_task,
+                )
                 brief = _add_floor_plan_reservation_guidance(brief, context)
                 self.last_trace = {
                     "status": "ok",
                     "stage": stage,
+                    "stage_policy": context.stage_policy,
+                    "required_objects": brief.required_objects,
+                    "optional_asset_recommendations": [
+                        item.model_dump(mode="json")
+                        for item in brief.optional_asset_recommendations
+                    ],
                     "attempts": attempts,
                     "hard_constraint_ids": (
                         context.relation_context.hard_constraint_ids
@@ -883,6 +940,7 @@ class GlobalPlanner:
             self.last_trace = {
                 "status": "fallback",
                 "stage": stage,
+                "stage_policy": context.stage_policy,
                 "attempts": attempts,
                 "failure_reason": failure_reason,
                 "hard_constraint_ids": (
@@ -899,7 +957,7 @@ class GlobalPlanner:
                 failure_reason,
             )
             return _add_floor_plan_reservation_guidance(
-                self._fallback_brief(context), context
+                self._fallback_brief(context, original_task=original_task), context
             )
 
         attempts: list[dict] = []
@@ -978,6 +1036,11 @@ class GlobalPlanner:
                     functional_zones=context.task_spec.functional_zones,
                 )
                 brief = enforce_stage_brief_scope(brief, context.task_spec)
+                brief = _apply_stage_policy(
+                    brief,
+                    context,
+                    original_task=original_task,
+                )
                 brief = _add_floor_plan_reservation_guidance(brief, context)
                 attempts.append(
                     {
@@ -993,6 +1056,12 @@ class GlobalPlanner:
                 self.last_trace = {
                     "status": "ok",
                     "stage": stage,
+                    "stage_policy": context.stage_policy,
+                    "required_objects": brief.required_objects,
+                    "optional_asset_recommendations": [
+                        item.model_dump(mode="json")
+                        for item in brief.optional_asset_recommendations
+                    ],
                     "attempts": attempts,
                     "hard_constraint_ids": (
                         context.relation_context.hard_constraint_ids
@@ -1051,6 +1120,7 @@ class GlobalPlanner:
         self.last_trace = {
             "status": "fallback",
             "stage": stage,
+            "stage_policy": context.stage_policy,
             "attempts": attempts,
             "failure_reason": validation_error,
             "hard_constraint_ids": (
@@ -1066,7 +1136,7 @@ class GlobalPlanner:
             validation_error,
         )
         return _add_floor_plan_reservation_guidance(
-            self._fallback_brief(context), context
+            self._fallback_brief(context, original_task=original_task), context
         )
 
     def _build_user_message(
@@ -1083,6 +1153,7 @@ class GlobalPlanner:
         parts = [
             f"## Current Stage: {context.stage}",
             f"Stage description: {stage_desc}",
+            f"Stage execution policy: {context.stage_policy}",
             "",
             "## Task Specification",
             task_spec_text,
@@ -1154,7 +1225,12 @@ class GlobalPlanner:
 
         return "\n".join(parts)
 
-    def _fallback_brief(self, context: HarnessContext) -> StageBrief:
+    def _fallback_brief(
+        self,
+        context: HarnessContext,
+        *,
+        original_task: str = "",
+    ) -> StageBrief:
         """Minimal safe StageBrief used when the model call fails."""
         stage = context.stage
         required = _stage_required_objects(context.task_spec, stage)
@@ -1173,35 +1249,46 @@ class GlobalPlanner:
             )
             constraints.append(f"Follow {context.task_spec.style} aesthetic style")
             constraints.append("Maintain clear walking paths and avoid overcrowding")
+        elif context.stage_policy == "auto":
+            constraints.append(
+                "No asset is explicitly required for this stage. Still execute the "
+                "native stage and autonomously add useful same-stage assets when they "
+                "fit the room type, style, usable capacity, circulation, support "
+                "surfaces, and existing scene."
+            )
         else:
             constraints.append(
-                "No objects are allocated to this stage; do not create, move, or "
-                "reinterpret objects owned by another stage."
+                "No asset is explicitly required and optional planning is disabled by "
+                "required_only. Still execute the native stage and preserve stage "
+                "ownership."
             )
 
-        return enforce_stage_brief_scope(
+        brief = enforce_stage_brief_scope(
             StageBrief(
                 stage=stage,
-                stage_objective=(
-                    f"Complete the {stage} stage for a {context.task_spec.room_type}"
-                    if required
-                    else f"Preserve the existing scene during the empty {stage} stage"
-                ),
+                stage_policy=context.stage_policy,
+                required_objects=_brief_required_objects(context.task_spec, stage),
+                stage_objective=f"Complete the {stage} stage for a {context.task_spec.room_type}",
                 recommended_skills=[],
                 constraints_for_designer=constraints,
                 checks_for_critic=[
                     (
                         "Verify all required objects are present"
                         if required
-                        else "Verify no cross-stage object was created or moved"
+                        else "Verify stage-appropriate completeness and ownership"
                     ),
                     (
                         "Check for collisions"
                         if required
-                        else "Preserve existing geometry"
+                        else "Check optional additions for capacity and collisions"
                     ),
                 ],
                 failure_patterns_to_avoid=[],
             ),
             context.task_spec,
+        )
+        return _apply_stage_policy(
+            brief,
+            context,
+            original_task=original_task,
         )

@@ -36,6 +36,7 @@ from scenesmith.scenebenchmark_critic.api import evaluate_room_scene
 from scenesmith.scenebenchmark_critic.config import CriticConfig, critic_config_from_any
 from scenesmith.scenebenchmark_critic.opening_geometry import opening_physical_bounds
 from scenesmith.scenebenchmark_critic.relation_registry import (
+    RELATION_REGISTRY,
     relation_spec,
     repair_relation_types,
 )
@@ -1832,6 +1833,12 @@ def _repair_targets(scene: RoomScene, payload: dict[str, Any]) -> list[_RepairTa
             "intent_constraint"
         ) or {}
         compiled_relation = str(intent_constraint.get("relation") or "")
+        # Coverage diagnostics use extension relation names (for example
+        # ``coverage_functional_zone``) that intentionally do not belong to
+        # the public relation registry.  They are report-only evidence and
+        # must be filtered before strict registry lookup below.
+        if compiled_relation and compiled_relation not in RELATION_REGISTRY:
+            continue
         if (
             compiled_relation
             and relation_spec(compiled_relation).repair_strategy is None

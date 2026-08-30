@@ -98,6 +98,16 @@ _SCENE_SUCCESS_MARKER = "_SUCCESS"
 _SCENE_DEGRADED_MARKER = "_DEGRADED"
 _FURNITURE_RENDER_RESUME_MODES = frozenset({"initial", "latest"})
 _QUALITY_FAILURE_POLICIES = frozenset({"strict", "degraded"})
+_RUNTIME_FAILURE_POLICIES = frozenset({"strict", "checkpoint_degraded"})
+_TRANSIENT_RUNTIME_ERROR_TYPES = frozenset(
+    {
+        "APITimeoutError",
+        "Timeout",
+        "TimeoutError",
+        "APIConnectionError",
+        "ConnectionError",
+    }
+)
 
 
 class SceneExpertStageCommitError(RuntimeError):
@@ -155,6 +165,68 @@ def _quality_failure_policy(cfg_dict: dict[str, Any]) -> str:
     return value
 
 
+def _runtime_failure_policy(cfg_dict: dict[str, Any]) -> str:
+    """Return the independent policy for checkpoint-backed runtime salvage."""
+    value = (
+        str((cfg_dict.get("experiment") or {}).get("runtime_failure_policy", "strict"))
+        .strip()
+        .lower()
+    )
+    if value not in _RUNTIME_FAILURE_POLICIES:
+        allowed = ", ".join(sorted(_RUNTIME_FAILURE_POLICIES))
+        raise ValueError(
+            f"experiment.runtime_failure_policy must be one of: {allowed}; got {value!r}"
+        )
+    return value
+
+
+def _checkpoint_degraded_continuation(
+    *, scene: RoomScene, stage: str, cfg_dict: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Validate a persisted transient-failure checkpoint before continuing."""
+    if _runtime_failure_policy(cfg_dict) != "checkpoint_degraded":
+        return None
+    metadata = getattr(scene, "metadata", None)
+    failure = (
+        metadata.get("scenesmith_runtime_failure")
+        if isinstance(metadata, dict)
+        else None
+    )
+    if not isinstance(failure, dict) or failure.get("recovered"):
+        return None
+    if str(failure.get("error_type") or "") not in _TRANSIENT_RUNTIME_ERROR_TYPES:
+        return None
+    checkpoint = failure.get("checkpoint")
+    if not isinstance(checkpoint, dict) or checkpoint.get("validation") != "passed":
+        return None
+    if str(checkpoint.get("scene_hash") or "") != str(scene.content_hash()):
+        return None
+    path = Path(str(checkpoint.get("path") or ""))
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(state, dict) or not state.get("objects"):
+        return None
+    provenance = {
+        "stage": stage,
+        "continuation_policy": "checkpoint_degraded",
+        "checkpoint": dict(checkpoint),
+        "failure": dict(failure),
+    }
+    provenance["failure"]["recovered"] = True
+    metadata["scenesmith_runtime_failure"] = provenance["failure"]
+    metadata["scenesmith_runtime_degraded"] = provenance
+    return provenance
+
+
+def _record_runtime_failure_continuation(
+    hooks: "SceneExpertHookRunner | None", provenance: dict[str, Any]
+) -> None:
+    if hooks is not None:
+        hooks.record_runtime_failure_continuation(provenance)
+
+
 def _configure_stage_quality_gates(cfg_dict: dict[str, Any]) -> str:
     """Let SceneExpert own bounded recovery when degraded output is requested."""
     policy = _quality_failure_policy(cfg_dict)
@@ -174,6 +246,7 @@ def _write_scene_completion(
     prompt: str,
     attempt: int,
     degraded: bool,
+    degraded_provenance: list[dict[str, Any]] | None = None,
 ) -> None:
     """Persist a truthful terminal status and exactly one completion marker."""
     scene_dir = output_dir / f"scene_{scene_id:03d}"
@@ -194,20 +267,17 @@ def _write_scene_completion(
         prompt=prompt,
         status=status,
         attempt=attempt,
+        provenance={"runtime_degraded": degraded_provenance or []},
     )
 
 
 def _should_skip_noop_scene_expert_stage(
     hooks: "SceneExpertHookRunner | None", stage: str
 ) -> bool:
-    """Return whether SceneExpert compiled the current stage as a true no-op.
-
-    Check only after ``pre_stage``.  The hook has then projected the
-    stage-local hard constraints and generated the authoritative planner trace.
-    The caller still writes its regular checkpoint and invokes ``post_stage`` so
-    retries, resume, and verification retain their normal semantics.
-    """
-    return bool(hooks is not None and hooks.should_skip_stage_agent(stage))
+    """Legacy compatibility shim: native SceneSmith stages are never skipped."""
+    if hooks is not None:
+        hooks.should_skip_stage_agent(stage)
+    return False
 
 
 def _is_targeted_manipuland_replay(
@@ -315,6 +385,7 @@ def _write_scene_status(
     status: str,
     attempt: int,
     error: str | None = None,
+    provenance: dict[str, Any] | None = None,
 ) -> None:
     """Atomically persist the lifecycle state of one scene task."""
     scene_dir = output_dir / f"scene_{scene_id:03d}"
@@ -330,6 +401,8 @@ def _write_scene_status(
     }
     if error:
         payload["error"] = error
+    if provenance:
+        payload["provenance"] = provenance
     temporary_path = status_path.with_suffix(".json.tmp")
     temporary_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -1464,6 +1537,7 @@ def _generate_room(
             start_time = time.time()
             if scene_expert_hooks:
                 scene_expert_hooks.pre_stage("furniture", scene)
+                scene_expert_hooks.mark_stage_agent_invoked("furniture")
             furniture_agent = BaseExperiment.build_furniture_agent(
                 cfg_dict=cfg_dict,
                 compatible_agents=(
@@ -1474,13 +1548,27 @@ def _generate_room(
                 render_gpu_id=render_gpu_id,
             )
             try:
-                asyncio.run(
-                    furniture_agent.add_furniture(
-                        scene=scene,
-                        review_existing=review_existing,
-                        scene_expert_retry_attempt=scene_expert_retry_attempt,
+                try:
+                    asyncio.run(
+                        furniture_agent.add_furniture(
+                            scene=scene,
+                            review_existing=review_existing,
+                            scene_expert_retry_attempt=scene_expert_retry_attempt,
+                        )
                     )
-                )
+                except Exception:
+                    continuation = _checkpoint_degraded_continuation(
+                        scene=scene, stage="furniture", cfg_dict=cfg_dict
+                    )
+                    if continuation is None:
+                        raise
+                    console_logger.warning(
+                        "Continuing furniture stage from validated runtime checkpoint: %s",
+                        continuation["failure"].get("error_type"),
+                    )
+                    _record_runtime_failure_continuation(
+                        scene_expert_hooks, continuation
+                    )
                 end_time = time.time()
                 console_logger.info(
                     f"Furniture added to room {room_id} in "
@@ -1638,26 +1726,36 @@ def _generate_room(
 
             if scene_expert_hooks:
                 scene_expert_hooks.pre_stage("wall_mounted", scene)
-            if _should_skip_noop_scene_expert_stage(scene_expert_hooks, "wall_mounted"):
-                console_logger.info(
-                    "Skipping wall-mounted agent: SceneExpert compiled an empty stage"
-                )
-            else:
-                wall_agent = BaseExperiment.build_wall_agent(
-                    cfg_dict=cfg_dict,
-                    compatible_agents=IndoorSceneGenerationExperiment.compatible_wall_agents,
-                    logger=logger,
-                    house_layout=house_layout,
-                    ceiling_height=scene.room_geometry.wall_height,
-                    wall_thickness=scene.room_geometry.wall_thickness,
-                    render_gpu_id=render_gpu_id,
-                )
+                scene_expert_hooks.mark_stage_agent_invoked("wall_mounted")
+            wall_agent = BaseExperiment.build_wall_agent(
+                cfg_dict=cfg_dict,
+                compatible_agents=IndoorSceneGenerationExperiment.compatible_wall_agents,
+                logger=logger,
+                house_layout=house_layout,
+                ceiling_height=scene.room_geometry.wall_height,
+                wall_thickness=scene.room_geometry.wall_thickness,
+                render_gpu_id=render_gpu_id,
+            )
+            try:
                 try:
                     asyncio.run(wall_agent.add_wall_objects(scene=scene))
-                    _apply_final_wall_functional_guards(scene=scene, cfg_dict=cfg_dict)
-                finally:
-                    # Always cleanup server subprocesses.
-                    wall_agent.cleanup()
+                except Exception:
+                    continuation = _checkpoint_degraded_continuation(
+                        scene=scene, stage="wall_mounted", cfg_dict=cfg_dict
+                    )
+                    if continuation is None:
+                        raise
+                    console_logger.warning(
+                        "Continuing wall stage from validated runtime checkpoint: %s",
+                        continuation["failure"].get("error_type"),
+                    )
+                    _record_runtime_failure_continuation(
+                        scene_expert_hooks, continuation
+                    )
+                _apply_final_wall_functional_guards(scene=scene, cfg_dict=cfg_dict)
+            finally:
+                # Always cleanup server subprocesses.
+                wall_agent.cleanup()
             end_time = time.time()
             console_logger.info(
                 f"Wall objects added to room {room_id} in "
@@ -1719,27 +1817,35 @@ def _generate_room(
 
             if scene_expert_hooks:
                 scene_expert_hooks.pre_stage("ceiling_mounted", scene)
-            if _should_skip_noop_scene_expert_stage(
-                scene_expert_hooks, "ceiling_mounted"
-            ):
-                console_logger.info(
-                    "Skipping ceiling-mounted agent: SceneExpert compiled an empty stage"
-                )
-            else:
-                ceiling_agent = BaseExperiment.build_ceiling_agent(
-                    cfg_dict=cfg_dict,
-                    compatible_agents=(
-                        IndoorSceneGenerationExperiment.compatible_ceiling_agents
-                    ),
-                    logger=logger,
-                    ceiling_height=room_geometry.wall_height,
-                    render_gpu_id=render_gpu_id,
-                )
+                scene_expert_hooks.mark_stage_agent_invoked("ceiling_mounted")
+            ceiling_agent = BaseExperiment.build_ceiling_agent(
+                cfg_dict=cfg_dict,
+                compatible_agents=(
+                    IndoorSceneGenerationExperiment.compatible_ceiling_agents
+                ),
+                logger=logger,
+                ceiling_height=room_geometry.wall_height,
+                render_gpu_id=render_gpu_id,
+            )
+            try:
                 try:
                     asyncio.run(ceiling_agent.add_ceiling_objects(scene=scene))
-                finally:
-                    # Always cleanup server subprocesses.
-                    ceiling_agent.cleanup()
+                except Exception:
+                    continuation = _checkpoint_degraded_continuation(
+                        scene=scene, stage="ceiling_mounted", cfg_dict=cfg_dict
+                    )
+                    if continuation is None:
+                        raise
+                    console_logger.warning(
+                        "Continuing ceiling stage from validated runtime checkpoint: %s",
+                        continuation["failure"].get("error_type"),
+                    )
+                    _record_runtime_failure_continuation(
+                        scene_expert_hooks, continuation
+                    )
+            finally:
+                # Always cleanup server subprocesses.
+                ceiling_agent.cleanup()
             end_time = time.time()
             console_logger.info(
                 f"Ceiling objects added to room {room_id} in "
@@ -1804,20 +1910,28 @@ def _generate_room(
         start_time = time.time()
         if scene_expert_hooks:
             scene_expert_hooks.pre_stage("manipuland", scene)
-        if _should_skip_noop_scene_expert_stage(scene_expert_hooks, "manipuland"):
-            console_logger.info(
-                "Skipping manipuland agent: SceneExpert compiled an empty stage"
-            )
-        else:
-            manipuland_agent = BaseExperiment.build_manipuland_agent(
-                cfg_dict=cfg_dict,
-                compatible_agents=(
-                    IndoorSceneGenerationExperiment.compatible_manipuland_agents
-                ),
-                logger=logger,
-                render_gpu_id=render_gpu_id,
-            )
+            scene_expert_hooks.mark_stage_agent_invoked("manipuland")
+        manipuland_agent = BaseExperiment.build_manipuland_agent(
+            cfg_dict=cfg_dict,
+            compatible_agents=(
+                IndoorSceneGenerationExperiment.compatible_manipuland_agents
+            ),
+            logger=logger,
+            render_gpu_id=render_gpu_id,
+        )
+        try:
             _add_manipulands_with_cleanup(manipuland_agent, scene)
+        except Exception:
+            continuation = _checkpoint_degraded_continuation(
+                scene=scene, stage="manipuland", cfg_dict=cfg_dict
+            )
+            if continuation is None:
+                raise
+            console_logger.warning(
+                "Continuing manipuland stage from validated runtime checkpoint: %s",
+                continuation["failure"].get("error_type"),
+            )
+            _record_runtime_failure_continuation(scene_expert_hooks, continuation)
         end_time = time.time()
         console_logger.info(
             f"Manipulands added to room {room_id} in "
@@ -2773,6 +2887,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         logger = ConsoleLogger(output_dir=scene_dir)
         scene_expert_hooks = None
         quality_degraded = False
+        runtime_degraded_provenance: list[dict[str, Any]] = []
 
         # Get pipeline stage configuration.
         pipeline_cfg = cfg_dict["experiment"]["pipeline"]
@@ -2871,6 +2986,8 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
 
                     # Stage 1: Floor plan generation (or load from saved state).
                     if start_stage == "floor_plan":
+                        if scene_expert_hooks:
+                            scene_expert_hooks.mark_stage_agent_invoked("floor_plan")
                         # Run floor plan in subprocess to isolate fork-unsafe SDK
                         # state (SQLiteSession locks, tracing threads). The subprocess
                         # saves results to disk and exits cleanly before we fork room
@@ -3032,6 +3149,23 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                             scene_expert_hooks=scene_expert_hooks,
                         )
 
+                    runtime_degraded_provenance = [
+                        dict(provenance)
+                        for room in rooms.values()
+                        for provenance in [
+                            (
+                                getattr(room, "metadata", {}).get(
+                                    "scenesmith_runtime_degraded"
+                                )
+                                if isinstance(getattr(room, "metadata", None), dict)
+                                else None
+                            )
+                        ]
+                        if isinstance(provenance, dict)
+                    ]
+                    if runtime_degraded_provenance:
+                        quality_degraded = True
+
                     # Build HouseScene from generated rooms.
                     house_scene = HouseScene(layout=house_layout, rooms=rooms)
 
@@ -3136,6 +3270,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             prompt=prompt,
             attempt=attempt,
             degraded=quality_degraded,
+            degraded_provenance=runtime_degraded_provenance,
         )
 
     def _run_serial_generation(

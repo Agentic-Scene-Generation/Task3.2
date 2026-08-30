@@ -30,6 +30,8 @@ _CATEGORY_ALIASES = {
     "computer_display": "monitor",
     "computer_monitor": "monitor",
     "display_monitor": "monitor",
+    "display_shelves": "display_shelf",
+    "display_shelving": "display_shelf",
     "water_cooler": "water_dispenser",
     "drinking_water_dispenser": "water_dispenser",
     "storage_cupboard": "storage_cabinet",
@@ -64,6 +66,17 @@ _CATEGORY_ALIASES = {
     "tv": "television",
     "tv_display": "television",
     "television_display": "television",
+    "wall_lamp": "wall_light",
+    "wall_sconce": "wall_light",
+    "sconce": "wall_light",
+    "wall_lights": "wall_light",
+    "bedside_clock": "alarm_clock",
+    "alarm_clocks": "alarm_clock",
+    "cup_of_tea": "cup",
+    "tea_cup": "cup",
+    "trays": "tray",
+    "recliners": "recliner",
+    "wood_sculpture": "sculpture",
     "table_settings": "table_setting",
     "place_settings": "table_setting",
     "place_setting": "table_setting",
@@ -123,6 +136,14 @@ OBJECT_CATEGORY_PHRASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("filing_cabinet", ("filing cabinet", "file cabinet")),
     ("storage_cabinet", ("storage cabinet", "storage cupboard")),
     (
+        "display_cabinet",
+        ("display cabinet", "display cupboard", "display case"),
+    ),
+    (
+        "display_shelf",
+        ("display shelf", "display shelves", "display shelving"),
+    ),
+    (
         "water_dispenser",
         ("water dispenser", "water cooler", "drinking water dispenser"),
     ),
@@ -139,7 +160,13 @@ OBJECT_CATEGORY_PHRASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("television", ("television", "tv")),
     (
         "monitor",
-        ("computer monitor", "computer display", "monitor", "display", "screen"),
+        (
+            "computer monitor",
+            "computer display",
+            "display monitor",
+            "monitor",
+            "screen",
+        ),
     ),
     ("brochure_holder", ("brochure holder", "leaflet holder", "brochure stand")),
     ("printer", ("printer",)),
@@ -156,9 +183,21 @@ OBJECT_CATEGORY_PHRASES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     ("speaker", ("speaker", "loudspeaker")),
     ("table_lamp", ("table lamp", "desk lamp")),
+    ("wall_light", ("wall light", "wall lamp", "wall sconce", "sconce")),
+    ("tray", ("tray", "serving tray", "cafeteria tray")),
+    ("picture_frame", ("picture frame", "frame portrait", "framed portrait")),
+    ("record", ("vinyl record", "record")),
+    ("pillow", ("throw pillow", "bed pillow", "pillow")),
+    ("plush_toy", ("plush toy", "stuffed animal", "stuffed toy")),
+    # Keep specialized clock phrases ahead of the generic family.  The
+    # canonical category map and prompt parser must agree that an alarm clock
+    # is still a clock family member without losing its typed identity.
+    ("alarm_clock", ("alarm clock", "bedside clock")),
+    ("clock", ("clock", "mantel clock")),
+    ("recliner", ("recliner", "reclining chair")),
+    ("sculpture", ("sculpture", "statuette", "statue")),
     ("vase", ("vase",)),
     ("flower", ("flower", "flowers")),
-    ("alarm_clock", ("alarm clock",)),
     ("plate", ("plate",)),
     ("cutlery", ("cutlery", "fork", "knife", "spoon")),
     ("glass_bowl", ("glass bowl",)),
@@ -192,6 +231,21 @@ _EQUIVALENT_CATEGORY_GROUPS = (
     frozenset({"table_lamp", "desk_lamp", "reading_lamp", "bedside_lamp"}),
     frozenset({"wastebasket", "trash_can", "trash_bin"}),
 )
+
+# Directional taxonomy edges are deliberately explicit.  They let a concrete
+# generated label satisfy a requested family without treating arbitrary shared
+# words in IDs or descriptions as semantic evidence.
+_PARENT_CATEGORY_EDGES = {
+    "frame_portrait": "picture_frame",
+    "framed_portrait": "picture_frame",
+    "vinyl_record": "record",
+    "record_album": "record",
+    "throw_pillow": "pillow",
+    "bed_pillow": "pillow",
+    "decorative_pillow": "pillow",
+    "plush_bear": "plush_toy",
+    "stuffed_bear": "plush_toy",
+}
 
 # These objects normally stand on the floor unless an explicit support relation
 # says otherwise.  The set is intentionally semantic rather than prompt- or
@@ -323,6 +377,60 @@ def categories_are_equivalent(first: Any, second: Any) -> bool:
         first_category in group and second_category in group
         for group in _EQUIVALENT_CATEGORY_GROUPS
     )
+
+
+def semantic_category_match(requested: Any, observed: Any) -> dict[str, Any]:
+    """Match a category through exact or declared taxonomy evidence.
+
+    The returned provenance is intentionally structured so inventory counting,
+    forbidden inventory, and relation binding can explain why an object did or
+    did not satisfy a selector.  This is not a fuzzy text matcher.
+    """
+    requested_category = canonical_object_category(requested)
+    observed_raw = _normalize_category_token(observed)
+    observed_category = canonical_object_category(observed_raw)
+    result = {
+        "requested_category": requested_category,
+        "observed_category": observed_raw or observed_category,
+        "matched": False,
+        "match_kind": "none",
+        "match_path": [],
+    }
+    if not requested_category or not observed_raw:
+        return result
+    if observed_raw == requested_category:
+        result.update(
+            matched=True,
+            match_kind="exact",
+            match_path=[observed_raw, requested_category],
+        )
+        return result
+    parent = _PARENT_CATEGORY_EDGES.get(observed_raw)
+    if parent == requested_category:
+        result.update(
+            matched=True,
+            match_kind="taxonomy_parent",
+            match_path=[observed_raw, parent],
+        )
+        return result
+    if observed_category == requested_category:
+        result.update(
+            matched=True,
+            match_kind="exact",
+            match_path=[observed_raw, requested_category],
+        )
+        return result
+    if categories_are_equivalent(requested_category, observed_category):
+        result.update(
+            matched=True,
+            match_kind="taxonomy_equivalent",
+            match_path=[observed_raw, observed_category, requested_category],
+        )
+    return result
+
+
+def _normalize_category_token(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
 
 
 def generation_owner(

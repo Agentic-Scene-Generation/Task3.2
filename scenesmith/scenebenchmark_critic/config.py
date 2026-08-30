@@ -60,6 +60,7 @@ DEFAULT_METRICS = (
     "functional_dependency",
     "spatial_accessibility",
     "interaction_clearance",
+    "physics_collision",
     "visual_clearance",
 )
 

@@ -19,10 +19,15 @@ from scenesmith.scenebenchmark_critic.core.geometry import load_geometry
 from scenesmith.scenebenchmark_critic.metrics.registry import get_metric_plugins
 from scenesmith.scenebenchmark_critic.metrics.spatial_accessibility.companions import (
     attach_expected_access_companions,
+    attach_expected_clearance_companions,
 )
 from scenesmith.scenebenchmark_critic.intent_contract import (
     apply_contract_execution_states,
     augment_contract_checks,
+)
+from scenesmith.scenebenchmark_critic.result_identity import (
+    deduplicate_checks,
+    deduplicate_results,
 )
 
 
@@ -43,7 +48,7 @@ def build_all_checks(
             if check_id and check_id not in seen:
                 checks.append(check)
                 seen.add(check_id)
-    return checks
+    return deduplicate_checks(checks)
 
 
 def prepare_case_pack(
@@ -63,8 +68,11 @@ def prepare_case_pack(
                 progress=lambda _message: None,
             )
     store = load_geometry(case_pack)
-    if store is not None and "spatial_accessibility" in critic_config.metrics:
-        attach_expected_access_companions(case_pack, store.objects)
+    if store is not None:
+        if "spatial_accessibility" in critic_config.metrics:
+            attach_expected_access_companions(case_pack, store.objects)
+        if "interaction_clearance" in critic_config.metrics:
+            attach_expected_clearance_companions(case_pack, store.objects)
     return critic_config, plugins
 
 
@@ -119,7 +127,9 @@ def run_case_pack_checks(
                         f"{normalized.get('metric')!r}"
                     )
                 results.append(normalized)
-                extension_case_pack["_prior_extension_results"].append(normalized)
+                extension_case_pack["_prior_extension_results"] = deduplicate_results(
+                    [*extension_case_pack["_prior_extension_results"], normalized]
+                )
             extension_times[plugin.name] = extension_times.get(plugin.name, 0.0) + (
                 time.perf_counter() - extension_start
             )
@@ -133,7 +143,7 @@ def run_case_pack_checks(
         timing["run_case_pack_checks_sec"] = round(
             time.perf_counter() - timing_start, 6
         )
-    return apply_contract_execution_states(case_pack, results)
+    return deduplicate_results(apply_contract_execution_states(case_pack, results))
 
 
 def evaluate_case_pack(

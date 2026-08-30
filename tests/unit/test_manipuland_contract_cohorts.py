@@ -127,7 +127,7 @@ def test_open_vocabulary_small_objects_generate_contract_targets() -> None:
     assert {
         (cohort.category, cohort.target_id, cohort.required_count) for cohort in cohorts
     } == {
-        ("bedside_clock", "nightstand_0", 1),
+        ("alarm_clock", "nightstand_0", 1),
         ("decorative_candle", "nightstand_0", 1),
         ("novel", "bookshelf_0", 3),
     }

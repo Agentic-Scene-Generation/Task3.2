@@ -477,12 +477,12 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
                 console_logger.info(
                     "Explicit wall requirement detected; forcing initial wall design"
                 )
+                scene_hash_before = self._planner_scene_hash()
+                mutation_count_before = getattr(
+                    self, "_planner_successful_designer_mutations", 0
+                )
                 try:
                     await self._request_initial_design_impl()
-                    required_prepass_ran = True
-                    self._planner_initial_design_tool_calls = max(
-                        self._planner_initial_design_tool_calls, 1
-                    )
                 except MaxTurnsExceeded:
                     # Tool side effects already committed by the designer are useful.
                     # Let the planner inspect and repair the partial result instead of
@@ -491,13 +491,17 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
                         "Required wall design pre-pass reached its turn limit; "
                         "continuing with planner refinement"
                     )
-                    required_prepass_ran = bool(
-                        self.scene.get_objects_by_type(ObjectType.WALL_MOUNTED)
+                finally:
+                    self._record_successful_designer_mutation(scene_hash_before)
+
+                required_prepass_ran = (
+                    getattr(self, "_planner_successful_designer_mutations", 0)
+                    > mutation_count_before
+                )
+                if required_prepass_ran:
+                    self._planner_initial_design_tool_calls = max(
+                        self._planner_initial_design_tool_calls, 1
                     )
-                    if required_prepass_ran:
-                        self._planner_initial_design_tool_calls = max(
-                            self._planner_initial_design_tool_calls, 1
-                        )
 
         # Get runner instruction for planner to start workflow.
         planner_runner_prompt = WallAgentPrompts.STATEFUL_PLANNER_RUNNER_INSTRUCTION
