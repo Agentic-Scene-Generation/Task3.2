@@ -468,6 +468,8 @@ class StageExecutionEvidence(BaseModel):
     final_injection_hash: str = ""
     experiment_signature: str = ""
     degraded: bool = False
+    continuation_policy: str = ""
+    runtime_failure: dict[str, Any] = Field(default_factory=dict)
 
 
 class StageTraceEntry(BaseModel):

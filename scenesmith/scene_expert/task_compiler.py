@@ -27,7 +27,7 @@ from scenesmith.scenebenchmark_critic.object_taxonomy import (
     generation_owner,
     is_structural_anchor,
 )
-from scenesmith.utils.llm_json import parse_llm_json_object
+from scenesmith.utils.llm_json import json_response_format, parse_llm_json_object
 
 console_logger = logging.getLogger(__name__)
 
@@ -100,6 +100,36 @@ Example output:
   "aesthetic_constraints": ["balanced furniture placement", "clear walking paths"],
 }
 """
+
+
+_TASK_COMPILER_WIRE_FIELDS = (
+    "room_type",
+    "style",
+    "required_large_objects",
+    "required_wall_objects",
+    "required_ceiling_objects",
+    "required_small_objects",
+    "functional_zones",
+    "interaction_constraints",
+    "aesthetic_constraints",
+)
+
+
+def _task_compiler_wire_schema() -> dict[str, Any]:
+    """Return only the fields the model is responsible for generating."""
+    full = SceneTaskSpec.model_json_schema()
+    properties = full.get("properties") or {}
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            field: properties[field]
+            for field in _TASK_COMPILER_WIRE_FIELDS
+            if field in properties
+        },
+        "required": list(_TASK_COMPILER_WIRE_FIELDS),
+    }
+
 
 _ROOM_TYPE_KEYWORDS: dict[str, list[str]] = {
     "bedroom": ["bedroom", "bed", "nightstand", "wardrobe", "sleeping"],
@@ -910,14 +940,11 @@ class TaskCompiler:
                     messages=messages,
                     temperature=self._temperature,
                     max_tokens=self._max_tokens,
-                    response_format={
-                        "type": "json_schema",
-                        "json_schema": {
-                            "name": "scene_task_spec",
-                            "strict": True,
-                            "schema": SceneTaskSpec.model_json_schema(),
-                        },
-                    },
+                    response_format=json_response_format(
+                        model=self._model,
+                        name="scene_task_spec",
+                        schema=_task_compiler_wire_schema(),
+                    ),
                     extra_body=chat_template_kwargs_from_effort(
                         "none", model=self._model
                     ),

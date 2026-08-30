@@ -30,6 +30,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
+from scenesmith.scenebenchmark_critic.core.geometry import is_small_object
+
 console_logger = logging.getLogger(__name__)
 
 _DATA_DIR = Path(__file__).resolve().parent / "data"
@@ -681,6 +683,22 @@ def _is_support_owner_intrusion(
     )
 
 
+def _is_surface_supported_small_object_intrusion(
+    subject_id: str,
+    blocker: dict[str, Any] | None,
+    surface_owner_ids: dict[str, str],
+) -> bool:
+    """Ignore a small manipuland carried by the clearance subject itself."""
+    if blocker is None or str(blocker.get("object_type") or "").lower() != "manipuland":
+        return False
+    surface_id = _parent_surface_id(blocker)
+    return bool(
+        surface_id
+        and surface_owner_ids.get(surface_id) == subject_id
+        and is_small_object(blocker)
+    )
+
+
 def _is_intended_seating_supported_object_intrusion(
     subject: dict[str, Any],
     subject_record: dict[str, Any],
@@ -788,6 +806,11 @@ def build_clearance_checks(objects: dict[str, dict[str, Any]]) -> list[dict[str,
             )
             and not _is_support_owner_intrusion(
                 obj,
+                objects.get(str(hit.get("object_id") or "")),
+                surface_owner_ids,
+            )
+            and not _is_surface_supported_small_object_intrusion(
+                str(oid),
                 objects.get(str(hit.get("object_id") or "")),
                 surface_owner_ids,
             )

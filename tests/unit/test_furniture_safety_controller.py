@@ -239,6 +239,64 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertEqual(controller.required_counts["armchair"], 2)
         self.assertEqual(controller.required_counts["floor_lamp"], 1)
 
+    def test_structured_identity_satisfies_specific_contract_categories(self) -> None:
+        self.assertTrue(
+            furniture_object_category_matches(
+                "fridge_0",
+                "fridge",
+                "Stainless steel French-door refrigerator, tall",
+                "fridge",
+            )
+        )
+        self.assertTrue(
+            furniture_object_category_matches(
+                "pantry_shelf_0",
+                "pantry_shelf",
+                "Sleek slim pantry shelving unit",
+                "pantry_shelf",
+            )
+        )
+        self.assertTrue(
+            furniture_object_category_matches(
+                "bar_table_0",
+                "bar_table",
+                "Large modern bar table",
+                "bar_table",
+            )
+        )
+
+    def test_display_wording_and_negated_tv_do_not_require_television(self) -> None:
+        for prompt in (
+            "A living room with a display shelf and a display cabinet.",
+            "A living room with a display zone.",
+            "A living room with no TV and a sofa.",
+            "A living room without television and a sofa.",
+            "A living room with no TV or television.",
+            "A living room without a TV or television.",
+            "A living room with no wall-mounted TV and a sofa.",
+            "A living room with a sofa; do not include a television.",
+            "A living room with a TV stand and a sofa.",
+        ):
+            controller = FurnitureSafetyController({"enabled": True})
+            controller.reset_for_scene(prompt)
+
+            self.assertNotIn("television", controller.required_terms, prompt)
+            self.assertNotIn("television", controller.required_counts, prompt)
+
+    def test_explicit_tv_or_television_still_requires_display_inventory(self) -> None:
+        for prompt in (
+            "A living room with a TV and a sofa.",
+            "A living room with one television and a sofa.",
+            "A media room with not only a TV but also a sofa.",
+            "A living room with no sofa and a TV.",
+            "A living room with a TV stand and a separate television.",
+        ):
+            controller = FurnitureSafetyController({"enabled": True})
+            controller.reset_for_scene(prompt)
+
+            self.assertIn("television", controller.required_terms, prompt)
+            self.assertEqual(controller.required_counts["television"], 1)
+
     def test_sofa_chair_is_one_atomic_inventory_category(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
         controller.reset_for_scene("A lounge with four sofa chairs around a rug.")

@@ -360,6 +360,7 @@ def test_planner_retries_when_first_turn_has_no_workflow_tool_call() -> None:
     agent.planner = SimpleNamespace(instructions="planner instructions")
     agent.planner_session = object()
     agent._planner_initial_design_tool_calls = 0
+    agent._planner_successful_designer_mutations = 0
     agent._planner_budget_exhausted = False
     agent._reasoning_persistence_context_for_session = lambda _session: nullcontext()
     agent._create_run_config = Mock(return_value=None)
@@ -372,8 +373,9 @@ def test_planner_retries_when_first_turn_has_no_workflow_tool_call() -> None:
         calls.append(input)
         if len(calls) == 2:
             # Simulate request_initial_design being executed by the recovered
-            # planner run.
+            # planner run and committing scene work.
             agent._planner_initial_design_tool_calls = 1
+            agent._planner_successful_designer_mutations = 1
         return SimpleNamespace(final_output="completed")
 
     with patch.object(Runner, "run", new=AsyncMock(side_effect=fake_run)):
@@ -387,6 +389,69 @@ def test_planner_retries_when_first_turn_has_no_workflow_tool_call() -> None:
     assert result.final_output == "completed"
     assert len(calls) == 2
     assert "request_initial_design()" in calls[1]
+
+
+def test_planner_recovers_when_initial_design_call_makes_no_scene_change() -> None:
+    agent = object.__new__(StatefulManipulandAgent)
+    agent.planner = SimpleNamespace(instructions="planner instructions")
+    agent.planner_session = object()
+    agent._planner_initial_design_tool_calls = 0
+    agent._planner_successful_designer_mutations = 0
+    agent._planner_budget_exhausted = False
+    agent._reasoning_persistence_context_for_session = lambda _session: nullcontext()
+    agent._create_run_config = Mock(return_value=None)
+    agent._record_module_timing = Mock()
+    agent._record_llm_call_debug = Mock()
+
+    calls = []
+
+    async def fake_run(*, input, **_kwargs):
+        calls.append(input)
+        if len(calls) == 1:
+            agent._planner_initial_design_tool_calls = 1
+        else:
+            agent._planner_successful_designer_mutations = 1
+        return SimpleNamespace(final_output="completed")
+
+    with patch.object(Runner, "run", new=AsyncMock(side_effect=fake_run)):
+        result = asyncio.run(
+            agent._run_planner_workflow(
+                runner_input="start workflow",
+                max_turns=3,
+            )
+        )
+
+    assert result.final_output == "completed"
+    assert len(calls) == 2
+    assert "MANDATORY WORKFLOW RECOVERY" in calls[1]
+
+
+def test_planner_accepts_successful_design_change_as_completed_design_work() -> None:
+    agent = object.__new__(StatefulManipulandAgent)
+    agent.planner = SimpleNamespace(instructions="planner instructions")
+    agent.planner_session = object()
+    agent._planner_initial_design_tool_calls = 0
+    agent._planner_successful_designer_mutations = 0
+    agent._planner_budget_exhausted = False
+    agent._reasoning_persistence_context_for_session = lambda _session: nullcontext()
+    agent._create_run_config = Mock(return_value=None)
+    agent._record_module_timing = Mock()
+    agent._record_llm_call_debug = Mock()
+
+    async def fake_run(**_kwargs):
+        agent._planner_successful_designer_mutations = 1
+        return SimpleNamespace(final_output="design changed and validated")
+
+    with patch.object(Runner, "run", new=AsyncMock(side_effect=fake_run)) as run:
+        result = asyncio.run(
+            agent._run_planner_workflow(
+                runner_input="repair existing stage candidate",
+                max_turns=3,
+            )
+        )
+
+    assert result.final_output == "design changed and validated"
+    assert run.await_count == 1
 
 
 def test_planner_recovery_fails_if_second_turn_still_has_no_tool_call() -> None:
@@ -406,7 +471,7 @@ def test_planner_recovery_fails_if_second_turn_still_has_no_tool_call() -> None:
             "run",
             new=AsyncMock(return_value=SimpleNamespace(final_output="acknowledged")),
         ),
-        pytest.raises(RuntimeError, match="request_initial_design"),
+        pytest.raises(RuntimeError, match="scene mutation"),
     ):
         asyncio.run(
             agent._run_planner_workflow(

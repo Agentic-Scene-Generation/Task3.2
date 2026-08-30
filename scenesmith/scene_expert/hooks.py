@@ -1059,6 +1059,17 @@ class SceneExpertHookRunner:
                 "[SceneExpert] Failed to capture deterministic repair activity: %s",
                 error,
             )
+    def record_runtime_failure_continuation(self, provenance: dict[str, Any]) -> None:
+        """Attach checkpoint-gated runtime salvage to the stage trace evidence."""
+        if not isinstance(provenance, dict):
+            return
+        self._current_execution_evidence.degraded = True
+        self._current_execution_evidence.continuation_policy = str(
+            provenance.get("continuation_policy") or ""
+        )
+        self._current_execution_evidence.runtime_failure = dict(
+            provenance.get("failure") or {}
+        )
 
     def _save_context_bundle(
         self,

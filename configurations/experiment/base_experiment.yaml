@@ -81,6 +81,10 @@ scene_retry_attempts: 1
 # remains strict by default; critic probes may select "degraded" to preserve
 # failed checkpoints, traces, and final renders without marking them successful.
 quality_failure_policy: "strict"  # Options: "strict", "degraded"
+# Runtime failures remain blocking by default. "checkpoint_degraded" only
+# continues a transient child failure after a persisted, hash-consistent,
+# minimally validated stage checkpoint exists.
+runtime_failure_policy: "strict"  # Options: "strict", "checkpoint_degraded"
 
 # Pipeline stage control
 # Stages run in order: floor_plan → furniture → wall_mounted → ceiling_mounted → manipuland
@@ -110,7 +114,7 @@ pipeline:
 # critic prompts; it does not change generation, retrieval, or VLM filtering.
 scenebenchmark_critic:
   enabled: false
-  metrics: ["functional_dependency", "spatial_accessibility", "interaction_clearance", "visual_clearance"]
+  metrics: ["functional_dependency", "spatial_accessibility", "interaction_clearance", "physics_collision", "visual_clearance"]
   inject_into_llm_critic: true
   agent_prompt_context_filter_enabled: true
   agent_prompt_context_debug_write: false

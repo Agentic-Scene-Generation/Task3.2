@@ -427,7 +427,7 @@ support_surface_extraction:
 
   # Surface filtering parameters
   filtering:
-    min_surface_area_m2: 0.1  # 10 cm² minimum area (filters tiny surfaces)
+    min_surface_area_m2: 0.003  # 30 cm² minimum area (HSM default)
     min_area_ratio: 0.20  # Minimum mesh area / bbox area ratio (filters artifacts)
     min_inscribed_radius_m: 0.10  # 10 cm minimum inscribed radius (filters slivers)
 
