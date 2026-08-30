@@ -274,14 +274,10 @@ def _write_scene_completion(
 def _should_skip_noop_scene_expert_stage(
     hooks: "SceneExpertHookRunner | None", stage: str
 ) -> bool:
-    """Return whether SceneExpert compiled the current stage as a true no-op.
-
-    Check only after ``pre_stage``.  The hook has then projected the
-    stage-local hard constraints and generated the authoritative planner trace.
-    The caller still writes its regular checkpoint and invokes ``post_stage`` so
-    retries, resume, and verification retain their normal semantics.
-    """
-    return bool(hooks is not None and hooks.should_skip_stage_agent(stage))
+    """Legacy compatibility shim: native SceneSmith stages are never skipped."""
+    if hooks is not None:
+        hooks.should_skip_stage_agent(stage)
+    return False
 
 
 def _is_targeted_manipuland_replay(
@@ -1521,6 +1517,7 @@ def _generate_room(
             start_time = time.time()
             if scene_expert_hooks:
                 scene_expert_hooks.pre_stage("furniture", scene)
+                scene_expert_hooks.mark_stage_agent_invoked("furniture")
             furniture_agent = BaseExperiment.build_furniture_agent(
                 cfg_dict=cfg_dict,
                 compatible_agents=(
@@ -1709,40 +1706,36 @@ def _generate_room(
 
             if scene_expert_hooks:
                 scene_expert_hooks.pre_stage("wall_mounted", scene)
-            if _should_skip_noop_scene_expert_stage(scene_expert_hooks, "wall_mounted"):
-                console_logger.info(
-                    "Skipping wall-mounted agent: SceneExpert compiled an empty stage"
-                )
-            else:
-                wall_agent = BaseExperiment.build_wall_agent(
-                    cfg_dict=cfg_dict,
-                    compatible_agents=IndoorSceneGenerationExperiment.compatible_wall_agents,
-                    logger=logger,
-                    house_layout=house_layout,
-                    ceiling_height=scene.room_geometry.wall_height,
-                    wall_thickness=scene.room_geometry.wall_thickness,
-                    render_gpu_id=render_gpu_id,
-                )
+                scene_expert_hooks.mark_stage_agent_invoked("wall_mounted")
+            wall_agent = BaseExperiment.build_wall_agent(
+                cfg_dict=cfg_dict,
+                compatible_agents=IndoorSceneGenerationExperiment.compatible_wall_agents,
+                logger=logger,
+                house_layout=house_layout,
+                ceiling_height=scene.room_geometry.wall_height,
+                wall_thickness=scene.room_geometry.wall_thickness,
+                render_gpu_id=render_gpu_id,
+            )
+            try:
                 try:
-                    try:
-                        asyncio.run(wall_agent.add_wall_objects(scene=scene))
-                    except Exception:
-                        continuation = _checkpoint_degraded_continuation(
-                            scene=scene, stage="wall_mounted", cfg_dict=cfg_dict
-                        )
-                        if continuation is None:
-                            raise
-                        console_logger.warning(
-                            "Continuing wall stage from validated runtime checkpoint: %s",
-                            continuation["failure"].get("error_type"),
-                        )
-                        _record_runtime_failure_continuation(
-                            scene_expert_hooks, continuation
-                        )
-                    _apply_final_wall_functional_guards(scene=scene, cfg_dict=cfg_dict)
-                finally:
-                    # Always cleanup server subprocesses.
-                    wall_agent.cleanup()
+                    asyncio.run(wall_agent.add_wall_objects(scene=scene))
+                except Exception:
+                    continuation = _checkpoint_degraded_continuation(
+                        scene=scene, stage="wall_mounted", cfg_dict=cfg_dict
+                    )
+                    if continuation is None:
+                        raise
+                    console_logger.warning(
+                        "Continuing wall stage from validated runtime checkpoint: %s",
+                        continuation["failure"].get("error_type"),
+                    )
+                    _record_runtime_failure_continuation(
+                        scene_expert_hooks, continuation
+                    )
+                _apply_final_wall_functional_guards(scene=scene, cfg_dict=cfg_dict)
+            finally:
+                # Always cleanup server subprocesses.
+                wall_agent.cleanup()
             end_time = time.time()
             console_logger.info(
                 f"Wall objects added to room {room_id} in "
@@ -1804,41 +1797,35 @@ def _generate_room(
 
             if scene_expert_hooks:
                 scene_expert_hooks.pre_stage("ceiling_mounted", scene)
-            if _should_skip_noop_scene_expert_stage(
-                scene_expert_hooks, "ceiling_mounted"
-            ):
-                console_logger.info(
-                    "Skipping ceiling-mounted agent: SceneExpert compiled an empty stage"
-                )
-            else:
-                ceiling_agent = BaseExperiment.build_ceiling_agent(
-                    cfg_dict=cfg_dict,
-                    compatible_agents=(
-                        IndoorSceneGenerationExperiment.compatible_ceiling_agents
-                    ),
-                    logger=logger,
-                    ceiling_height=room_geometry.wall_height,
-                    render_gpu_id=render_gpu_id,
-                )
+                scene_expert_hooks.mark_stage_agent_invoked("ceiling_mounted")
+            ceiling_agent = BaseExperiment.build_ceiling_agent(
+                cfg_dict=cfg_dict,
+                compatible_agents=(
+                    IndoorSceneGenerationExperiment.compatible_ceiling_agents
+                ),
+                logger=logger,
+                ceiling_height=room_geometry.wall_height,
+                render_gpu_id=render_gpu_id,
+            )
+            try:
                 try:
-                    try:
-                        asyncio.run(ceiling_agent.add_ceiling_objects(scene=scene))
-                    except Exception:
-                        continuation = _checkpoint_degraded_continuation(
-                            scene=scene, stage="ceiling_mounted", cfg_dict=cfg_dict
-                        )
-                        if continuation is None:
-                            raise
-                        console_logger.warning(
-                            "Continuing ceiling stage from validated runtime checkpoint: %s",
-                            continuation["failure"].get("error_type"),
-                        )
-                        _record_runtime_failure_continuation(
-                            scene_expert_hooks, continuation
-                        )
-                finally:
-                    # Always cleanup server subprocesses.
-                    ceiling_agent.cleanup()
+                    asyncio.run(ceiling_agent.add_ceiling_objects(scene=scene))
+                except Exception:
+                    continuation = _checkpoint_degraded_continuation(
+                        scene=scene, stage="ceiling_mounted", cfg_dict=cfg_dict
+                    )
+                    if continuation is None:
+                        raise
+                    console_logger.warning(
+                        "Continuing ceiling stage from validated runtime checkpoint: %s",
+                        continuation["failure"].get("error_type"),
+                    )
+                    _record_runtime_failure_continuation(
+                        scene_expert_hooks, continuation
+                    )
+            finally:
+                # Always cleanup server subprocesses.
+                ceiling_agent.cleanup()
             end_time = time.time()
             console_logger.info(
                 f"Ceiling objects added to room {room_id} in "
@@ -1903,32 +1890,28 @@ def _generate_room(
         start_time = time.time()
         if scene_expert_hooks:
             scene_expert_hooks.pre_stage("manipuland", scene)
-        if _should_skip_noop_scene_expert_stage(scene_expert_hooks, "manipuland"):
-            console_logger.info(
-                "Skipping manipuland agent: SceneExpert compiled an empty stage"
+            scene_expert_hooks.mark_stage_agent_invoked("manipuland")
+        manipuland_agent = BaseExperiment.build_manipuland_agent(
+            cfg_dict=cfg_dict,
+            compatible_agents=(
+                IndoorSceneGenerationExperiment.compatible_manipuland_agents
+            ),
+            logger=logger,
+            render_gpu_id=render_gpu_id,
+        )
+        try:
+            _add_manipulands_with_cleanup(manipuland_agent, scene)
+        except Exception:
+            continuation = _checkpoint_degraded_continuation(
+                scene=scene, stage="manipuland", cfg_dict=cfg_dict
             )
-        else:
-            manipuland_agent = BaseExperiment.build_manipuland_agent(
-                cfg_dict=cfg_dict,
-                compatible_agents=(
-                    IndoorSceneGenerationExperiment.compatible_manipuland_agents
-                ),
-                logger=logger,
-                render_gpu_id=render_gpu_id,
+            if continuation is None:
+                raise
+            console_logger.warning(
+                "Continuing manipuland stage from validated runtime checkpoint: %s",
+                continuation["failure"].get("error_type"),
             )
-            try:
-                _add_manipulands_with_cleanup(manipuland_agent, scene)
-            except Exception:
-                continuation = _checkpoint_degraded_continuation(
-                    scene=scene, stage="manipuland", cfg_dict=cfg_dict
-                )
-                if continuation is None:
-                    raise
-                console_logger.warning(
-                    "Continuing manipuland stage from validated runtime checkpoint: %s",
-                    continuation["failure"].get("error_type"),
-                )
-                _record_runtime_failure_continuation(scene_expert_hooks, continuation)
+            _record_runtime_failure_continuation(scene_expert_hooks, continuation)
         end_time = time.time()
         console_logger.info(
             f"Manipulands added to room {room_id} in "
@@ -2945,6 +2928,8 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
 
                     # Stage 1: Floor plan generation (or load from saved state).
                     if start_stage == "floor_plan":
+                        if scene_expert_hooks:
+                            scene_expert_hooks.mark_stage_agent_invoked("floor_plan")
                         # Run floor plan in subprocess to isolate fork-unsafe SDK
                         # state (SQLiteSession locks, tracing threads). The subprocess
                         # saves results to disk and exits cleanly before we fork room

@@ -21,7 +21,7 @@ from typing import Any, Iterable
 
 console_logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "sceneexpert.run_metrics.v3"
+SCHEMA_VERSION = "sceneexpert.run_metrics.v4"
 SCENE_COLUMNS = (
     "run_id",
     "batch_id",
@@ -60,6 +60,10 @@ SCENE_COLUMNS = (
     "global_planner_fallback_stages",
     "global_planner_noop_stages",
     "brief_injection_verified_stages",
+    "stage_policies",
+    "stage_agent_invoked_stages",
+    "missing_stage_agent_invocation_stages",
+    "optional_asset_recommendation_count",
     "observed_stages",
     "memory_retrieved_stages",
     "memory_retrieved_ids",
@@ -394,6 +398,10 @@ def _component_execution_metrics(
     task_status = component_status.get("task_compiler") or {}
     planner_by_status: dict[str, list[str]] = {"ok": [], "fallback": [], "no_op": []}
     brief_verified: list[str] = []
+    stage_agent_invoked: list[str] = []
+    missing_stage_agent_invocation: list[str] = []
+    stage_policies: dict[str, str] = {}
+    optional_recommendation_count = 0
     for stage_payload in stages:
         stage = str(stage_payload.get("stage") or "")
         planner_status = str(
@@ -402,6 +410,14 @@ def _component_execution_metrics(
         if planner_status in planner_by_status:
             planner_by_status[planner_status].append(stage)
         evidence = stage_payload.get("execution_evidence") or {}
+        stage_policies[stage] = str(evidence.get("stage_policy") or "unknown")
+        optional_recommendation_count += len(
+            evidence.get("optional_asset_recommendations") or []
+        )
+        if bool(evidence.get("stage_agent_invoked")):
+            stage_agent_invoked.append(stage)
+        else:
+            missing_stage_agent_invocation.append(stage)
         if bool(evidence.get("designer_prompt_contains_brief")):
             brief_verified.append(stage)
     return {
@@ -411,6 +427,12 @@ def _component_execution_metrics(
         "global_planner_fallback_stages": _unique(planner_by_status["fallback"]),
         "global_planner_noop_stages": _unique(planner_by_status["no_op"]),
         "brief_injection_verified_stages": _unique(brief_verified),
+        "stage_policies": stage_policies,
+        "stage_agent_invoked_stages": _unique(stage_agent_invoked),
+        "missing_stage_agent_invocation_stages": _unique(
+            missing_stage_agent_invocation
+        ),
+        "optional_asset_recommendation_count": optional_recommendation_count,
     }
 
 
@@ -745,6 +767,13 @@ def collect_run_metrics(
         warnings.append(f"fallback_memory_writes_detected:{len(fallback_writes)}")
     if retrieved and not cross_task_verified:
         warnings.append("retrieved_memory_missing_cross_task_provenance")
+    missing_stage_invocations = sum(
+        len(row["missing_stage_agent_invocation_stages"]) for row in scene_rows
+    )
+    if missing_stage_invocations:
+        warnings.append(
+            f"missing_native_stage_agent_invocations:{missing_stage_invocations}"
+        )
 
     revisions = _unique(row["code_revision"] for row in scene_rows)
     config_hashes = _unique(row["config_hash"] for row in scene_rows)
@@ -898,6 +927,17 @@ def collect_run_metrics(
         "brief_injection_verified_stage_count": sum(
             len(row["brief_injection_verified_stages"]) for row in scene_rows
         ),
+        "native_stage_agent_invocation_count": sum(
+            len(row["stage_agent_invoked_stages"]) for row in scene_rows
+        ),
+        "missing_native_stage_agent_invocation_count": missing_stage_invocations,
+        "native_stage_agent_invocation_rate": _rate(
+            sum(len(row["stage_agent_invoked_stages"]) for row in scene_rows),
+            sum(len(row["observed_stages"]) for row in scene_rows),
+        ),
+        "optional_asset_recommendation_count": sum(
+            row["optional_asset_recommendation_count"] for row in scene_rows
+        ),
     }
     quality_comparison_ready = bool(
         expected
@@ -906,6 +946,7 @@ def collect_run_metrics(
         and not missing
         and len(critic_observed) == expected
         and len(trace_observed) == expected
+        and not missing_stage_invocations
     )
     memory_closed_loop_observed = bool(
         summary["memory_writer_promoted_records"] > 0
@@ -1021,6 +1062,10 @@ def _markdown(metrics: dict[str, Any]) -> str:
         "global_planner_llm_stage_count",
         "global_planner_fallback_stage_count",
         "brief_injection_verified_stage_count",
+        "native_stage_agent_invocation_count",
+        "missing_native_stage_agent_invocation_count",
+        "native_stage_agent_invocation_rate",
+        "optional_asset_recommendation_count",
     ):
         lines.append(f"| `{key}` | {summary.get(key)} |")
     identity = metrics.get("memory_identity") or {}

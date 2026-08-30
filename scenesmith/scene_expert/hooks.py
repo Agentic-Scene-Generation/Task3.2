@@ -31,6 +31,7 @@ from scenesmith.scene_expert.behavior import apply_behavior_template
 from scenesmith.scene_expert.config_utils import (
     resolve_component_flags,
     resolve_scene_expert_config,
+    resolve_stage_policies,
 )
 from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
 from scenesmith.scene_expert.experiment_identity import (
@@ -769,6 +770,7 @@ class SceneExpertHookRunner:
         intent_trace: dict[str, Any] | None = None,
         task_compiler_trace: dict[str, Any] | None = None,
         critic_config: Any | None = None,
+        stage_policies: dict[str, str] | None = None,
     ) -> None:
         self._prompt = prompt
         self._scene_id = scene_id
@@ -806,6 +808,7 @@ class SceneExpertHookRunner:
         self._intent_contract = dict(intent_contract or {})
         self._intent_trace = dict(intent_trace or {})
         self._critic_config = critic_config
+        self._stage_policies = dict(stage_policies or {})
         self._stage_order_baseline = self._initial_completed_stages(start_stage)
         self._room_start_stage = (
             "furniture" if start_stage == "floor_plan" else start_stage
@@ -841,6 +844,7 @@ class SceneExpertHookRunner:
         self._current_execution_evidence = StageExecutionEvidence()
         self._current_relation_context: StageRelationContext | None = None
         self._current_planner_trace: dict[str, Any] = {}
+        self._current_stage_policy: str = "auto"
         self._stage_start_time: float = 0.0
         # Original text_description per stage (so we can restore if needed)
         self._original_text_descriptions: dict[str, str] = {}
@@ -860,41 +864,78 @@ class SceneExpertHookRunner:
             return None
         return context.floor_plan_manifest.model_dump(mode="json")
 
-    def should_skip_stage_agent(self, stage: str) -> bool:
-        """Whether ``stage`` has an authoritative empty-inventory plan.
+    def stage_policy(self, stage: str) -> str:
+        """Return the resolved non-skipping policy for one stage."""
+        return str(self._stage_policies.get(stage, "auto"))
 
-        ``pre_stage`` is the sole authority for this decision: the GlobalPlanner
-        marks a stage ``no_op`` only when its TaskCompiler inventory and its
-        stage-local hard constraints are both empty.  The pipeline can then
-        avoid launching an agent that would otherwise invent decorative assets
-        from the original room prompt.  Keep the signal scoped to the current
-        stage so a stale planner trace cannot skip a later stage.
-        """
-        planner_no_op = bool(
-            self._current_stage == stage
-            and self._current_planner_trace.get("status") == "no_op"
-        )
-        if not planner_no_op:
-            return False
-        inventory = (
-            self._stage_required_objects(stage)
-            if getattr(self, "_task_spec", None) is not None
-            else []
-        )
-        hard_constraints = (
-            self._current_relation_context.hard_constraints
-            if getattr(self, "_current_relation_context", None) is not None
-            else []
-        )
-        if inventory or hard_constraints:
-            console_logger.error(
-                "[SceneExpert] Refusing invalid no-op for %s: inventory=%d hard_constraints=%d",
+    def should_skip_stage_agent(self, stage: str) -> bool:
+        """Backward-compatible guard that never skips a native SceneSmith stage."""
+        if self._current_planner_trace.get("status") == "no_op":
+            console_logger.warning(
+                "[SceneExpert] Ignoring legacy no_op for %s; native stage execution "
+                "is mandatory under stage_policy=%s",
                 stage,
-                len(inventory),
-                len(hard_constraints),
+                self.stage_policy(stage),
             )
-            return False
-        return True
+        return False
+
+    def mark_stage_agent_invoked(self, stage: str) -> None:
+        """Record the native-agent boundary without changing main's execution."""
+        if stage != self._current_stage:
+            console_logger.error(
+                "[SceneExpert] Stage invocation mismatch: current=%s invoked=%s",
+                self._current_stage,
+                stage,
+            )
+        self._current_execution_evidence.stage_agent_invoked = True
+        self._write_stage_policy_audit()
+
+    def _write_stage_policy_audit(self) -> None:
+        """Persist required/optional policy resolution as a non-fatal artifact."""
+        if not self._current_stage:
+            return
+        try:
+            audit_dir = self._scene_debug_dir / "stage_policy"
+            audit_dir.mkdir(parents=True, exist_ok=True)
+            brief = self._current_stage_brief
+            payload = {
+                "schema_version": "scenesmith.stage_policy.v1",
+                "stage": self._current_stage,
+                "configured_policy": self.stage_policy(self._current_stage),
+                "effective_policy": self._current_stage_policy,
+                "optional_assets_allowed": (
+                    brief.optional_assets_allowed
+                    if brief is not None
+                    else self._current_stage_policy == "auto"
+                ),
+                "required_objects": self._stage_required_objects(self._current_stage),
+                "optional_asset_recommendations": (
+                    [
+                        item.model_dump(mode="json")
+                        for item in brief.optional_asset_recommendations
+                    ]
+                    if brief is not None
+                    else []
+                ),
+                "planner_status": self._current_planner_trace.get(
+                    "status", "disabled_or_unavailable"
+                ),
+                "stage_agent_invoked": (
+                    self._current_execution_evidence.stage_agent_invoked
+                ),
+                "stage_skip_allowed": False,
+            }
+            path = audit_dir / f"{self._current_stage}.json"
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as error:
+            console_logger.warning(
+                "[SceneExpert] Failed to write stage-policy audit for %s: %s",
+                self._current_stage,
+                error,
+            )
 
     def accept_degraded_stage(self, stage: str) -> None:
         """Record a terminal quality-failed stage as advanced by the pipeline.
@@ -941,6 +982,21 @@ class SceneExpertHookRunner:
                 "global_planner"
                 if self._current_stage_brief is not None
                 else "disabled_or_unavailable"
+            ),
+            stage_policy=self._current_stage_policy,
+            optional_assets_allowed=(
+                self._current_stage_brief.optional_assets_allowed
+                if self._current_stage_brief is not None
+                else self._current_stage_policy == "auto"
+            ),
+            required_objects=self._stage_required_objects(self._current_stage),
+            optional_asset_recommendations=(
+                [
+                    item.model_dump(mode="json")
+                    for item in self._current_stage_brief.optional_asset_recommendations
+                ]
+                if self._current_stage_brief is not None
+                else []
             ),
             retrieved_memory_ids=self._current_injection_bundle.selected_memory_ids,
             retrieved_skill_names=(
@@ -1269,7 +1325,9 @@ class SceneExpertHookRunner:
             )
 
     def _stage_required_objects(self, stage: str) -> list[str]:
-        if stage in ("floor_plan", "furniture"):
+        if stage == "floor_plan":
+            return list(self._task_spec.required_architectural_features)
+        if stage == "furniture":
             return list(self._task_spec.required_large_objects)
         if stage == "wall_mounted":
             return list(self._task_spec.required_wall_objects)
@@ -1307,6 +1365,7 @@ class SceneExpertHookRunner:
         if self._component_enabled("harness"):
             self._validate_stage_transition(stage)
         self._current_stage = stage
+        self._current_stage_policy = self.stage_policy(stage)
         self._stage_start_time = time.time()
         self._qwen_calls = 0
 
@@ -1366,6 +1425,7 @@ class SceneExpertHookRunner:
                     task_spec=self._task_spec,
                     memory_pack=self._current_memory_pack,
                     relation_context=self._current_relation_context,
+                    stage_policy=self._current_stage_policy,
                 )
                 self._current_stage_brief = self._global_planner.generate_stage_brief(
                     context=context,
@@ -1410,6 +1470,7 @@ class SceneExpertHookRunner:
             )
         self._last_injected_floor_plan_prompt = enhanced
         self._current_execution_evidence = self._build_execution_evidence(enhanced)
+        self._write_stage_policy_audit()
         self._record_memory_pre_stage_activity()
         self._save_context_bundle(
             stage=stage,
@@ -1566,6 +1627,7 @@ class SceneExpertHookRunner:
         if self._component_enabled("harness"):
             self._validate_stage_transition(stage)
         self._current_stage = stage
+        self._current_stage_policy = self.stage_policy(stage)
         self._stage_start_time = time.time()
         self._qwen_calls = 0
 
@@ -1637,6 +1699,7 @@ class SceneExpertHookRunner:
                     task_spec=self._task_spec,
                     memory_pack=self._current_memory_pack,
                     relation_context=self._current_relation_context,
+                    stage_policy=self._current_stage_policy,
                 )
                 self._current_stage_brief = self._global_planner.generate_stage_brief(
                     context=context,
@@ -1725,6 +1788,7 @@ class SceneExpertHookRunner:
         self._current_execution_evidence = self._build_execution_evidence(
             scene.text_description
         )
+        self._write_stage_policy_audit()
         self._record_memory_pre_stage_activity()
         if self._trace_enabled():
             self._trace_logger.save_stage_context(
@@ -2522,6 +2586,7 @@ def build_hook_runner(
         )
         return None
 
+    stage_policies = resolve_stage_policies(cfg_dict)
     console_logger.info(f"[SceneExpert] Building hook runner (mode={mode})")
 
     # Model / API settings (shared with SceneSmith agents)
@@ -2822,4 +2887,5 @@ def build_hook_runner(
         intent_trace=intent_trace,
         task_compiler_trace=task_compiler_trace,
         critic_config=critic_config,
+        stage_policies=stage_policies,
     )

@@ -72,6 +72,15 @@ _MODE_COMPONENTS = {
     ),
 }
 
+_STAGE_POLICY_MODES = frozenset({"auto", "required_only"})
+_STAGE_POLICY_STAGES = (
+    "floor_plan",
+    "furniture",
+    "wall_mounted",
+    "ceiling_mounted",
+    "manipuland",
+)
+
 
 def _as_bool(value: Any, default: bool = False) -> bool:
     """Coerce resolved Hydra values without treating ``"false"`` as true."""
@@ -129,6 +138,36 @@ def resolve_component_flags(cfg_dict: Mapping[str, Any]) -> dict[str, bool]:
         if isinstance(value, Mapping):
             value = value.get("enabled")
         resolved[name] = master_enabled and _as_bool(value, name in preset)
+    return resolved
+
+
+def resolve_stage_policies(cfg_dict: Mapping[str, Any]) -> dict[str, str]:
+    """Resolve the non-skipping SceneExpert policy for every pipeline stage.
+
+    ``auto`` preserves prompt-required objects as hard minimums while allowing
+    the planner and native SceneSmith designer to add useful same-stage assets.
+    ``required_only`` is an explicit ablation that suppresses optional planning,
+    but it still executes the native stage agent.  Empty required inventories
+    never imply a skipped stage.
+    """
+    scene_expert_cfg = resolve_scene_expert_config(cfg_dict)
+    policy_cfg = scene_expert_cfg.get("stage_policy", {}) or {}
+    if isinstance(policy_cfg, str):
+        policy_cfg = {"default": policy_cfg}
+    if not isinstance(policy_cfg, Mapping):
+        raise ValueError("scene_expert.stage_policy must be a string or mapping")
+
+    default_mode = str(policy_cfg.get("default", "auto") or "auto").strip().lower()
+    resolved: dict[str, str] = {}
+    for stage in _STAGE_POLICY_STAGES:
+        mode = str(policy_cfg.get(stage, default_mode) or default_mode).strip().lower()
+        if mode not in _STAGE_POLICY_MODES:
+            allowed = ", ".join(sorted(_STAGE_POLICY_MODES))
+            raise ValueError(
+                f"scene_expert.stage_policy.{stage} must be one of {allowed}; "
+                f"got {mode!r}"
+            )
+        resolved[stage] = mode
     return resolved
 
 

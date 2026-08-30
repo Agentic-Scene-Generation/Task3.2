@@ -15,6 +15,19 @@ enabled: false   # Default: off. Set true in ablation_3/4/5 experiment configs.
 #   "full"           → harness_memory + observer-only Slow Memory capture
 mode: "disabled"
 
+# Per-stage asset policy. Every native SceneSmith stage still executes.
+#   auto          → prompt-explicit assets are required minimums; planner and
+#                   native designer may add capacity-aware same-stage assets.
+#   required_only → strict ablation with no optional asset recommendations.
+# An empty required inventory never becomes a no-op or a skipped stage.
+stage_policy:
+  default: "${oc.env:SCENEEXPERT_STAGE_POLICY_DEFAULT,auto}"
+  floor_plan: "${oc.env:SCENEEXPERT_STAGE_POLICY_FLOOR_PLAN,''}"
+  furniture: "${oc.env:SCENEEXPERT_STAGE_POLICY_FURNITURE,''}"
+  wall_mounted: "${oc.env:SCENEEXPERT_STAGE_POLICY_WALL_MOUNTED,''}"
+  ceiling_mounted: "${oc.env:SCENEEXPERT_STAGE_POLICY_CEILING_MOUNTED,''}"
+  manipuland: "${oc.env:SCENEEXPERT_STAGE_POLICY_MANIPULAND,''}"
+
 # Independent component gates. ``null`` inherits the legacy mode preset; an
 # explicit true/false overrides it. This preserves existing experiment names
 # while allowing strict single-variable ablations.
