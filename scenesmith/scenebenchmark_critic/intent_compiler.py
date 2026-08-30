@@ -118,6 +118,35 @@ def _render_entity_catalog(catalog: dict[str, dict[str, Any]]) -> str:
     )
 
 
+def _rejected_entity_refs(
+    payload: Any, catalog: dict[str, dict[str, Any]]
+) -> list[dict[str, str]]:
+    """Project rejected candidate refs into the persisted attempt trace."""
+
+    if not isinstance(payload, dict):
+        return []
+    rows = payload.get("requirements")
+    if not isinstance(rows, list):
+        return []
+    rejected: list[dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for field in ("subject_ref", "target_ref", "secondary_target_ref"):
+            value = row.get(field)
+            if value is None or not str(value).strip() or str(value) in catalog:
+                continue
+            rejected.append(
+                {
+                    "requirement_id": str(row.get("requirement_id") or ""),
+                    "grounding": str(row.get("grounding") or ""),
+                    "entity_ref": str(value),
+                    "reason": "unknown_or_unbound_entity_ref",
+                }
+            )
+    return rejected
+
+
 def _semantic_source(
     grounding: str, grounding_catalog: dict[str, str]
 ) -> dict[str, str]:
@@ -338,6 +367,17 @@ def _admit_semantic_ir(
             }
             constraints.append(row)
             ledger_row["disposition"] = "compiled"
+        elif kind == "inventory":
+            subject_ref = raw.get("subject_ref")
+            if not subject_ref or not str(subject_ref).startswith("inventory:"):
+                raise ValueError("inventory requires an inventory subject_ref")
+            _catalog_selector(subject_ref, catalog)
+            if (
+                raw.get("target_ref") is not None
+                or raw.get("secondary_target_ref") is not None
+            ):
+                raise ValueError("inventory must not have target entity refs")
+            ledger_row["disposition"] = "compiled"
         elif kind == "forbidden_inventory":
             category = canonical_selector_category(raw.get("forbidden_category"))
             if not category or not is_known_object_category(category):
@@ -397,8 +437,6 @@ def _admit_semantic_ir(
                 )
             )
             ledger_row["disposition"] = "soft_scope"
-        else:
-            ledger_row["disposition"] = "compiled"
         ledger.append(ledger_row)
 
     missing = sorted(set(grounding_catalog) - covered_groundings)
@@ -1374,10 +1412,10 @@ memory, StageBrief, current scene state, or knowledge not present in these input
 
 The normalized SceneTaskSpec required_* arrays are authoritative hard inventory,
 but the compiler adds their required_count rows deterministically. NEVER emit a
-required_count relation. Extract only spatial relations. The original prompt
-remains authoritative for spatial relations. SceneTaskSpec interaction_constraints
-and geometrically verifiable aesthetic_constraints are expert inferences with
-lower priority.
+required_count relation. The original prompt remains authoritative for spatial
+relations, negation, inventory mentions, and scope decisions. SceneTaskSpec
+interaction_constraints and geometrically verifiable aesthetic_constraints are
+expert inferences with lower priority.
 A supplemental constraint may become a hard
 relation only when it maps precisely to one of the registered relations and
 can be checked by that relation's existing geometry evaluator. Material palette, style,
@@ -1388,12 +1426,23 @@ an explicit prompt relation, emit only the explicit prompt relation.
 SceneTaskSpec room_type, style, and functional_zones are context only and do
 not independently authorize hard relations.
 
-Every relation MUST contain exactly one short grounding ID from the supplied
-catalog. Use prompt:N for an original-prompt relation, interaction:N for an
-interaction constraint, or aesthetic:N for an aesthetic constraint. Return the
-ID only. NEVER copy source text and NEVER emit source, evidence_span,
-inference_reason, warnings, explanations, or other provenance text. The compiler
-expands the ID deterministically after generation.
+Return a CompilerSemanticIR requirement for every supplied grounding ID. Use
+prompt:N for an original-prompt requirement, interaction:N for an interaction
+constraint, or aesthetic:N for an aesthetic constraint. A spatial requirement
+uses kind="relation"; an inventory mention uses kind="inventory"; a prohibition
+such as "no TV" uses kind="forbidden_inventory" and forbidden_category; and a
+requirement the critic cannot safely enforce uses unsupported, unresolved, or
+soft_scope with a brief reason. Return the ID only. NEVER copy source text and
+NEVER emit source, evidence_span, inference_reason, warnings, explanations, or
+other provenance text. The compiler expands the ID deterministically after
+generation.
+
+Every relation endpoint MUST be one of the exact entity_ref values in the entity
+catalog. Use subject_ref, target_ref, and (only for a binary relation)
+secondary_target_ref; do not emit targets, subjects, category, or any free-form
+endpoint. An inventory row requires subject_ref="inventory:<category>" and no
+target ref. A forbidden_inventory row has no endpoint refs because the forbidden
+object is intentionally absent from the catalog.
 
 Map accessibility language according to what the geometry evaluator can
 actually measure. "X reachable/accessible from Y" may emit near(X, Y); it does
@@ -1409,22 +1458,21 @@ or the accessibility mapping described above. Never downgrade next_to to near.
 Registered relations:
 {relation_lines}
 
-Target rule is mandatory.  Relations with target arity 1 ({unary_relations})
-MUST include a non-null ``targets`` selector with the target category from the
-prompt. Target arity is the number of selector endpoints, not the number of
-physical target objects: group relations such as paired_with and
-one_per_support may use targets.count greater than one. ``corner_of_room``,
-``corner_distribution``, and ``centered_in_room`` use
-``{{"category": "room", "count": 1}}`` as that selector.  For example:
-``{{"relation": "flanking", "subjects": {{"category": "nightstand", "count": 2}}, "targets": {{"category": "bed", "count": 1}}, "grounding": "prompt:0"}}``.
-Relations with target arity 2 ({binary_relations}) must use a target selector
-whose ``secondary_category`` identifies the second target.
+Target rule is mandatory. Relations with target arity 1 ({unary_relations})
+MUST include a non-null target_ref. Target arity is the number of entity
+endpoints, not the number of physical target objects: group relations such as
+paired_with and one_per_support may use target_count greater than one.
+``corner_of_room``, ``corner_distribution``, and ``centered_in_room`` use
+target_ref="anchor:room". For example:
+``{{"requirement_id": "nightstands_by_bed", "kind": "relation", "grounding": "prompt:0", "relation": "flanking", "subject_ref": "inventory:nightstand", "subject_count": 2, "target_ref": "inventory:bed", "target_count": 1}}``.
+Relations with target arity 2 ({binary_relations}) must also use
+secondary_target_ref for the second endpoint.
 
 For a rectangular target with edge-specific distribution, emit exactly one
-edge_distribution relation. It must contain subjects.count, a target selector
-with count 1, edge_frame target_local_rectangle, and groups. Each edge class
+edge_distribution relation. It must contain subject_count, target_ref,
+target_count=1, edge_frame target_local_rectangle, and groups. Each edge class
 has one counts_per_edge pair, sorted descending. The sum of all counts must
-equal subjects.count. Use [3, 3] for three objects on each long edge and [1, 0]
+equal subject_count. Use [3, 3] for three objects on each long edge and [1, 0]
 for one object on either short edge. Use toward_target only when the prompt
 requires all subjects to face inward; do not also emit a duplicate faces row.
 Do not emit one_per_side; that relation was removed.
@@ -1434,32 +1482,32 @@ edge_distribution. Reserve edge_distribution for explicit finite rectangular
 edge layouts or unambiguous long/short edge wording.
 
 Target shape is strict: a relation with registered target arity 1 must have
-exactly one targets selector and must leave
-secondary_category, secondary_count, and secondary_role empty. Only a relation
-whose registered target arity is 2 may use secondary_category and
-secondary_role. Never combine two target nouns into one unary relation; emit
-separate relation rows when the prompt states separate relations.
+exactly one target_ref and must omit secondary_target_ref. Only a relation
+whose registered target arity is 2 may use secondary_target_ref. Never combine
+two target nouns into one unary relation; emit separate relation rows when the
+prompt states separate relations.
 
 Use centered_on_wall only when the prompt says the subject is centered on the
 wall itself. For "X on the wall, centered directly above Y", emit
 centered_above(X, Y) plus on_wall(X, wall); the centerline belongs to Y, not to
 the full wall.
 
-Use one_per_support for explicit "one X on/at each Y" requirements. Give both
-selectors the same explicit count and quantifier="all". Use corner_distribution
+Use one_per_support for explicit "one X on/at each Y" requirements. Give
+subject_count and target_count the same explicit value and use
+subject_quantifier="all" and target_quantifier="all". Use corner_distribution
 only when the prompt explicitly assigns multiple subjects to distinct room
 corners or says one subject per corner; ordinary singular corner wording uses
 corner_of_room.
 
 For a unary relation that says an object is on/near one, another, or the other
-member of a target category that the prompt explicitly repeats, keep one target
-selector with count 1 but use targets.quantifier="at_least". This is an
-existential relation: any matching target may satisfy it, without selecting an
-arbitrary generated object ID. Use quantifier="exactly" only when the prompt
-identifies a unique target instance.
+member of a target category that the prompt explicitly repeats, keep one
+target_ref with target_count=1 but use target_quantifier="at_least". This is
+an existential relation: any matching target may satisfy it, without selecting
+an arbitrary generated object ID. Use target_quantifier="exactly" only when the
+prompt identifies a unique target instance.
 
 For collective subject wording such as a set, collection, assortment, or
-several objects, use subjects.quantifier="at_least". The selector count is a
+several objects, use subject_quantifier="at_least". The subject_count is a
 minimum; do not turn an unspecified collection into an exactly-one hard
 constraint just because the collection itself is singular.
 
@@ -1839,6 +1887,7 @@ class IntentCompiler:
             started_at = time.perf_counter()
             response = None
             raw = ""
+            semantic_ir: Any = None
             try:
                 response = self._client.chat.completions.create(
                     model=self._model,
@@ -1897,6 +1946,11 @@ class IntentCompiler:
                     "retry_count": attempt,
                     "failure_reason": "",
                     "attempts": attempts,
+                    "rejected_entity_refs": [
+                        row
+                        for attempt_row in attempts
+                        for row in attempt_row.get("rejected_entity_refs") or []
+                    ],
                 }
                 _append_llm_debug(
                     build_llm_call_debug_record(
@@ -1925,6 +1979,9 @@ class IntentCompiler:
                 previous_output = (
                     "" if self._finish_reason(response) == "length" else raw
                 )
+                rejected_entity_refs = _rejected_entity_refs(
+                    semantic_ir, entity_catalog
+                )
                 attempts.append(
                     {
                         "attempt": attempt,
@@ -1933,6 +1990,7 @@ class IntentCompiler:
                         "finish_reason": self._finish_reason(response),
                         "token_usage": self._token_usage(response),
                         "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                        "rejected_entity_refs": rejected_entity_refs,
                     }
                 )
                 _append_llm_debug(
@@ -1953,6 +2011,7 @@ class IntentCompiler:
                         "semantic_ir_version": INTENT_COMPILER_SEMANTIC_IR_VERSION,
                         "entity_catalog": list(entity_catalog.values()),
                         "error": last_error,
+                        "rejected_entity_refs": rejected_entity_refs,
                     }
                 )
                 logger.warning(
@@ -1971,6 +2030,11 @@ class IntentCompiler:
             "retry_count": 1,
             "failure_reason": last_error,
             "attempts": attempts,
+            "rejected_entity_refs": [
+                row
+                for attempt in attempts
+                for row in attempt.get("rejected_entity_refs") or []
+            ],
         }
         raise IntentCompilationError(
             f"IntentCompiler failed after two attempts: {last_error}",

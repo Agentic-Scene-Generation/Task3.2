@@ -2233,6 +2233,50 @@ def test_room_containment_repair_preserves_rotated_obb_yaw(
     )
 
 
+def test_room_containment_targets_preserve_yaw_despite_wall_relation(
+    tmp_path: Path,
+) -> None:
+    sofa = _object(
+        "sofa_0",
+        "sofa",
+        (0.0, 2.25, 0.45),
+        (1.70, 0.80, 0.90),
+        yaw_deg=30.0,
+    )
+    scene = _scene(tmp_path, sofa)
+    payload = evaluate_room_scene(
+        scene,
+        config=CriticConfig(enabled=True, metrics=("functional_dependency",)),
+        stage="containment_with_wall_relation",
+    )
+    containment = next(
+        result
+        for result in payload["results"]
+        if result.get("relation_type") == "room_containment"
+        and result.get("label") == "fail"
+    )
+    wall_relation = {
+        "primary_object": "sofa_0",
+        "relation_type": "back_against_wall",
+        "selected_related_objects": ["north_wall"],
+    }
+    context = _RepairHandlerContext(
+        scene=scene,
+        payload={"results": [containment, wall_relation]},
+        result=containment,
+        check_id=str(containment["check_id"]),
+        relation="room_containment",
+        diagnostics=dict(containment.get("diagnostics") or {}),
+        coordinated_front_checks=set(),
+        claimed_near_checks=set(),
+    )
+
+    targets = furniture_relation_repair._room_containment_repair_targets(context)
+
+    assert targets
+    assert all(target.target_yaw_deg is None for target in targets)
+
+
 def test_wall_backed_relation_rejects_exterior_wall_side(tmp_path: Path) -> None:
     sofa = _object(
         "sofa_0",

@@ -2101,6 +2101,7 @@ class SceneExpertHookRunner:
                 and any(
                     issue.relation == ROOM_CONTAINMENT_FAILURE_CODE
                     and issue.scoring_tier == "core"
+                    and issue.issue_type == "deterministic_relation_failure"
                     for issue in verify_report.issues
                 )
                 else ()

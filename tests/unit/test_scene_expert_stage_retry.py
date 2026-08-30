@@ -579,6 +579,57 @@ def test_exhausted_quality_failure_is_retained_for_final_verification(
     assert runner._completed_stages == []
 
 
+def test_non_deterministic_containment_named_issue_is_not_a_stage_blocker(
+    tmp_path,
+) -> None:
+    failed_report = StageVerifyReport(
+        stage="furniture",
+        pass_stage=False,
+        issues=[
+            VerifyIssue(
+                issue_type="low_functionality",
+                relation="room_containment",
+                scoring_tier="core",
+                description="Visual review requires another repair attempt",
+            )
+        ],
+    )
+    runner = object.__new__(SceneExpertHookRunner)
+    runner._mode = "harness_only"
+    runner._component_flags = {"verifier": True, "repair": True}
+    runner._current_stage = "furniture"
+    runner._original_text_descriptions = {"furniture": "original prompt"}
+    runner._stage_verifier = Mock(verify=Mock(return_value=failed_report))
+    runner._task_spec = SimpleNamespace(room_type="office")
+    runner._current_stage_brief = None
+    runner._harness = Mock(
+        decide_repair=Mock(
+            return_value=RepairDecision(
+                should_repair=False,
+                strategy="none",
+                reason="Repair budget exhausted",
+            )
+        )
+    )
+    runner._repair_controller = Mock()
+    runner._pending_stage_repairs = {}
+    runner._stage_reports = []
+    runner._completed_stages = []
+    runner._stage_start_time = time.time()
+    runner._current_memory_pack = SimpleNamespace()
+    runner._current_relation_context = None
+    runner._current_planner_trace = {}
+    runner._qwen_calls = 0
+    runner._commit_stage_memory = Mock()
+    runner._trace_logger = Mock()
+
+    result = runner.post_stage(
+        "furniture", SimpleNamespace(text_description="brief", objects={}), tmp_path
+    )
+
+    assert result.non_degradable_blockers == ()
+
+
 @pytest.mark.parametrize(
     "result",
     [

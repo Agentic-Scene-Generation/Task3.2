@@ -27,6 +27,7 @@ from scenesmith.scenebenchmark_critic.intent_compiler import (
     IntentCompiler,
     _attach_grounding_provenance,
     _grounding_catalog,
+    _system_prompt,
     _validate_contract_completeness,
 )
 from scenesmith.scenebenchmark_critic.intent_contract import (
@@ -2722,6 +2723,7 @@ def test_intent_compiler_projects_grounded_catalog_relations_and_coverage() -> N
                             "requirement_id": "inventory",
                             "kind": "inventory",
                             "grounding": "prompt:0",
+                            "subject_ref": "inventory:display_shelf",
                         },
                         {
                             "requirement_id": "wall_relation",
@@ -2843,7 +2845,116 @@ def test_intent_compiler_retries_hallucinated_ref_then_preserves_unresolved_cove
     assert bowl_relation["subjects"]["category"] == "bowl_of_fruit"
     assert compiler.last_trace["status"] == "retry_ok"
     assert "unbound entity_ref" in compiler.last_trace["attempts"][0]["error"]
+    assert compiler.last_trace["attempts"][0]["rejected_entity_refs"] == [
+        {
+            "requirement_id": "phantom",
+            "grounding": "prompt:0",
+            "entity_ref": "inventory:phantom_object",
+            "reason": "unknown_or_unbound_entity_ref",
+        }
+    ]
+    assert (
+        compiler.last_trace["rejected_entity_refs"]
+        == compiler.last_trace["attempts"][0]["rejected_entity_refs"]
+    )
     assert result["coverage_requirements"][0]["disposition"] == "unresolved"
+
+
+def test_intent_compiler_rejects_unbound_inventory_claim_before_coverage_admission() -> (
+    None
+):
+    task_spec = SceneTaskSpec(
+        room_type="office", style="standard", required_large_objects=["desk"]
+    )
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "desk",
+                            "kind": "inventory",
+                            "grounding": "prompt:0",
+                        }
+                    ]
+                )
+            ),
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "desk",
+                            "kind": "inventory",
+                            "grounding": "prompt:0",
+                            "subject_ref": "inventory:desk",
+                        }
+                    ]
+                )
+            ),
+        ]
+    )
+
+    result = compiler.compile("An office with a desk.", task_spec=task_spec)
+
+    assert result["retry_count"] == 1
+    assert compiler.last_trace["status"] == "retry_ok"
+    assert (
+        "inventory requires an inventory subject_ref"
+        in compiler.last_trace["attempts"][0]["error"]
+    )
+    assert [row["relation"] for row in result["constraints"]] == ["required_count"]
+    assert result["coverage_ledger"] == [
+        {
+            "requirement_id": "desk",
+            "grounding": "prompt:0",
+            "kind": "inventory",
+            "entity_refs": ["inventory:desk"],
+            "surface_mentions": [],
+            "reason": "",
+            "disposition": "compiled",
+        }
+    ]
+
+
+def test_intent_compiler_failure_trace_keeps_all_rejected_entity_refs() -> None:
+    task_spec = SceneTaskSpec(
+        room_type="office", style="standard", required_large_objects=["desk"]
+    )
+    hallucinated_ir = _semantic_ir(
+        [
+            {
+                "requirement_id": "monitor",
+                "kind": "relation",
+                "grounding": "prompt:0",
+                "relation": "near",
+                "subject_ref": "inventory:monitor",
+                "target_ref": "inventory:desk",
+            }
+        ]
+    )
+    compiler = _compiler_with_responses(
+        [_response(hallucinated_ir), _response(hallucinated_ir)]
+    )
+
+    with pytest.raises(IntentCompilationError, match="failed after two attempts"):
+        compiler.compile("An office with a desk.", task_spec=task_spec)
+
+    assert [
+        row["entity_ref"] for row in compiler.last_trace["rejected_entity_refs"]
+    ] == ["inventory:monitor", "inventory:monitor"]
+    assert all(
+        attempt["rejected_entity_refs"] for attempt in compiler.last_trace["attempts"]
+    )
+
+
+def test_intent_compiler_prompt_describes_semantic_ir_refs_not_legacy_selectors() -> (
+    None
+):
+    prompt = _system_prompt()
+
+    assert "subject_ref, target_ref" in prompt
+    assert "do not emit targets, subjects, category" in prompt
+    assert '"target_ref": "inventory:bed"' in prompt
 
 
 def test_intent_compiler_keeps_relation_cohort_distinct_from_inventory_total() -> None:
