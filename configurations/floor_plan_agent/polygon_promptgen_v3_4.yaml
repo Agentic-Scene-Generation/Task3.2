@@ -1,0 +1,19 @@
+# PromptGen v3.4 dataset-specific polygon execution profile.
+
+defaults:
+  - stateful_floor_plan_agent
+  - _self_
+
+mode: "polygon"
+
+polygon:
+  max_vertices: 32
+  min_area_m2: 4.0
+  # The dataset minimum is 0.33m (PromptID 000075).
+  min_edge_length_m: 0.30
+  min_interior_angle_deg: 20.0
+  coordinate_precision: 4
+
+# The dataset minimum AABB dimension is 1.44m (PromptID 000088).
+min_floor_plan_dim_m: 1.40
+max_floor_plan_dim_m: 20

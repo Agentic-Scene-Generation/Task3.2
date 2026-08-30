@@ -17,11 +17,17 @@ prompt: |
   - No adjacencies
   - Focus: dimensions, wall height, openings, materials
   - The room prompt is set automatically from the house description
-  {% else %}
+  {% elif mode == "house" %}
   **HOUSE MODE**:
   - Multiple rooms with adjacencies
   - All rooms connected via doors
   - At least one exterior door required
+  {% else %}
+  **POLYGON MODE**:
+  - Single room with a convex or concave simple polygon footprint
+  - Walls are addressed by stable labels W00, W01, ... in polygon edge order
+  - No room adjacency or open-connection operations
+  - Use set_room_polygon() instead of resize_room() when changing the shape
   {% endif %}
 
   # Tool Usage
@@ -99,18 +105,16 @@ prompt: |
 
   ## Phase 1: Room Layout
 
+  {% if mode == "polygon" %}
+  Call `generate_polygon_room()` first with one JSON object containing `type`,
+  optional `prompt`, and ordered `[x, y]` vertices in meters. Use a simple boundary
+  with no holes or self-intersections. Use `render_ascii()` to inspect W00/W01/...
+  wall labels. If the footprint needs revision, call `set_room_polygon()`; doing so
+  clears existing doors and windows because edge identities may change.
+  {% else %}
   Call `generate_room_specs()` with room specifications.
+  {% endif %}
   {% if mode == "house" %}
-
-  **Distinct Named Rooms Must Stay Distinct**:
-  When the house description explicitly names multiple rooms, create one room
-  spec for each named room using its canonical type (for example,
-  `living_room`, `dining_room`, and `kitchen`). Do not collapse them into a
-  compound type such as `living_dining_kitchen`, even when the requested space
-  is open-plan. Use `add_open_connection()` after creation to make distinct
-  rooms flow together. Later furniture capacity and wall reservations match
-  canonical room types, so a compound label makes those hard requirements
-  impossible to verify.
 
   **CRITICAL - Room Prompt Requirements**:
 
@@ -183,7 +187,9 @@ prompt: |
   {% endif %}
 
   After layout:
+  {% if mode != "polygon" %}
   - `resize_room()` to adjust dimensions if needed
+  {% endif %}
   {% if mode == "house" %}
   - `add_adjacency()`/`remove_adjacency()` for wall connections
   {% endif %}

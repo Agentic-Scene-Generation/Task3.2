@@ -1609,12 +1609,35 @@ def apply_surface_projection(
                 "the pile at a different location."
             )
 
-    # Record original positions for displacement tracking.
+    # Record complete state so an exact concave-floor gate can atomically roll back.
+    import copy
+
+    from scenesmith.floor_plan_agents.tools.polygon_geometry import (
+        exact_surface_covers_object,
+    )
+
     original_positions: dict[UniqueID, np.ndarray] = {}
+    original_transforms = {}
+    original_metadata = {}
+    original_placement_info = {}
     for obj_id in object_ids:
         obj = scene.get_object(obj_id)
         if obj is not None:
             original_positions[obj_id] = obj.transform.translation().copy()
+            original_transforms[obj_id] = obj.transform
+            original_metadata[obj_id] = copy.deepcopy(obj.metadata)
+            original_placement_info[obj_id] = copy.deepcopy(obj.placement_info)
+
+    def restore_original_state() -> None:
+        for restore_id, transform in original_transforms.items():
+            restore_obj = scene.get_object(restore_id)
+            if restore_obj is None:
+                continue
+            restore_obj.transform = transform
+            restore_obj.metadata = copy.deepcopy(original_metadata[restore_id])
+            restore_obj.placement_info = copy.deepcopy(
+                original_placement_info[restore_id]
+            )
 
     # Get surface boundary as HPolyhedron.
     surface_vpoly = surface.get_xy_convex_hull()
@@ -1805,6 +1828,21 @@ def apply_surface_projection(
             operation_name="Surface projection",
         )
 
+        if surface.exact_boundary_vertices is not None:
+            invalid_ids = [
+                obj_id
+                for obj_id in object_ids
+                if (obj := scene.get_object(obj_id)) is None
+                or not exact_surface_covers_object(surface, obj)
+            ]
+            if invalid_ids:
+                restore_original_state()
+                console_logger.warning(
+                    "Surface projection rejected by exact concave-boundary gate: %s",
+                    [str(obj_id) for obj_id in invalid_ids],
+                )
+                return scene, False, [], 0.0
+
         # Compute displacements for moved objects.
         moved_ids: list[UniqueID] = []
         max_displacement = 0.0
@@ -1846,6 +1884,8 @@ def apply_surface_projection(
         return scene, True, moved_ids, max_displacement
 
     except Exception as e:
+        if surface.exact_boundary_vertices is not None:
+            restore_original_state()
         console_logger.error(f"Surface projection failed with exception: {e}")
         return scene, False, [], 0.0
 

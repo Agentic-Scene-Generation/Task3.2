@@ -1479,6 +1479,11 @@ class SceneExpertHookRunner:
             with layout_path.open(encoding="utf-8") as stream:
                 layout = HouseLayout.from_dict(json.load(stream), house_dir=scene_dir)
             deterministic = validate_floor_plan_reservations(layout, manifest)
+            if deterministic.advisories:
+                console_logger.warning(
+                    "Floor-plan reservation advisories accepted: %s",
+                    json.dumps(deterministic.advisories, sort_keys=True),
+                )
             if not deterministic.passed:
                 issue_types = [
                     str(issue.get("issue_type") or "reservation_failure")
@@ -2768,12 +2773,17 @@ def build_hook_runner(
         api_key=api_key,
         llm_client=structured_llm_client,
     )
+    floor_plan_reservation_cfg = _deep_merge_dicts(
+        root_se_cfg.get("floor_plan_reservations", {}),
+        se_cfg.get("floor_plan_reservations", {}),
+    )
     relation_projector = StageRelationProjector(
         floor_plan_reservation_gate_enabled=bool(
-            _deep_merge_dicts(
-                root_se_cfg.get("floor_plan_reservations", {}),
-                se_cfg.get("floor_plan_reservations", {}),
-            ).get("enabled", False)
+            floor_plan_reservation_cfg.get("enabled", False)
+        ),
+        prompt=prompt,
+        explicit_geometry_policy=dict(
+            floor_plan_reservation_cfg.get("explicit_geometry_policy", {}) or {}
         ),
     )
     repair_controller = RepairController(memory_store=memory_store)

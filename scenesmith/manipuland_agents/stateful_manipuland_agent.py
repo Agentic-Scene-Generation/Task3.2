@@ -20,6 +20,7 @@ import numpy as np
 from omegaconf import DictConfig, OmegaConf
 from pydrake.all import RigidTransform, RollPitchYaw
 
+from scenesmith.agent_utils.asset_scaling_policy import agent_rescale_tools_enabled
 from scenesmith.agent_utils.base_stateful_agent import (
     BaseStatefulAgent,
     log_agent_usage,
@@ -486,6 +487,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             prompt_constraints=selection.prompt_constraints,
             style_notes=selection.style_notes,
             has_reference_image=self.manipuland_context_image_path is not None,
+            asset_rescaling_enabled=agent_rescale_tools_enabled(self.cfg),
         )
 
     def _create_critic_agent(
@@ -516,6 +518,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             suggested_items=selection.suggested_items,
             prompt_constraints=selection.prompt_constraints,
             style_notes=selection.style_notes,
+            asset_rescaling_enabled=agent_rescale_tools_enabled(self.cfg),
         )
 
     def _create_planner_agent(

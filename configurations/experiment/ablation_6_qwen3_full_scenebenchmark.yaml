@@ -18,9 +18,23 @@ defaults:
 # dimensions still participate in retrieval candidate ranking.
 hssd_scale_to_requested_dimensions: false
 
+# Preserve native HSSD dimensions and prevent all placement agents from
+# exposing runtime asset-rescale tools. Independent of furniture safety.
+asset_scaling:
+  enabled: false
+  hssd_dimension_fit_enabled: false
+  agent_rescale_tools_enabled: false
+
 scene_expert:
   enabled: true
   mode: "full"
+  # Enforce the future-capacity contract before furniture/wall stages.
+  floor_plan_reservations:
+    enabled: true
+    explicit_geometry_policy:
+      enabled: true
+      functional_zone_area: advisory
+      verify_geometry_match: true
   memory:
     dir: "${paths.memory_dir}/ablation_6"
     retrieval:

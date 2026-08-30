@@ -17,6 +17,7 @@ from typing import Any
 
 from scenesmith.agent_utils.thinking import (
     chat_template_kwargs_from_effort,
+    openrouter_extra_body,
     prepend_text_thinking_directive,
     thinking_directive_from_effort,
 )
@@ -945,8 +946,10 @@ class TaskCompiler:
                         name="scene_task_spec",
                         schema=_task_compiler_wire_schema(),
                     ),
-                    extra_body=chat_template_kwargs_from_effort(
-                        "none", model=self._model
+                    extra_body=openrouter_extra_body(
+                        chat_template_kwargs_from_effort(
+                            "none", model=self._model
+                        )
                     ),
                 )
                 response_elapsed_sec = round(time.perf_counter() - started_at, 6)

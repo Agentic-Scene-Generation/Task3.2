@@ -42,16 +42,20 @@ def _opening_free_spans(wall: Wall) -> list[tuple[float, float]]:
 
 def _wall_label(layout: HouseLayout, wall: Wall) -> str:
     """Find the ASCII boundary label for a wall when one is available."""
+    direction_value = getattr(wall.direction, "value", None)
     for label, boundary in layout.boundary_labels.items():
         room_a, room_b, direction = boundary
-        direction_value = getattr(direction, "value", direction)
+        boundary_direction = getattr(direction, "value", direction)
         if (
             wall.room_id == room_a
             and room_b is None
-            and direction_value == wall.direction.value
+            and boundary_direction == direction_value
         ):
             return label
-    return "unlabelled"
+    for label, wall_id in getattr(layout, "boundary_wall_ids", {}).items():
+        if wall_id == wall.wall_id:
+            return label
+    return wall.wall_id or "unlabelled"
 
 
 def format_floor_plan_critic_context(layout: HouseLayout) -> str:
@@ -88,8 +92,15 @@ def format_floor_plan_critic_context(layout: HouseLayout) -> str:
             f"({area:.2f}m2), position=({room.position[0]:.2f}, "
             f"{room.position[1]:.2f})."
         )
-        for wall in sorted(room.walls, key=lambda item: item.direction.value):
+        for wall in sorted(
+            room.walls,
+            key=lambda item: (
+                getattr(item.direction, "value", ""),
+                item.wall_id,
+            ),
+        ):
             label = _wall_label(layout, wall)
+            direction = getattr(wall.direction, "value", "polygon_edge")
             opening_text = (
                 "; ".join(
                     f"{opening.opening_id}={opening.opening_type.value} "
@@ -105,7 +116,7 @@ def format_floor_plan_critic_context(layout: HouseLayout) -> str:
             spans = _opening_free_spans(wall)
             longest = max((end - start for start, end in spans), default=0.0)
             lines.append(
-                f"  - wall {label} ({wall.direction.value}, "
+                f"  - wall {label} ({direction}, "
                 f"{'exterior' if wall.is_exterior else 'interior'}): "
                 f"length={wall.length:.2f}m; openings={opening_text}; "
                 f"opening-free spans={_format_intervals(spans) or 'none'} "

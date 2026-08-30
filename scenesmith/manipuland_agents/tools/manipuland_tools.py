@@ -19,6 +19,10 @@ from shapely.geometry import Polygon
 from typing_extensions import TypedDict
 
 from scenesmith.agent_utils.action_logger import log_scene_action
+from scenesmith.agent_utils.asset_scaling_policy import (
+    agent_rescale_tools_enabled,
+    filter_agent_rescale_tools,
+)
 from scenesmith.agent_utils.asset_manager import AssetGenerationRequest, AssetManager
 from scenesmith.agent_utils.semantic_names import semantic_name_candidates_for_request
 from scenesmith.agent_utils.loop_detector import LoopDetector
@@ -28,6 +32,7 @@ from scenesmith.agent_utils.placement_noise import (
     apply_placement_noise,
 )
 from scenesmith.agent_utils.rescale_helpers import rescale_object_common
+from scenesmith.agent_utils.rescale_result import RescaleErrorType, RescaleResult
 from scenesmith.agent_utils.response_datatypes import (
     AssetGenerationResult,
     AssetInfo,
@@ -71,6 +76,9 @@ from scenesmith.manipuland_agents.tools.response_dataclasses import (
     SupportSurfaceWithManipulands,
 )
 from scenesmith.manipuland_agents.tools.stack_tools import create_stack_tool_impl
+from scenesmith.floor_plan_agents.tools.polygon_geometry import (
+    exact_surface_covers_object,
+)
 from scenesmith.scenebenchmark_critic import room_scene_to_case_pack
 from scenesmith.scenebenchmark_critic.intent_contract import (
     intent_contract_constraints_for_scene,
@@ -1561,22 +1569,27 @@ class ManipulandTools:
                 },
             )
 
-        return {
-            "list_support_surfaces": list_support_surfaces,
-            "generate_manipuland_assets": generate_manipuland_assets,
-            "place_manipuland_on_surface": place_manipuland_on_surface,
-            "move_manipuland": move_manipuland,
-            "align_dining_place_settings": align_dining_place_settings,
-            "remove_manipuland": remove_manipuland,
-            "rescale_manipuland": rescale_manipuland,
-            "get_current_scene_state": get_current_scene_state,
-            "list_available_assets": list_available_assets,
-            "create_stack": create_stack,
-            "fill_container": fill_container,
-            "create_arrangement": create_arrangement,
-            "create_pile": create_pile,
-            # "resolve_penetrations": resolve_penetrations,  # Disabled: 0% success rate in experiments
-        }
+        return filter_agent_rescale_tools(
+            {
+                "list_support_surfaces": list_support_surfaces,
+                "generate_manipuland_assets": generate_manipuland_assets,
+                "place_manipuland_on_surface": place_manipuland_on_surface,
+                "move_manipuland": move_manipuland,
+                "align_dining_place_settings": align_dining_place_settings,
+                "remove_manipuland": remove_manipuland,
+                "rescale_manipuland": rescale_manipuland,
+                "get_current_scene_state": get_current_scene_state,
+                "list_available_assets": list_available_assets,
+                "create_stack": create_stack,
+                "fill_container": fill_container,
+                "create_arrangement": create_arrangement,
+                "create_pile": create_pile,
+                # Disabled after 0% success rate in experiments:
+                # "resolve_penetrations": resolve_penetrations,
+            },
+            self.cfg,
+            tool_names={"rescale_manipuland"},
+        )
 
     @log_scene_action
     def _place_manipuland_on_surface_impl(
@@ -1744,6 +1757,27 @@ class ManipulandTools:
                 position_xy_std_meters=self.active_noise_profile.position_xy_std_meters,
                 rotation_yaw_std_degrees=self.active_noise_profile.rotation_yaw_std_degrees,
             )
+
+            noisy_position, noisy_rotation = target_surface.from_world_pose(
+                world_transform
+            )
+            noisy_valid, noisy_error = self._validate_convex_hull_footprint(
+                target_surface=target_surface,
+                geometry_path=original_asset.geometry_path,
+                position_2d=noisy_position,
+                rotation_degrees=math.degrees(noisy_rotation),
+                allow_overlap_ratio=overlap_ratio,
+                scale_factor=original_asset.scale_factor,
+            )
+            if not noisy_valid:
+                return self._create_placement_failure_result(
+                    asset_id=asset_id,
+                    message=(
+                        "Placement noise moved the object outside the support "
+                        f"boundary. {noisy_error}"
+                    ),
+                    error_type=ManipulandErrorType.POSITION_OUT_OF_BOUNDS,
+                )
 
             # Create new scene object with unique ID.
             object_id = self.scene.generate_unique_id(original_asset.name)
@@ -2045,6 +2079,39 @@ class ManipulandTools:
                 position_xy_std_meters=self.active_noise_profile.position_xy_std_meters,
                 rotation_yaw_std_degrees=self.active_noise_profile.rotation_yaw_std_degrees,
             )
+
+            noisy_position, noisy_rotation = target_surface.from_world_pose(
+                world_transform
+            )
+            noisy_valid, noisy_error = self._validate_convex_hull_footprint(
+                target_surface=target_surface,
+                geometry_path=geometry_path,
+                position_2d=noisy_position,
+                rotation_degrees=math.degrees(noisy_rotation),
+                allow_overlap_ratio=overlap_ratio,
+                scale_factor=scene_obj.scale_factor,
+            )
+            if not noisy_valid:
+                return self._create_placement_failure_result(
+                    asset_id=object_id,
+                    message=(
+                        "Placement noise would move the object outside the support "
+                        f"boundary; the original pose was kept. {noisy_error}"
+                    ),
+                    error_type=ManipulandErrorType.POSITION_OUT_OF_BOUNDS,
+                )
+
+            candidate = copy.copy(scene_obj)
+            candidate.transform = world_transform
+            if not exact_surface_covers_object(target_surface, candidate):
+                return self._create_placement_failure_result(
+                    asset_id=object_id,
+                    message=(
+                        "The moved composite footprint would extend outside the "
+                        "exact support boundary; the original pose was kept."
+                    ),
+                    error_type=ManipulandErrorType.POSITION_OUT_OF_BOUNDS,
+                )
 
             # For stacks, capture old transform before moving to compute delta.
             old_stack_transform = scene_obj.transform
@@ -3314,6 +3381,51 @@ class ManipulandTools:
         console_logger.info(
             f"Tool called: rescale_manipuland (id={object_id}, scale={scale_factor})"
         )
+        if not agent_rescale_tools_enabled(self.cfg):
+            return RescaleResult(
+                success=False,
+                message="Manipuland rescaling is disabled by the asset scaling policy.",
+                object_id=object_id,
+                error_type=RescaleErrorType.RESCALING_DISABLED,
+            ).to_json()
+        scene_obj = self.scene.get_object(UniqueID(object_id))
+        affected = (
+            [
+                candidate
+                for candidate in self.scene.objects.values()
+                if scene_obj is not None and candidate.sdf_path == scene_obj.sdf_path
+            ]
+            if scene_obj is not None and scene_obj.sdf_path is not None
+            else ([scene_obj] if scene_obj is not None else [])
+        )
+        for affected_obj in affected:
+            if affected_obj.placement_info is None:
+                continue
+            surface = self.support_surfaces.get(
+                str(affected_obj.placement_info.parent_surface_id)
+            )
+            if surface is not None and affected_obj.geometry_path is not None:
+                valid, error = self._validate_convex_hull_footprint(
+                    target_surface=surface,
+                    geometry_path=affected_obj.geometry_path,
+                    position_2d=affected_obj.placement_info.position_2d,
+                    rotation_degrees=math.degrees(
+                        affected_obj.placement_info.rotation_2d
+                    ),
+                    allow_overlap_ratio=0.0,
+                    scale_factor=affected_obj.scale_factor * scale_factor,
+                )
+                if not valid:
+                    return RescaleResult(
+                        success=False,
+                        message=(
+                            f"Rescale would move shared instance "
+                            f"'{affected_obj.object_id}' beyond its support boundary. "
+                            f"{error}"
+                        ),
+                        object_id=object_id,
+                        error_type=RescaleErrorType.RESCALE_FAILED,
+                    ).to_json()
         result = rescale_object_common(
             scene=self.scene,
             object_id=object_id,

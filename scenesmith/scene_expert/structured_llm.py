@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from scenesmith.agent_utils.thinking import (
     chat_template_kwargs_from_effort,
+    openrouter_extra_body,
     prepend_text_thinking_directive,
     thinking_directive_from_effort,
 )
@@ -405,9 +406,11 @@ class SceneExpertStructuredLLMClient:
             "messages": messages,
             "temperature": profile.temperature,
             "max_tokens": max_tokens,
-            "extra_body": chat_template_kwargs_from_effort(
-                thinking_mode,
-                model=self.model,
+            "extra_body": openrouter_extra_body(
+                chat_template_kwargs_from_effort(
+                    thinking_mode,
+                    model=self.model,
+                )
             ),
         }
         if response_format == "json_schema":

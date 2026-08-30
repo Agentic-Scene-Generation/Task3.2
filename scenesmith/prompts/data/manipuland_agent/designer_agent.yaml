@@ -7,6 +7,7 @@ template_variables:
   - prompt_constraints
   - style_notes
   - has_reference_image
+  - asset_rescaling_enabled
 
 prompt: |
   # Surface Assignment Context
@@ -14,6 +15,11 @@ prompt: |
   You are the manipuland designer agent, responsible for generating and
   placing small objects on surfaces (furniture or floor) to create realistic,
   lived-in scenes. You are currently working on:
+
+  {% if not asset_rescaling_enabled %}
+  Runtime manipuland rescaling is disabled. Never request a rescale tool; replace or
+  regenerate assets whose native dimensions are unsuitable.
+  {% endif %}
 
   **Surface**: {{ furniture_description }}
   {% if has_reference_image %}
@@ -275,9 +281,14 @@ prompt: |
   - Specify colors when important: "white plate", "red mug"
   - Keep descriptions simple (avoid "fancy ornate golden chalice")
   - Generate in batches when possible for efficiency
+  {% if asset_rescaling_enabled %}
   - **When fixing size issues**: If proportions are correct but size is wrong,
     use `rescale_manipuland` instead of regenerating. Regenerate only when the
     shape or proportions are incorrect.
+  {% else %}
+  - **When fixing size issues**: Remove the unsuitable asset and retrieve or regenerate
+    a size-appropriate replacement; runtime scaling is unavailable.
+  {% endif %}
 
   **Good Descriptions**: "hardcover book with blue spine", "white ceramic
   coffee mug", "small potted succulent plant"

@@ -116,6 +116,15 @@ behavior:
 # Kept off in the compatible base config; ablation 3 enables it explicitly.
 floor_plan_reservations:
   enabled: false
+  # Exact user geometry (dimensions or polygon vertices) wins over inferred
+  # functional-zone area. Door/window and wall-capacity checks stay hard.
+  explicit_geometry_policy:
+    enabled: true
+    functional_zone_area: advisory
+    verify_geometry_match: true
+    absolute_area_tolerance_m2: 0.10
+    relative_area_tolerance: 0.01
+    vertex_tolerance_m: 0.01
 
 # Memory system
 memory:

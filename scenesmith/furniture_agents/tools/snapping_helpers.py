@@ -37,6 +37,38 @@ DEGENERATE_VOLUME_THRESHOLD = 1e-6  # Zero-volume detection.
 ZERO_DISTANCE_THRESHOLD = 1e-6  # Distance comparison threshold.
 
 
+def snap_to_oriented_wall(
+    obj: SceneObject, target: SceneObject, cfg: DictConfig
+) -> tuple[np.ndarray, float]:
+    """Snap to the room-facing plane of an arbitrary-yaw rectangular wall."""
+    normal = target.metadata.get("inward_normal")
+    if normal is None:
+        raise ValueError(f"Wall {target.name} has no inward normal")
+    normal_3d = np.array([normal[0], normal[1], 0.0], dtype=float)
+    normal_3d /= np.linalg.norm(normal_3d)
+    obj_vertices = get_collision_vertices_world(obj)
+
+    bbox_min, bbox_max = target.bbox_min, target.bbox_max
+    if bbox_min is None or bbox_max is None:
+        raise ValueError(f"Wall {target.name} has no bounds")
+    target_local_corners = np.array(
+        [
+            [x, y, z]
+            for x in (bbox_min[0], bbox_max[0])
+            for y in (bbox_min[1], bbox_max[1])
+            for z in (bbox_min[2], bbox_max[2])
+        ]
+    )
+    target_vertices = np.array(
+        [target.transform @ corner for corner in target_local_corners]
+    )
+    wall_face = np.max(target_vertices @ normal_3d)
+    object_near_face = np.min(obj_vertices @ normal_3d)
+    signed_move = wall_face + cfg.snap_to_object.snap_margin_m - object_near_face
+    movement = normal_3d * signed_move
+    return movement, float(abs(signed_move))
+
+
 def snap_mesh_to_aabb(
     obj: SceneObject, target: SceneObject, cfg: DictConfig
 ) -> tuple[np.ndarray, float]:
@@ -862,7 +894,13 @@ def select_and_execute_snap_algorithm(
     """
     start_time = time.time()
     try:
-        if orientation_applied:
+        if (
+            target.object_type == ObjectType.WALL
+            and target.metadata.get("inward_normal") is not None
+        ):
+            movement_vector, distance = snap_to_oriented_wall(obj, target, cfg)
+            algorithm = "oriented-wall"
+        elif orientation_applied:
             # Axis-constrained snapping: move only along facing direction.
             # This preserves the facing relationship established.
 

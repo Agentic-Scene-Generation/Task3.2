@@ -20,6 +20,7 @@ from scenesmith.floor_plan_agents.reservation_validator import (
 from scenesmith.floor_plan_agents.tools.floor_plan_tools import FloorPlanTools
 from scenesmith.floor_plan_agents.tools.room_placement import get_shared_edge
 from scenesmith.scene_expert.schemas import (
+    ExplicitFloorGeometryPolicy,
     FloorPlanReservation,
     FloorPlanReservationManifest,
 )
@@ -63,6 +64,139 @@ def test_adaptive_implicit_window_budget_thresholds():
     assert adaptive_implicit_window_budget(25.01) == 2
     assert adaptive_implicit_window_budget(50.0) == 2
     assert adaptive_implicit_window_budget(50.01) == 3
+
+
+def test_explicit_polygon_geometry_makes_functional_area_advisory() -> None:
+    layout = HouseLayout()
+    tools = FloorPlanTools(layout=layout, mode="polygon")
+    result = tools._generate_polygon_room_impl(
+        json.dumps(
+            {
+                "type": "bedroom",
+                "vertices": [[0.0, 0.0], [3.19, 0.0], [3.19, 3.19], [0.0, 3.19]],
+            }
+        )
+    )
+    assert result.success
+    manifest = FloorPlanReservationManifest(
+        enabled=True,
+        preserve_entrance_route=False,
+        adaptive_window_budget=False,
+        explicit_geometry=ExplicitFloorGeometryPolicy(
+            detected=True,
+            source="explicit_prompt",
+            mode="polygon",
+            expected_area_m2=10.1761,
+            expected_vertices=[(0.0, 0.0), (3.19, 0.0), (3.19, 3.19), (0.0, 3.19)],
+            functional_zone_area_policy="advisory",
+        ),
+        reservations=[
+            FloorPlanReservation(
+                reservation_id="bedroom-zones",
+                kind="functional_zone",
+                room_type="bedroom",
+                min_zone_area_m2=13.0,
+            )
+        ],
+    )
+
+    validation = validate_floor_plan_reservations(layout, manifest)
+
+    assert validation.passed
+    assert not validation.issues
+    assert validation.advisories == [
+        {
+            "room_type": "bedroom",
+            "required_m2": 13.0,
+            "available_m2": 10.1761,
+            "issue_type": "functional_zone_area_below_advisory_minimum",
+            "policy": "explicit_geometry_advisory",
+            "blocking": False,
+        }
+    ]
+
+
+def test_explicit_geometry_keeps_window_failures_hard() -> None:
+    layout = HouseLayout()
+    tools = FloorPlanTools(layout=layout, mode="polygon")
+    result = tools._generate_polygon_room_impl(
+        json.dumps(
+            {
+                "type": "bedroom",
+                "vertices": [[0.0, 0.0], [3.19, 0.0], [3.19, 3.19], [0.0, 3.19]],
+            }
+        )
+    )
+    assert result.success
+    manifest = FloorPlanReservationManifest(
+        enabled=True,
+        preserve_entrance_route=False,
+        adaptive_window_budget=False,
+        explicit_window_count=1,
+        explicit_window_required=True,
+        explicit_geometry=ExplicitFloorGeometryPolicy(
+            detected=True,
+            source="explicit_prompt",
+            mode="polygon",
+            expected_area_m2=10.1761,
+            expected_vertices=[(0.0, 0.0), (3.19, 0.0), (3.19, 3.19), (0.0, 3.19)],
+            functional_zone_area_policy="advisory",
+        ),
+        reservations=[
+            FloorPlanReservation(
+                reservation_id="bedroom-zones",
+                kind="functional_zone",
+                room_type="bedroom",
+                min_zone_area_m2=13.0,
+            )
+        ],
+    )
+
+    validation = validate_floor_plan_reservations(layout, manifest)
+
+    assert not validation.passed
+    assert any(
+        issue["issue_type"] == "missing_explicit_windows" for issue in validation.issues
+    )
+    assert any(
+        advisory["issue_type"] == "functional_zone_area_below_advisory_minimum"
+        for advisory in validation.advisories
+    )
+
+
+def test_explicit_polygon_mismatch_is_hard_failure() -> None:
+    layout = HouseLayout()
+    tools = FloorPlanTools(layout=layout, mode="polygon")
+    result = tools._generate_polygon_room_impl(
+        json.dumps(
+            {
+                "type": "bedroom",
+                "vertices": [[0.0, 0.0], [4.0, 0.0], [4.0, 3.0], [0.0, 3.0]],
+            }
+        )
+    )
+    assert result.success
+    manifest = FloorPlanReservationManifest(
+        enabled=True,
+        preserve_entrance_route=False,
+        adaptive_window_budget=False,
+        explicit_geometry=ExplicitFloorGeometryPolicy(
+            detected=True,
+            source="explicit_prompt",
+            mode="polygon",
+            expected_area_m2=10.1761,
+            expected_vertices=[(0.0, 0.0), (3.19, 0.0), (3.19, 3.19), (0.0, 3.19)],
+            functional_zone_area_policy="advisory",
+        ),
+    )
+
+    validation = validate_floor_plan_reservations(layout, manifest)
+
+    assert not validation.passed
+    assert any(
+        issue["issue_type"] == "explicit_geometry_mismatch"
+        for issue in validation.issues
+    )
 
 
 def test_opening_free_spans_treats_position_as_left_edge():

@@ -273,7 +273,7 @@ def test_strict_window_adjacency_projects_v2_capacity_and_window_count() -> None
 
     manifest = context.floor_plan_manifest
     assert manifest is not None
-    assert manifest.schema_version == "scenesmith.floor_plan_reservations.v2"
+    assert manifest.schema_version == "scenesmith.floor_plan_reservations.v3"
     assert manifest.explicit_window_count == 2
     assert manifest.explicit_window_required
     reservations = [
@@ -300,6 +300,78 @@ def test_strict_window_adjacency_projects_v2_capacity_and_window_count() -> None
     ).lower()
     assert "table next to a window" in guidance
     assert "window-side segment" in guidance
+
+
+def test_exact_rectangular_prompt_enables_area_advisory() -> None:
+    context = StageRelationProjector(
+        floor_plan_reservation_gate_enabled=True,
+        prompt=(
+            "Use a rectangular room with the exact interior dimensions "
+            "Width=3.40m and Length=5.06m."
+        ),
+    ).project(
+        stage="floor_plan",
+        task_spec=_task_spec(functional_zones=["sleeping_zone", "storage_zone"]),
+        intent_contract=None,
+    )
+
+    manifest = context.floor_plan_manifest
+    assert manifest is not None
+    assert manifest.explicit_geometry.detected
+    assert manifest.explicit_geometry.mode == "room"
+    assert manifest.explicit_geometry.expected_area_m2 == 17.204
+    assert manifest.explicit_geometry.functional_zone_area_policy == "advisory"
+
+
+def test_exact_polygon_prompt_enables_advisory_guidance() -> None:
+    prompt = (
+        "Create exactly one irregular bedroom using these ordered floor-boundary "
+        "vertices in meters: [[0,0],[3.19,0],[3.19,3.19],[0,3.19]]. "
+        "This polygon has an area of approximately 10.18 m². The vertices define "
+        "the exact boundary and must be used as-is."
+    )
+    context = StageRelationProjector(
+        floor_plan_reservation_gate_enabled=True,
+        prompt=prompt,
+    ).project(
+        stage="floor_plan",
+        task_spec=_task_spec(functional_zones=["sleeping_zone", "storage_zone"]),
+        intent_contract=None,
+    )
+
+    manifest = context.floor_plan_manifest
+    assert manifest is not None
+    assert manifest.explicit_geometry.detected
+    assert manifest.explicit_geometry.mode == "polygon"
+    assert manifest.explicit_geometry.expected_area_m2 == 10.1761
+
+    brief = _add_floor_plan_reservation_guidance(
+        StageBrief(stage="floor_plan", stage_objective="Create a bedroom."),
+        HarnessContext(
+            stage="floor_plan",
+            task_spec=_task_spec(functional_zones=["sleeping_zone", "storage_zone"]),
+            memory_pack=MemoryPack(),
+            relation_context=context,
+        ),
+    )
+    guidance = "\n".join(brief.constraints_for_designer).lower()
+    assert "immutable" in guidance
+    assert "at least 9 m2 total usable area" not in guidance
+
+
+def test_shape_without_exact_dimensions_does_not_enable_advisory() -> None:
+    context = StageRelationProjector(
+        floor_plan_reservation_gate_enabled=True,
+        prompt="Create a rectangular bedroom with a compact working area.",
+    ).project(
+        stage="floor_plan",
+        task_spec=_task_spec(functional_zones=["sleeping_zone"]),
+        intent_contract=None,
+    )
+
+    manifest = context.floor_plan_manifest
+    assert manifest is not None
+    assert not manifest.explicit_geometry.detected
 
 
 def test_loose_window_near_requires_window_without_adjacency_capacity() -> None:

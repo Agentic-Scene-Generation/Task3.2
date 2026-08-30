@@ -18,6 +18,10 @@ from pydrake.all import RigidTransform, RollPitchYaw
 from shapely.geometry import Polygon, box
 
 from scenesmith.agent_utils.action_logger import log_scene_action
+from scenesmith.agent_utils.asset_scaling_policy import (
+    agent_rescale_tools_enabled,
+    filter_agent_rescale_tools,
+)
 from scenesmith.agent_utils.asset_manager import (
     AssetGenerationRequest,
     AssetGenerationResult,
@@ -31,6 +35,7 @@ from scenesmith.agent_utils.placement_noise import (
     apply_ceiling_placement_noise,
 )
 from scenesmith.agent_utils.rescale_helpers import rescale_object_common
+from scenesmith.agent_utils.rescale_result import RescaleErrorType, RescaleResult
 from scenesmith.agent_utils.response_datatypes import (
     AssetGenerationResult as AssetGenerationResultDTO,
     AssetInfo,
@@ -46,6 +51,9 @@ from scenesmith.ceiling_agents.tools.response_dataclasses import (
     CeilingSceneStateResult,
     PlaceCeilingObjectResult,
     RoomBoundsInfo,
+)
+from scenesmith.floor_plan_agents.tools.polygon_geometry import (
+    room_geometry_covers_object,
 )
 
 console_logger = logging.getLogger(__name__)
@@ -512,15 +520,19 @@ class CeilingTools:
                 scale_factor=scale_factor,
             )
 
-        return {
-            "generate_ceiling_assets": generate_ceiling_assets,
-            "place_ceiling_object": place_ceiling_object,
-            "move_ceiling_object": move_ceiling_object,
-            "remove_ceiling_object": remove_ceiling_object,
-            "rescale_ceiling_object": rescale_ceiling_object,
-            "get_current_scene_state": get_current_scene_state,
-            "list_available_assets": list_available_assets,
-        }
+        return filter_agent_rescale_tools(
+            {
+                "generate_ceiling_assets": generate_ceiling_assets,
+                "place_ceiling_object": place_ceiling_object,
+                "move_ceiling_object": move_ceiling_object,
+                "remove_ceiling_object": remove_ceiling_object,
+                "rescale_ceiling_object": rescale_ceiling_object,
+                "get_current_scene_state": get_current_scene_state,
+                "list_available_assets": list_available_assets,
+            },
+            self.cfg,
+            tool_names={"rescale_ceiling_object"},
+        )
 
     def _generate_assets_impl(self, request: AssetGenerationRequest) -> str:
         """Implementation for generating ceiling assets."""
@@ -860,6 +872,19 @@ class CeilingTools:
                 scale_factor=original_asset.scale_factor,
             )
 
+            if not room_geometry_covers_object(self.scene.room_geometry, scene_object):
+                return self._create_placement_failure_result(
+                    asset_id=asset_id,
+                    position_x=position_x,
+                    position_y=position_y,
+                    rotation_deg=rotation_degrees,
+                    message=(
+                        "The complete ceiling-object footprint extends outside the "
+                        "polygon ceiling region."
+                    ),
+                    error_type=CeilingErrorType.POSITION_OUT_OF_BOUNDS,
+                )
+
             # Add to scene.
             self.scene.add_object(scene_object)
 
@@ -970,6 +995,21 @@ class CeilingTools:
                     error_type=error_type,
                 ).to_json()
 
+            if not room_geometry_covers_object(
+                self.scene.room_geometry,
+                scene_object,
+                transform=world_transform,
+            ):
+                return CeilingOperationResult(
+                    success=False,
+                    message=(
+                        "The complete ceiling-object footprint would extend outside "
+                        "the polygon ceiling region; the original pose was kept."
+                    ),
+                    object_id=object_id,
+                    error_type=CeilingErrorType.POSITION_OUT_OF_BOUNDS,
+                ).to_json()
+
             # Update the object's transform.
             scene_object.transform = world_transform
 
@@ -1055,6 +1095,42 @@ class CeilingTools:
             f"Tool called: rescale_ceiling_object("
             f"object_id={object_id}, scale_factor={scale_factor})"
         )
+        if not agent_rescale_tools_enabled(self.cfg):
+            return RescaleResult(
+                success=False,
+                message=(
+                    "Ceiling-object rescaling is disabled by the asset scaling policy."
+                ),
+                object_id=object_id,
+                error_type=RescaleErrorType.RESCALING_DISABLED,
+            ).to_json()
+        obj = self.scene.get_object(UniqueID(object_id))
+        affected = (
+            [
+                candidate
+                for candidate in self.scene.objects.values()
+                if obj is not None and candidate.sdf_path == obj.sdf_path
+            ]
+            if obj is not None and obj.sdf_path is not None
+            else ([obj] if obj is not None else [])
+        )
+        invalid = [
+            candidate
+            for candidate in affected
+            if not room_geometry_covers_object(
+                self.scene.room_geometry, candidate, bbox_scale=scale_factor
+            )
+        ]
+        if invalid:
+            return CeilingOperationResult(
+                success=False,
+                message=(
+                    "Rescale would extend one or more shared ceiling-object "
+                    "instances outside the polygon ceiling region."
+                ),
+                object_id=object_id,
+                error_type=CeilingErrorType.POSITION_OUT_OF_BOUNDS,
+            ).to_json()
         result = rescale_object_common(
             scene=self.scene,
             object_id=object_id,

@@ -39,6 +39,7 @@ console_logger = logging.getLogger(__name__)
 
 def run_local(cfg: DictConfig):
     # Delay some imports in case they are not needed in non-local envs for submission.
+    from scenesmith.agent_utils.asset_scaling_policy import AssetScalingPolicy
     from scenesmith.experiments import build_experiment
 
     start_time = time.time()
@@ -70,6 +71,20 @@ def run_local(cfg: DictConfig):
     with open_dict(cfg):
         cfg.experiment.output_dir = output_dir
 
+    # Persist the effective values, not only the requested sub-switches. This is
+    # especially important when the master switch forces both layers off.
+    scaling_policy = AssetScalingPolicy.from_experiment_config(cfg.experiment)
+    with open_dict(cfg.experiment):
+        if "asset_scaling" not in cfg.experiment:
+            cfg.experiment.asset_scaling = {}
+    with open_dict(cfg.experiment.asset_scaling):
+        cfg.experiment.asset_scaling.effective_hssd_dimension_fit_enabled = (
+            scaling_policy.hssd_dimension_fit_enabled
+        )
+        cfg.experiment.asset_scaling.effective_agent_rescale_tools_enabled = (
+            scaling_policy.agent_rescale_tools_enabled
+        )
+
     # Set up experiment-level logging to file while preserving stdout.
     experiment_log_path = output_dir / "experiment.log"
     experiment_log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -77,6 +92,12 @@ def run_local(cfg: DictConfig):
     with FileLoggingContext(log_file_path=experiment_log_path, suppress_stdout=False):
         console_logger.info(f"Outputs will be saved to: {output_dir}")
         print(cyan(f"Outputs will be saved to:"), output_dir)
+        console_logger.info(
+            "Asset scaling policy: hssd_dimension_fit=%s, "
+            "agent_rescale_tools=%s",
+            "enabled" if scaling_policy.hssd_dimension_fit_enabled else "disabled",
+            "enabled" if scaling_policy.agent_rescale_tools_enabled else "disabled",
+        )
 
         # Parallel probe batches may place Hydra output in a per-batch
         # ``.../batch_NNN/hydra`` directory.  Keep their convenience link

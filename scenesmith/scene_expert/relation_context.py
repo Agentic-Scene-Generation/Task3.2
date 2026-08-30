@@ -7,6 +7,7 @@ from typing import Any
 from scenesmith.agent_utils.furniture_layout_planning import (
     build_opening_aware_reservation_plan,
 )
+from scenesmith.scene_expert.explicit_geometry import explicit_geometry_from_prompt
 from scenesmith.scene_expert.schemas import (
     FloorPlanReservation,
     FloorPlanReservationManifest,
@@ -293,6 +294,8 @@ def _floor_plan_manifest(
     constraints: list[dict[str, Any]],
     task_spec: SceneTaskSpec,
     enabled: bool,
+    prompt: str = "",
+    explicit_geometry_policy: dict[str, Any] | None = None,
 ) -> FloorPlanReservationManifest:
     reservations: list[FloorPlanReservation] = []
     room_scope = _reservation_room_scope(task_spec.room_type)
@@ -340,6 +343,9 @@ def _floor_plan_manifest(
     return FloorPlanReservationManifest(
         enabled=enabled,
         reservations=reservations,
+        explicit_geometry=explicit_geometry_from_prompt(
+            prompt, explicit_geometry_policy
+        ),
         explicit_window_count=explicit_window_count,
         explicit_window_required=explicit_window_count > 0,
     )
@@ -352,10 +358,14 @@ class StageRelationProjector:
         self,
         *,
         floor_plan_reservation_gate_enabled: bool = False,
+        prompt: str = "",
+        explicit_geometry_policy: dict[str, Any] | None = None,
     ) -> None:
         self._floor_plan_reservation_gate_enabled = bool(
             floor_plan_reservation_gate_enabled
         )
+        self._prompt = str(prompt or "")
+        self._explicit_geometry_policy = dict(explicit_geometry_policy or {})
 
     def project(
         self,
@@ -378,6 +388,8 @@ class StageRelationProjector:
                 constraints=constraints,
                 task_spec=task_spec,
                 enabled=self._floor_plan_reservation_gate_enabled,
+                prompt=self._prompt,
+                explicit_geometry_policy=self._explicit_geometry_policy,
             )
             if stage == "floor_plan"
             else None

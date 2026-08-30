@@ -245,14 +245,37 @@ class FloorPlanReservation(BaseModel):
     hard: bool = True
 
 
+class ExplicitFloorGeometryPolicy(BaseModel):
+    """Prompt-specified geometry which takes precedence over inferred area needs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    detected: bool = False
+    source: Literal["", "explicit_prompt"] = ""
+    mode: Literal["", "room", "polygon"] = ""
+    expected_area_m2: float = Field(default=0.0, ge=0.0)
+    expected_width_m: float | None = Field(default=None, gt=0.0)
+    expected_length_m: float | None = Field(default=None, gt=0.0)
+    expected_vertices: list[tuple[float, float]] = Field(default_factory=list)
+    functional_zone_area_policy: Literal["hard", "advisory"] = "hard"
+    verify_geometry_match: bool = True
+    absolute_area_tolerance_m2: float = Field(default=0.10, ge=0.0)
+    relative_area_tolerance: float = Field(default=0.01, ge=0.0)
+    vertex_tolerance_m: float = Field(default=0.01, ge=0.0)
+    evidence: list[str] = Field(default_factory=list)
+
+
 class FloorPlanReservationManifest(BaseModel):
     """Serializable future-capacity contract shared by floor-plan validators."""
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "scenesmith.floor_plan_reservations.v2"
+    schema_version: str = "scenesmith.floor_plan_reservations.v3"
     enabled: bool = False
     reservations: list[FloorPlanReservation] = Field(default_factory=list)
+    explicit_geometry: ExplicitFloorGeometryPolicy = Field(
+        default_factory=ExplicitFloorGeometryPolicy
+    )
     explicit_window_count: int = Field(default=0, ge=0)
     explicit_window_required: bool = False
     preserve_entrance_route: bool = True

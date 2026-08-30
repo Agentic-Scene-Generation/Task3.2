@@ -23,6 +23,7 @@ from omegaconf import DictConfig
 from pydrake.all import RigidTransform, RollPitchYaw
 
 from scenesmith.agent_utils.asset_manager import AssetGenerationRequest
+from scenesmith.agent_utils.asset_scaling_policy import agent_rescale_tools_enabled
 from scenesmith.agent_utils.base_stateful_agent import (
     BaseStatefulAgent,
     HardStateEvaluation,
@@ -263,6 +264,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             tools=tools,
             prompt_enum=designer_prompt_enum,
             has_reference_image=self.context_image_path is not None,
+            asset_rescaling_enabled=agent_rescale_tools_enabled(self.cfg),
         )
 
     def _create_critic_tools(self) -> list[FunctionTool]:
@@ -313,6 +315,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             prompt_enum=critic_prompt_enum,
             output_type=FurnitureCritiqueWithScores,
             scene_description=original_task or scene.text_description,
+            asset_rescaling_enabled=agent_rescale_tools_enabled(self.cfg),
         )
 
     def _create_planner_agent(
@@ -715,11 +718,17 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         """Get prompt kwargs for initial design instruction.
 
         Returns:
-            Dict with scene description and reference image flag.
+            Dict with scene description, room boundary, and reference image flag.
         """
+        room_geometry = self.scene.room_geometry
         return {
             "scene_description": self.scene.text_description,
             "has_reference_image": self.context_image_path is not None,
+            "room_length": room_geometry.length,
+            "room_width": room_geometry.width,
+            "room_local_footprint_vertices": (
+                room_geometry.room_local_footprint_vertices
+            ),
         }
 
     def _build_initial_design_input(self, instruction: str) -> str | list[dict]:

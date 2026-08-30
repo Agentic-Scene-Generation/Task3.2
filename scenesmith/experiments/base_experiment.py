@@ -5,6 +5,7 @@ from pathlib import Path
 
 from omegaconf import DictConfig, OmegaConf
 
+from scenesmith.agent_utils.asset_scaling_policy import AssetScalingPolicy
 from scenesmith.ceiling_agents.base_ceiling_agent import BaseCeilingAgent
 from scenesmith.floor_plan_agents.base_floor_plan_agent import BaseFloorPlanAgent
 from scenesmith.furniture_agents.base_furniture_agent import BaseFurnitureAgent
@@ -56,13 +57,17 @@ class BaseExperiment(ABC):
     def _with_experiment_hssd_scaling_config(
         agent_config: dict, experiment_config: dict
     ) -> dict:
-        """Copy the experiment-level HSSD dimension-fit policy into an agent.
+        """Copy the experiment-level asset-scaling policy into an agent.
 
-        Asset managers receive only their agent subtree, so the experiment-level
-        switch must be explicitly propagated at construction time.  Keep the
-        default enabled for compatibility with existing experiments.
+        This compatibility-named helper now propagates both parts of the policy:
+        HSSD dimension fitting and agent-callable runtime rescaling. Asset managers
+        and placement agents receive only their own subtree, so effective values
+        must be copied explicitly at construction time.
         """
         configured = copy.deepcopy(agent_config)
+        policy = AssetScalingPolicy.from_experiment_config(experiment_config)
+        configured["asset_scaling"] = policy.as_agent_config()
+
         asset_manager_config = configured.get("asset_manager")
         if not isinstance(asset_manager_config, dict):
             return configured
@@ -72,8 +77,8 @@ class BaseExperiment(ABC):
             hssd_config = {}
             asset_manager_config["hssd"] = hssd_config
 
-        hssd_config["scale_to_requested_dimensions"] = bool(
-            experiment_config.get("hssd_scale_to_requested_dimensions", True)
+        hssd_config["scale_to_requested_dimensions"] = (
+            policy.hssd_dimension_fit_enabled
         )
         return configured
 

@@ -82,6 +82,15 @@ scene_retry_attempts: 1
 # those dimensions during local asset conversion.
 hssd_scale_to_requested_dimensions: true
 
+# Global asset-scaling policy. Setting enabled=false both preserves native HSSD
+# dimensions after retrieval and removes runtime rescale tools from every asset
+# placement agent (furniture, wall, ceiling, and manipuland). This policy is
+# independent of the furniture safety controller.
+asset_scaling:
+  enabled: true
+  hssd_dimension_fit_enabled: true
+  agent_rescale_tools_enabled: true
+
 # Deterministic quality failures are distinct from runtime failures. Production
 # remains strict by default; critic probes may select "degraded" to preserve
 # failed checkpoints, traces, and final renders without marking them successful.

@@ -8,13 +8,17 @@ openai:
   #   "flex"     - Lower cost, slower processing (Batch API rates)
   #   "priority" - Lower latency, premium pricing
   service_tier: null
+  # Request encoding for model reasoning controls. "auto" resolves from
+  # OPENAI_BASE_URL first, then from llm.model_id. Valid values are:
+  # qwen, openrouter, openai, auto, disabled.
+  reasoning_provider: ${oc.env:SCENEEXPERT_REASONING_PROVIDER,qwen}
   # Passive response persistence only. This does not change model requests,
   # thinking settings, or the Chat Completions / Responses API selection.
   reasoning_persistence:
     enabled: true
-    # Task3.2 defaults to Qwen. Set explicitly to "openrouter" or "openai"
-    # for online runs. "auto" is optional and fails closed when ambiguous.
-    provider: qwen
+    # Keep response parsing/storage on the same provider contract as requests.
+    # The default remains Qwen through openai.reasoning_provider above.
+    provider: ${openai.reasoning_provider}
 
 # LLM settings shared by all agents. The served model name must match the
 # vLLM --served-model-name value.
