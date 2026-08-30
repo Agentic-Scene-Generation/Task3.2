@@ -135,6 +135,15 @@ def _commit_scene_expert_stage(
     result = hooks.post_stage(stage, scene, room_dir)
     if result is None or result.passed:
         return
+    if result.non_degradable_blockers:
+        raise SceneExpertStageCommitError(
+            stage,
+            retryable=result.retryable,
+            reason=(
+                f"non-degradable structural blocker(s): "
+                f"{', '.join(result.non_degradable_blockers)}"
+            ),
+        )
     if result.quality_failure and not result.retryable and allow_degraded_quality:
         hooks.accept_degraded_stage(stage)
         console_logger.warning(

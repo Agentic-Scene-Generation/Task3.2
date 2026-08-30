@@ -36,6 +36,46 @@ def test_v5_payload_migrates_with_empty_coverage_list() -> None:
 
     assert result["schema_version"] == INTENT_CONTRACT_SCHEMA_VERSION
     assert result["coverage_requirements"] == []
+    assert result["coverage_ledger"] == []
+
+
+def test_unresolved_and_soft_scope_coverage_are_visible_without_passing() -> None:
+    unresolved = {
+        "requirement_id": "coverage_unresolved",
+        "kind": "unresolved",
+        "disposition": "unresolved",
+        "normalized": "ambiguous_chair_reference",
+        "earliest_stage": "furniture",
+        "final_stage": "final",
+        "source": "explicit_prompt",
+        "evidence_span": "place it by the chair",
+    }
+    soft_scope = {
+        "requirement_id": "coverage_style",
+        "kind": "soft_scope",
+        "disposition": "soft_scope",
+        "normalized": "cozy_atmosphere",
+        "earliest_stage": "floor_plan",
+        "final_stage": "final",
+        "source": "explicit_prompt",
+        "evidence_span": "make it cozy",
+    }
+    case = {
+        **_coverage_case(unresolved, stage="final"),
+        "intent_contract": {
+            "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+            "constraints": [],
+            "coverage_requirements": [unresolved, soft_scope],
+        },
+    }
+
+    results = evaluate_intent_contract_extensions(case)
+
+    assert [(row["label"], row["scoring_tier"]) for row in results] == [
+        ("unknown", "core"),
+        ("unknown", "auxiliary"),
+    ]
+    assert results[0]["diagnostics"]["coverage_status"] == "unresolved"
 
 
 def test_walk_in_closet_is_compiled_as_functional_zone_coverage() -> None:

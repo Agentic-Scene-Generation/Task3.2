@@ -96,6 +96,10 @@ from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     improve_furniture_relations,
     unresolved_furniture_relation_failures,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_containment import (
+    ROOM_CONTAINMENT_FAILURE_CODE,
+    is_room_containment_failure,
+)
 from scenesmith.scenebenchmark_critic.intent_contract import (
     intent_contract_required_counts,
 )
@@ -784,6 +788,33 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             return True
         hard_state = self._evaluate_current_furniture_hard_state()
         return hard_state is None or hard_state.hard_valid
+
+    def _evaluate_current_furniture_hard_state(
+        self, physics_context: str | None = None
+    ) -> HardStateEvaluation | None:
+        """Merge authoritative floor-polygon containment into furniture safety."""
+        hard_state = super()._evaluate_current_furniture_hard_state(physics_context)
+        if hard_state is None:
+            return None
+        if not hasattr(hard_state, "typed_failures"):
+            hard_state.typed_failures = []
+        known_object_ids = {
+            str(failure.get("primary_object") or "")
+            for failure in hard_state.typed_failures
+            if is_room_containment_failure(failure)
+        }
+        for failure in self._room_containment_failures():
+            object_id = str(failure.get("primary_object") or "")
+            if object_id in known_object_ids:
+                continue
+            hard_state.typed_failures.append(failure)
+            hard_state.hard_reasons.append(
+                f"room containment failed for {object_id or 'unknown object'}"
+            )
+            known_object_ids.add(object_id)
+        if known_object_ids:
+            hard_state.hard_valid = False
+        return hard_state
 
     def _relation_candidate_preserves_hard_baseline(
         self,
@@ -1499,12 +1530,24 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
 
         actions: list[str] = []
         reasons = " ".join(hard_state.hard_reasons or []).lower()
+        containment_failures = self._room_containment_failures(hard_state)
         repair_plan = build_repair_plan(
             stage=self.agent_type.value,
             hard_reasons=hard_state.hard_reasons,
+            typed_failures=containment_failures,
             max_attempts=1,
         )
         console_logger.info("Deterministic furniture %s", repair_plan.to_log_text())
+
+        if FailureCategory.ROOM_CONTAINMENT in repair_plan.categories:
+            containment_fixes = self._repair_room_containment_failures(
+                containment_failures
+            )
+            if containment_fixes:
+                actions.extend(
+                    f"repaired room containment for {fix.object_id}"
+                    for fix in containment_fixes
+                )
 
         required_counts = self._repair_required_counts()
         inventory_changed = False
@@ -1647,6 +1690,143 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             actions.extend(self._repair_shallow_furniture_collisions())
 
         return bool(actions), actions
+
+    def _room_containment_failures(
+        self, hard_state: HardStateEvaluation | None = None
+    ) -> list[dict[str, Any]]:
+        """Read the authoritative critic results for typed boundary repair."""
+        critic_config = critic_config_from_any(getattr(self, "cfg", {}))
+        scene = getattr(self, "scene", None)
+        if (
+            scene is None
+            or not critic_config.enabled
+            or not critic_config.metric_enabled("functional_dependency")
+        ):
+            return [
+                dict(failure)
+                for failure in getattr(hard_state, "typed_failures", []) or []
+                if is_room_containment_failure(failure)
+            ]
+        try:
+            payload = evaluate_room_scene(
+                scene,
+                config=critic_config,
+                stage="furniture_room_containment_repair",
+                annotate_assets=False,
+            )
+        except Exception:
+            console_logger.warning(
+                "Could not evaluate authoritative room containment for repair",
+                exc_info=True,
+            )
+            return [
+                dict(failure)
+                for failure in getattr(hard_state, "typed_failures", []) or []
+                if is_room_containment_failure(failure)
+            ]
+        return [
+            result
+            for result in payload.get("results") or []
+            if isinstance(result, dict) and is_room_containment_failure(result)
+        ]
+
+    def _repair_room_containment_failures(
+        self, failures: list[dict[str, Any]]
+    ) -> list[Any]:
+        """Route typed boundary failures through the critic's pose transaction."""
+        if not failures:
+            return []
+        critic_config = critic_config_from_any(self.cfg)
+        transaction = self._begin_hard_state_transaction()
+        baseline_hard_failures = (
+            transaction[1]
+            if transaction is not None
+            else self._hard_violation_fingerprints()
+        )
+        fixes = improve_furniture_relations(
+            self.scene,
+            config=critic_config,
+            allowed_relation_types={ROOM_CONTAINMENT_FAILURE_CODE},
+            candidate_validator=self._relation_candidate_preserves_hard_baseline(
+                baseline_hard_failures
+            ),
+        )
+        remaining = self._room_containment_failures()
+        remaining_by_object = {
+            str(result.get("primary_object") or ""): result for result in remaining
+        }
+        fixed_by_object = {str(fix.object_id): fix for fix in fixes}
+        accepted = (
+            bool(fixes)
+            and not remaining
+            and self._commit_hard_state_transaction(
+                transaction, source="room containment"
+            )
+        )
+        affected_objects = []
+        for failure in failures:
+            object_id = str(failure.get("primary_object") or "")
+            fix = fixed_by_object.get(object_id)
+            diagnostics = failure.get("diagnostics") or {}
+            affected_objects.append(
+                {
+                    "object_id": object_id,
+                    "outside_area_m2": diagnostics.get("outside_area_m2"),
+                    "before": {
+                        "xy": list(getattr(fix, "old_xy", ()) or ()),
+                        "yaw_deg": getattr(fix, "old_yaw_deg", None),
+                    },
+                    "after": {
+                        "xy": list(getattr(fix, "new_xy", ()) or ()),
+                        "yaw_deg": getattr(fix, "new_yaw_deg", None),
+                    },
+                    "revalidation": {
+                        "room_containment": (
+                            "fail" if object_id in remaining_by_object else "pass"
+                        ),
+                        "remaining_outside_area_m2": (
+                            (
+                                remaining_by_object.get(object_id, {}).get(
+                                    "diagnostics"
+                                )
+                                or {}
+                            ).get("outside_area_m2")
+                        ),
+                    },
+                }
+            )
+        working_memory = getattr(self, "stage_working_memory", None)
+        if working_memory is not None:
+            working_memory.record_repair_event(
+                source="room_containment",
+                strategy="room_containment",
+                status="accepted" if accepted else "rejected",
+                trigger_reasons=[
+                    str(failure.get("check_id") or failure.get("primary_object") or "")
+                    for failure in failures
+                ],
+                actions=[
+                    f"{fix.object_id}:{ROOM_CONTAINMENT_FAILURE_CODE}" for fix in fixes
+                ],
+                affected_objects=affected_objects,
+                detail={
+                    "candidate_rejection": (
+                        "remaining room_containment failure"
+                        if remaining
+                        else ("hard invariant regression" if fixes else "no candidate")
+                    ),
+                    "revalidated": not remaining and accepted,
+                },
+            )
+        if accepted:
+            return fixes
+        if fixes and remaining:
+            self._restore_hard_state_transaction(
+                transaction,
+                source="room containment",
+                reasons=["room_containment revalidation failed"],
+            )
+        return []
 
     def _ground_elevated_floor_furniture(
         self, tolerance_m: float = WALL_HEIGHT_TOLERANCE_M

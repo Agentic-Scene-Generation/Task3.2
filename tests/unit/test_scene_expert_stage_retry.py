@@ -482,6 +482,32 @@ def test_degraded_policy_advances_after_quality_repair_budget_is_exhausted(
     hooks.accept_degraded_stage.assert_called_once_with("furniture")
 
 
+def test_degraded_policy_does_not_advance_room_containment_blocker(tmp_path) -> None:
+    hooks = Mock()
+    hooks.post_stage.return_value = StageCommitResult(
+        stage="furniture",
+        passed=False,
+        retryable=False,
+        reason="Repair budget exhausted",
+        quality_failure=True,
+        non_degradable_blockers=("room_containment",),
+    )
+
+    with pytest.raises(
+        scene_generation.SceneExpertStageCommitError,
+        match="non-degradable structural blocker\(s\): room_containment",
+    ):
+        scene_generation._commit_scene_expert_stage(
+            hooks=hooks,
+            stage="furniture",
+            scene=Mock(),
+            room_dir=tmp_path,
+            allow_degraded_quality=True,
+        )
+
+    hooks.accept_degraded_stage.assert_not_called()
+
+
 def test_accept_degraded_stage_advances_harness_for_next_stage() -> None:
     runner = object.__new__(SceneExpertHookRunner)
     runner._current_stage = "wall_mounted"

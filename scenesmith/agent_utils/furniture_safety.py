@@ -22,6 +22,9 @@ from scenesmith.agent_utils.furniture_layout_planning import (
     is_bedroom_scene,
 )
 from scenesmith.agent_utils.scoring import CritiqueWithScores
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_containment import (
+    ROOM_CONTAINMENT_FAILURE_CODE,
+)
 
 console_logger = logging.getLogger(__name__)
 
@@ -365,6 +368,7 @@ class HardStateEvaluation:
     soft_reasons: list[str] = field(default_factory=list)
     weighted_score_penalty: float = 0.0
     plausibility_report: dict[str, Any] | None = None
+    typed_failures: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -1468,6 +1472,7 @@ class FurnitureSafetyController:
         """Run deterministic hard checks that do not depend on critic judgment."""
         hard_reasons: list[str] = []
         soft_reasons: list[str] = []
+        typed_failures: list[dict[str, Any]] = []
 
         required_counts = self.required_counts or {
             term: 1 for term in self.required_terms
@@ -1503,12 +1508,27 @@ class FurnitureSafetyController:
                     or world_min[1] < min_y - tol
                     or world_max[1] > max_y + tol
                 ):
-                    hard_reasons.append(
-                        f"{object_id} full bounding box exceeds room bounds: "
-                        f"x=[{world_min[0]:.3f}, {world_max[0]:.3f}] vs "
-                        f"[{min_x:.3f}, {max_x:.3f}], "
-                        f"y=[{world_min[1]:.3f}, {world_max[1]:.3f}] vs "
-                        f"[{min_y:.3f}, {max_y:.3f}]"
+                    # This is deliberately only a fast AABB guard. The critic's
+                    # floor-polygon/OBB result is authoritative, but both paths
+                    # publish the same typed failure identity for repair routing.
+                    typed_failures.append(
+                        {
+                            "relation_type": ROOM_CONTAINMENT_FAILURE_CODE,
+                            "primary_object": str(object_id),
+                            "label": "fail",
+                            "scoring_tier": "core",
+                            "diagnostics": {
+                                "object_id": str(object_id),
+                                "bbox_world": {
+                                    "min": [float(value) for value in world_min[:2]],
+                                    "max": [float(value) for value in world_max[:2]],
+                                },
+                                "room_bounds_xy": [min_x, min_y, max_x, max_y],
+                                "tolerance_m": tol,
+                                "geometry_authority": "scenebenchmark_room_containment",
+                            },
+                            "evaluation_source": "furniture_safety_bbox_guard",
+                        }
                     )
 
         bedroom_scene = is_bedroom_scene(scene)
@@ -1546,7 +1566,7 @@ class FurnitureSafetyController:
             hard_reasons.extend(self._evaluate_bedroom_relation_hard_reasons(scene))
 
         return HardStateEvaluation(
-            hard_valid=not hard_reasons,
+            hard_valid=not hard_reasons and not typed_failures,
             hard_reasons=hard_reasons,
             soft_reasons=soft_reasons,
             weighted_score_penalty=(
@@ -1557,6 +1577,7 @@ class FurnitureSafetyController:
                 if plausibility_report is not None
                 else None
             ),
+            typed_failures=typed_failures,
         )
 
     def _room_bounds_xy(self, scene: Any) -> tuple[float, float, float, float] | None:

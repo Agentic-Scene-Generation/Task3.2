@@ -111,6 +111,7 @@ def format_markdown_report(payload: dict[str, Any]) -> str:
         lines.append(
             f"- `{requirement_id}` [{requirement.get('kind')}] "
             f"`{requirement.get('normalized')}`: status=`{status}`, "
+            f"disposition=`{requirement.get('disposition', 'compiled')}`, "
             f"label=`{label}`, stage=`{requirement.get('earliest_stage')}`"
             f"{evidence_text}"
         )

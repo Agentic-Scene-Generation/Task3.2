@@ -20,6 +20,7 @@ from scenesmith.agent_utils.thinking import (
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scenebenchmark_critic.intent_schema import (
     INTENT_COMPILER_SPEC_VERSION,
+    INTENT_COMPILER_SEMANTIC_IR_VERSION,
     INTENT_CONTRACT_SCHEMA_VERSION,
     canonical_selector_category,
     intent_compiler_wire_json_schema,
@@ -29,10 +30,14 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
 from scenesmith.scenebenchmark_critic.intent_contract import (
     HARD_SOURCES,
     _apply_task_spec_contract_metadata,
+    _task_spec_inventory_constraints,
     build_intent_contract,
     ensure_coverage_requirements,
 )
-from scenesmith.scenebenchmark_critic.object_taxonomy import is_known_object_category
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    execution_owner,
+    is_known_object_category,
+)
 from scenesmith.scenebenchmark_critic.relation_registry import (
     RELATION_REGISTRY,
     ROOM_RELATIVE_WALL_CATEGORIES,
@@ -76,6 +81,342 @@ _LEGAL_ENVIRONMENT_ANCHORS = frozenset(
         *ROOM_RELATIVE_WALL_CATEGORIES,
     }
 )
+
+
+def _entity_catalog(task_spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Build the only endpoint namespace admitted by the live compiler."""
+
+    catalog: dict[str, dict[str, Any]] = {}
+    for row in _task_spec_inventory_constraints(task_spec):
+        subjects = row.get("subjects") or {}
+        category = canonical_selector_category(subjects.get("category"))
+        if not category:
+            continue
+        entity_ref = f"inventory:{category}"
+        catalog[entity_ref] = {
+            "entity_ref": entity_ref,
+            "canonical_category": category,
+            "required_count": int(subjects.get("count") or 1),
+            "generation_stage": execution_owner(category),
+            "source": str(row.get("inference_reason") or "SceneTaskSpec inventory"),
+        }
+    for category in sorted(_LEGAL_ENVIRONMENT_ANCHORS):
+        entity_ref = f"anchor:{category}"
+        catalog[entity_ref] = {
+            "entity_ref": entity_ref,
+            "canonical_category": category,
+            "required_count": 1,
+            "generation_stage": "floor_plan",
+            "source": "legal_environment_anchor",
+        }
+    return catalog
+
+
+def _render_entity_catalog(catalog: dict[str, dict[str, Any]]) -> str:
+    return json.dumps(
+        list(catalog.values()), ensure_ascii=False, indent=2, sort_keys=True
+    )
+
+
+def _semantic_source(
+    grounding: str, grounding_catalog: dict[str, str]
+) -> dict[str, str]:
+    text = grounding_catalog[grounding]
+    if grounding.startswith("prompt:"):
+        return {
+            "source": "explicit_prompt",
+            "evidence_span": text,
+            "inference_reason": "",
+        }
+    return {
+        "source": "model_inferred",
+        "evidence_span": "",
+        "inference_reason": f"SceneTaskSpec {grounding}: {text}",
+    }
+
+
+def _catalog_selector(
+    entity_ref: Any,
+    catalog: dict[str, dict[str, Any]],
+    *,
+    count: Any = None,
+    quantifier: Any = None,
+    role: Any = None,
+    cohort: Any = None,
+) -> dict[str, Any]:
+    ref = str(entity_ref or "")
+    entry = catalog.get(ref)
+    if entry is None:
+        raise ValueError(f"unknown or unbound entity_ref {ref!r}")
+    selector: dict[str, Any] = {"category": entry["canonical_category"]}
+    if count is not None:
+        selector["count"] = int(count)
+    elif ref.startswith("inventory:"):
+        selector["count"] = int(entry["required_count"])
+    else:
+        selector["count"] = 1
+    if quantifier:
+        selector["quantifier"] = str(quantifier)
+    if role:
+        selector["role"] = str(role)
+    if cohort:
+        selector["cohort"] = str(cohort)
+    return selector
+
+
+def _coverage_row(
+    requirement: dict[str, Any],
+    *,
+    kind: str,
+    disposition: str,
+    normalized: str,
+    source: dict[str, str],
+    earliest_stage: str = "floor_plan",
+    relation: str = "",
+) -> dict[str, Any]:
+    return {
+        "requirement_id": str(requirement["requirement_id"]),
+        "kind": kind,
+        "disposition": disposition,
+        "normalized": normalized,
+        "earliest_stage": earliest_stage,
+        "final_stage": "final",
+        "source": source["source"],
+        "evidence_span": source["evidence_span"] or source["inference_reason"],
+        "relation": relation,
+    }
+
+
+def _admit_semantic_ir(
+    payload: dict[str, Any],
+    *,
+    prompt: str,
+    prompt_hash: str,
+    task_spec: dict[str, Any],
+    grounding_catalog: dict[str, str],
+    catalog: dict[str, dict[str, Any]],
+    retry_count: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, str]]]:
+    """Validate LLM semantics without interpreting prompt wording in code."""
+
+    if payload.get("schema_version") != INTENT_COMPILER_SEMANTIC_IR_VERSION:
+        raise ValueError("semantic IR schema_version is missing or unsupported")
+    unexpected_top_level = set(payload) - {"schema_version", "requirements"}
+    if unexpected_top_level:
+        raise ValueError(
+            "semantic IR has unexpected fields: "
+            + ", ".join(sorted(unexpected_top_level))
+        )
+    requirements = payload.get("requirements")
+    if not isinstance(requirements, list):
+        raise ValueError("semantic IR requirements must be a list")
+    seen_ids: set[str] = set()
+    covered_groundings: set[str] = set()
+    constraints = _task_spec_inventory_constraints(task_spec)
+    coverage_requirements: list[dict[str, Any]] = []
+    ledger: list[dict[str, Any]] = []
+    rejected: list[dict[str, str]] = []
+
+    for raw in requirements:
+        if not isinstance(raw, dict):
+            raise ValueError("semantic IR requirement must be an object")
+        unexpected_fields = set(raw) - {
+            "requirement_id",
+            "kind",
+            "grounding",
+            "relation",
+            "subject_ref",
+            "target_ref",
+            "secondary_target_ref",
+            "subject_count",
+            "target_count",
+            "subject_quantifier",
+            "target_quantifier",
+            "subject_role",
+            "target_role",
+            "subject_cohort",
+            "target_cohort",
+            "edge_frame",
+            "groups",
+            "orientation",
+            "forbidden_category",
+            "reason",
+            "surface_mentions",
+        }
+        if unexpected_fields:
+            raise ValueError(
+                "semantic IR requirement has unexpected fields: "
+                + ", ".join(sorted(unexpected_fields))
+            )
+        requirement_id = str(raw.get("requirement_id") or "")
+        grounding = str(raw.get("grounding") or "")
+        kind = str(raw.get("kind") or "")
+        if not requirement_id or requirement_id in seen_ids:
+            raise ValueError("semantic IR requirement_id must be unique and non-empty")
+        if grounding not in grounding_catalog:
+            raise ValueError(f"unknown grounding id {grounding!r}")
+        if kind not in {
+            "inventory",
+            "forbidden_inventory",
+            "relation",
+            "unsupported",
+            "unresolved",
+            "soft_scope",
+        }:
+            raise ValueError(f"unsupported semantic IR requirement kind {kind!r}")
+        seen_ids.add(requirement_id)
+        covered_groundings.add(grounding)
+        source = _semantic_source(grounding, grounding_catalog)
+        refs = [
+            str(raw.get(field) or "")
+            for field in ("subject_ref", "target_ref", "secondary_target_ref")
+            if raw.get(field) is not None
+        ]
+        ledger_row = {
+            "requirement_id": requirement_id,
+            "grounding": grounding,
+            "kind": kind,
+            "entity_refs": refs,
+            "surface_mentions": list(raw.get("surface_mentions") or []),
+            "reason": str(raw.get("reason") or ""),
+        }
+        if kind == "relation":
+            relation = str(raw.get("relation") or "")
+            spec = relation_spec(relation)
+            if relation == "required_count":
+                raise ValueError("semantic IR may not create required_count")
+            subject_ref = raw.get("subject_ref")
+            if not subject_ref:
+                raise ValueError(f"relation {relation!r} omitted subject_ref")
+            subjects = _catalog_selector(
+                subject_ref,
+                catalog,
+                count=raw.get("subject_count"),
+                quantifier=raw.get("subject_quantifier"),
+                role=raw.get("subject_role"),
+                cohort=raw.get("subject_cohort"),
+            )
+            target_ref = raw.get("target_ref")
+            secondary_ref = raw.get("secondary_target_ref")
+            if spec.target_arity == 0:
+                if target_ref is not None or secondary_ref is not None:
+                    raise ValueError(
+                        f"relation {relation!r} must not have endpoint refs"
+                    )
+                targets = None
+            else:
+                if not target_ref:
+                    raise ValueError(f"relation {relation!r} omitted target_ref")
+                targets = _catalog_selector(
+                    target_ref,
+                    catalog,
+                    count=raw.get("target_count"),
+                    quantifier=raw.get("target_quantifier"),
+                    role=raw.get("target_role"),
+                    cohort=raw.get("target_cohort"),
+                )
+                if spec.target_arity == 2:
+                    if not secondary_ref:
+                        raise ValueError(
+                            f"relation {relation!r} omitted secondary_target_ref"
+                        )
+                    secondary = _catalog_selector(secondary_ref, catalog)
+                    targets["secondary_category"] = secondary["category"]
+                    targets["secondary_count"] = secondary["count"]
+                elif secondary_ref is not None:
+                    raise ValueError(
+                        f"relation {relation!r} has unexpected secondary_target_ref"
+                    )
+            row = {
+                "relation": relation,
+                "subjects": subjects,
+                "targets": targets,
+                "edge_frame": raw.get("edge_frame"),
+                "groups": raw.get("groups") or [],
+                "orientation": raw.get("orientation"),
+                **source,
+            }
+            constraints.append(row)
+            ledger_row["disposition"] = "compiled"
+        elif kind == "forbidden_inventory":
+            category = canonical_selector_category(raw.get("forbidden_category"))
+            if not category or not is_known_object_category(category):
+                raise ValueError(
+                    "forbidden_inventory requires a known forbidden_category"
+                )
+            coverage_requirements.append(
+                _coverage_row(
+                    raw,
+                    kind="forbidden_inventory",
+                    disposition="compiled",
+                    normalized=category,
+                    source=source,
+                    earliest_stage=execution_owner(category),
+                )
+            )
+            ledger_row["disposition"] = "compiled"
+        elif kind == "unsupported":
+            normalized = "_".join(
+                str(raw.get("reason") or "unsupported").lower().split()
+            )
+            coverage_requirements.append(
+                _coverage_row(
+                    raw,
+                    kind="unsupported_relation",
+                    disposition="unsupported",
+                    normalized=normalized,
+                    source=source,
+                )
+            )
+            ledger_row["disposition"] = "unsupported"
+        elif kind == "unresolved":
+            normalized = "_".join(
+                str(raw.get("reason") or "unresolved").lower().split()
+            )
+            coverage_requirements.append(
+                _coverage_row(
+                    raw,
+                    kind="unresolved",
+                    disposition="unresolved",
+                    normalized=normalized,
+                    source=source,
+                )
+            )
+            ledger_row["disposition"] = "unresolved"
+        elif kind == "soft_scope":
+            normalized = "_".join(
+                str(raw.get("reason") or "soft_scope").lower().split()
+            )
+            coverage_requirements.append(
+                _coverage_row(
+                    raw,
+                    kind="soft_scope",
+                    disposition="soft_scope",
+                    normalized=normalized,
+                    source=source,
+                )
+            )
+            ledger_row["disposition"] = "soft_scope"
+        else:
+            ledger_row["disposition"] = "compiled"
+        ledger.append(ledger_row)
+
+    missing = sorted(set(grounding_catalog) - covered_groundings)
+    if missing:
+        raise ValueError("semantic IR coverage gap for " + ", ".join(missing))
+    contract = {
+        "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+        "prompt": prompt,
+        "prompt_sha256": prompt_hash,
+        "intent_compiler_spec_version": INTENT_COMPILER_SPEC_VERSION,
+        "room_type": str(task_spec.get("room_type") or ""),
+        "constraints": constraints,
+        "coverage_requirements": coverage_requirements,
+        "coverage_ledger": ledger,
+        "retry_count": retry_count,
+        "warnings": [],
+    }
+    return contract, ledger, rejected
 
 
 def _merge_warnings(*groups: Any) -> list[str]:
@@ -1137,7 +1478,7 @@ deterministically after validation.
 
 
 class IntentCompiler:
-    """Compile a prompt into a validated v5 contract with one corrective retry."""
+    """Compile LLM semantic IR into an admitted, versioned intent contract."""
 
     SPEC_VERSION = INTENT_COMPILER_SPEC_VERSION
     SCHEMA_VERSION = INTENT_CONTRACT_SCHEMA_VERSION
@@ -1354,6 +1695,7 @@ class IntentCompiler:
         *,
         task_spec: dict[str, Any] | None = None,
         grounding_catalog: str = "",
+        entity_catalog: str = "",
         previous_output: str = "",
         validation_error: str = "",
     ) -> list[dict[str, str]]:
@@ -1367,9 +1709,23 @@ class IntentCompiler:
             )
         if grounding_catalog:
             user += (
-                "\n\nGrounding catalog. Every output relation must reference "
-                "exactly one ID from this list:\n" + grounding_catalog
+                "\n\nGrounding catalog. Every explicit input requirement must "
+                "appear in requirements[] with one ID from this list:\n"
+                + grounding_catalog
             )
+        if entity_catalog:
+            user += (
+                "\n\nEntity catalog. Every relation endpoint must use these exact "
+                "entity_ref values; never write a free-form category:\n"
+                + entity_catalog
+            )
+        user += (
+            "\n\nReturn CompilerSemanticIR, not an IntentContract. Each prompt or "
+            "TaskSpec grounding needs a requirement disposition: relation/inventory "
+            "for compiled semantics, forbidden_inventory, unsupported, unresolved, "
+            "or soft_scope. required_count is generated from SceneTaskSpec only; do "
+            "not emit it. Relations require subject_ref and catalog target refs."
+        )
         if validation_error:
             user += (
                 "\n\nThe previous candidate was invalid. Correct it and return a "
@@ -1442,6 +1798,186 @@ class IntentCompiler:
         ]
 
     def compile(
+        self,
+        prompt: str,
+        interaction_constraints: list[str] | tuple[str, ...] | None = None,
+        aesthetic_constraints: list[str] | tuple[str, ...] | None = None,
+        task_spec: Any | None = None,
+    ) -> dict[str, Any]:
+        """Compile live Prompt semantics only from a grounded LLM IR.
+
+        Structured TaskSpec inventory is projected deterministically. All prompt
+        relations, negation, unsupported requirements, and coverage
+        dispositions must be present in the model response; failures remain
+        runtime failures after the bounded corrective retry.
+        """
+
+        normalized_prompt, prompt_hash = self._prompt_metadata(prompt)
+        normalized_task_spec = self._normalize_task_spec(
+            task_spec,
+            interaction_constraints=interaction_constraints,
+            aesthetic_constraints=aesthetic_constraints,
+        )
+        grounding_catalog, rendered_grounding_catalog = _grounding_catalog(
+            normalized_prompt, normalized_task_spec
+        )
+        entity_catalog = _entity_catalog(normalized_task_spec)
+        rendered_entity_catalog = _render_entity_catalog(entity_catalog)
+        previous_output = ""
+        last_error = ""
+        attempts: list[dict[str, Any]] = []
+
+        for attempt in range(2):
+            messages = self._messages(
+                normalized_prompt,
+                task_spec=normalized_task_spec,
+                grounding_catalog=rendered_grounding_catalog,
+                entity_catalog=rendered_entity_catalog,
+                previous_output=previous_output,
+                validation_error=last_error,
+            )
+            started_at = time.perf_counter()
+            response = None
+            raw = ""
+            try:
+                response = self._client.chat.completions.create(
+                    model=self._model,
+                    messages=messages,
+                    temperature=self._temperature,
+                    max_tokens=self._max_tokens,
+                    response_format=json_response_format(
+                        model=self._model,
+                        name="compiler_semantic_ir",
+                        schema=intent_compiler_wire_json_schema(),
+                    ),
+                    extra_body=chat_template_kwargs_from_effort(
+                        "none", model=self._model
+                    ),
+                )
+                raw = self._raw_message(response)
+                finish_reason = self._finish_reason(response)
+                if finish_reason == "length":
+                    raise ValueError("finish_reason=length: semantic IR was truncated")
+                semantic_ir = parse_llm_json_object(raw)
+                contract, ledger, rejected = _admit_semantic_ir(
+                    semantic_ir,
+                    prompt=normalized_prompt,
+                    prompt_hash=prompt_hash,
+                    task_spec=normalized_task_spec,
+                    grounding_catalog=grounding_catalog,
+                    catalog=entity_catalog,
+                    retry_count=attempt,
+                )
+                result = validate_intent_contract(
+                    contract, validate_prompt_semantics=False
+                )
+                status = "retry_ok" if attempt else "ok"
+                attempt_record = {
+                    "attempt": attempt,
+                    "status": status,
+                    "finish_reason": finish_reason,
+                    "token_usage": self._token_usage(response),
+                    "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                    "accepted_entity_refs": sorted(
+                        {ref for row in ledger for ref in row.get("entity_refs") or []}
+                    ),
+                    "rejected_entity_refs": rejected,
+                }
+                attempts.append(attempt_record)
+                self.last_trace = {
+                    "status": status,
+                    "spec_version": self.SPEC_VERSION,
+                    "semantic_ir_version": INTENT_COMPILER_SEMANTIC_IR_VERSION,
+                    "prompt_sha256": prompt_hash,
+                    "normalized_task_spec": normalized_task_spec,
+                    "entity_catalog": list(entity_catalog.values()),
+                    "constraints": result.get("constraints", []),
+                    "coverage_ledger": result.get("coverage_ledger", []),
+                    "coverage_requirements": result.get("coverage_requirements", []),
+                    "retry_count": attempt,
+                    "failure_reason": "",
+                    "attempts": attempts,
+                }
+                _append_llm_debug(
+                    build_llm_call_debug_record(
+                        stage="intent_compiler",
+                        agent_role="intent_compiler",
+                        event="compile",
+                        prompt=messages,
+                        output=raw,
+                        raw_response=response,
+                    ).model_dump()
+                    | {
+                        "input": messages,
+                        "output": raw,
+                        "status": status,
+                        "attempt": attempt,
+                        "semantic_ir_version": INTENT_COMPILER_SEMANTIC_IR_VERSION,
+                        "entity_catalog": list(entity_catalog.values()),
+                        "coverage_ledger": result.get("coverage_ledger", []),
+                        "accepted_entity_refs": attempt_record["accepted_entity_refs"],
+                        "rejected_entity_refs": rejected,
+                    }
+                )
+                return result
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                previous_output = (
+                    "" if self._finish_reason(response) == "length" else raw
+                )
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "status": "error",
+                        "error": last_error,
+                        "finish_reason": self._finish_reason(response),
+                        "token_usage": self._token_usage(response),
+                        "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                    }
+                )
+                _append_llm_debug(
+                    build_llm_call_debug_record(
+                        stage="intent_compiler",
+                        agent_role="intent_compiler",
+                        event="compile",
+                        prompt=messages,
+                        output=raw,
+                        raw_response=response,
+                        error=last_error,
+                    ).model_dump()
+                    | {
+                        "input": messages,
+                        "output": raw,
+                        "status": "error",
+                        "attempt": attempt,
+                        "semantic_ir_version": INTENT_COMPILER_SEMANTIC_IR_VERSION,
+                        "entity_catalog": list(entity_catalog.values()),
+                        "error": last_error,
+                    }
+                )
+                logger.warning(
+                    "IntentCompiler attempt %d failed: %s", attempt + 1, last_error
+                )
+
+        self.last_trace = {
+            "status": "error",
+            "spec_version": self.SPEC_VERSION,
+            "semantic_ir_version": INTENT_COMPILER_SEMANTIC_IR_VERSION,
+            "prompt_sha256": prompt_hash,
+            "normalized_task_spec": normalized_task_spec,
+            "entity_catalog": list(entity_catalog.values()),
+            "constraints": [],
+            "coverage_ledger": [],
+            "retry_count": 1,
+            "failure_reason": last_error,
+            "attempts": attempts,
+        }
+        raise IntentCompilationError(
+            f"IntentCompiler failed after two attempts: {last_error}",
+            trace=self.last_trace,
+        )
+
+    def _compile_legacy_semantics(
         self,
         prompt: str,
         interaction_constraints: list[str] | tuple[str, ...] | None = None,

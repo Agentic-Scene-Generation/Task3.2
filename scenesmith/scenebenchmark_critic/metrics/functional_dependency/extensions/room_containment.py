@@ -14,6 +14,16 @@ from scenesmith.scenebenchmark_critic.core.geometry import (
 
 
 _CONTAINMENT_TOLERANCE_M = 0.01
+ROOM_CONTAINMENT_FAILURE_CODE = "room_containment"
+
+
+def is_room_containment_failure(result: dict[str, Any]) -> bool:
+    """Return whether a critic result is the typed room-boundary hard failure."""
+    return (
+        str(result.get("relation_type") or "") == ROOM_CONTAINMENT_FAILURE_CODE
+        and str(result.get("label") or "").lower() == "fail"
+        and str(result.get("scoring_tier") or "core").lower() == "core"
+    )
 
 
 def evaluate_room_containment(case_pack: dict[str, Any]) -> list[dict[str, Any]]:
@@ -56,7 +66,7 @@ def evaluate_room_containment(case_pack: dict[str, Any]) -> list[dict[str, Any]]
             "related_objects": [],
             "selected_related_objects": [],
             "blocking_objects": [],
-            "relation_type": "room_containment",
+            "relation_type": ROOM_CONTAINMENT_FAILURE_CODE,
             "reason": (
                 f"`{object_id}` footprint is inside the room boundary."
                 if contained
@@ -71,6 +81,7 @@ def evaluate_room_containment(case_pack: dict[str, Any]) -> list[dict[str, Any]]
                 "room_floor_polygon": [[float(x), float(y)] for x, y in room_points],
                 "outside_area_m2": outside_area,
                 "tolerance_m": _CONTAINMENT_TOLERANCE_M,
+                "earliest_stage": "furniture",
             },
             "evidence": {"constraint": "floor_object_inside_room"},
             "evaluation_source": "scenesmith_room_containment",

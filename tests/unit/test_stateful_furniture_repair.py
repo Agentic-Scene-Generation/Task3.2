@@ -1301,6 +1301,43 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_typed_room_containment_failure_routes_to_relation_repair(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(room_type="living_room")
+        agent.cfg = {
+            "scenebenchmark_critic": {
+                "enabled": True,
+                "metrics": ["functional_dependency"],
+            }
+        }
+        failure = {
+            "check_id": "room_containment__cabinet_0",
+            "relation_type": "room_containment",
+            "primary_object": "cabinet_0",
+            "label": "fail",
+            "scoring_tier": "core",
+            "diagnostics": {"outside_area_m2": 0.5},
+        }
+        calls: list[object] = []
+        agent._room_containment_failures = lambda _state=None: [failure]
+        agent._repair_room_containment_failures = lambda failures: (
+            calls.append(failures) or []
+        )
+        agent.furniture_safety_controller = SimpleNamespace(required_counts={})
+        agent._repair_required_counts = lambda: {}
+        agent._remove_excess_required_furniture = lambda _counts: 0
+
+        repaired, _ = agent._attempt_deterministic_repair(
+            SimpleNamespace(hard_valid=False, hard_reasons=[], typed_failures=[failure])
+        )
+
+        self.assertFalse(repaired)
+        self.assertEqual(calls, [[failure]])
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_inventory_repair_rechecks_door_clearance_before_relations(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         agent.scene = SimpleNamespace(

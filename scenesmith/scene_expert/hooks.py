@@ -81,6 +81,9 @@ from scenesmith.scenebenchmark_critic.object_taxonomy import (
 from scenesmith.scenebenchmark_critic.relation_registry import (
     STAGE_ORDER as CONTRACT_STAGE_ORDER,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_containment import (
+    ROOM_CONTAINMENT_FAILURE_CODE,
+)
 
 console_logger = logging.getLogger(__name__)
 
@@ -97,6 +100,7 @@ class StageCommitResult:
     retryable: bool = False
     reason: str = ""
     quality_failure: bool = False
+    non_degradable_blockers: tuple[str, ...] = ()
 
 
 def _empty_memory_pack() -> MemoryPack:
@@ -1165,6 +1169,7 @@ class SceneExpertHookRunner:
                 "[SceneExpert] Failed to capture deterministic repair activity: %s",
                 error,
             )
+
     def record_runtime_failure_continuation(self, provenance: dict[str, Any]) -> None:
         """Attach checkpoint-gated runtime salvage to the stage trace evidence."""
         if not isinstance(provenance, dict):
@@ -2089,6 +2094,16 @@ class SceneExpertHookRunner:
             reason=result_reason,
             quality_failure=(
                 verify_report is not None and not passed and not verification_error
+            ),
+            non_degradable_blockers=(
+                (ROOM_CONTAINMENT_FAILURE_CODE,)
+                if verify_report is not None
+                and any(
+                    issue.relation == ROOM_CONTAINMENT_FAILURE_CODE
+                    and issue.scoring_tier == "core"
+                    for issue in verify_report.issues
+                )
+                else ()
             ),
         )
 

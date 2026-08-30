@@ -156,6 +156,30 @@ class FurnitureSafetyControllerTest(unittest.TestCase):
         self.assertTrue(evaluation.hard_valid)
         self.assertEqual(evaluation.hard_reasons, [])
 
+    def test_room_bounds_guard_emits_typed_containment_failure(self) -> None:
+        controller = FurnitureSafetyController({"enabled": True})
+        scene = SimpleNamespace(
+            room_type="living_room",
+            room_geometry=SimpleNamespace(length=4.0, width=4.0),
+            objects={
+                "cabinet_0": BoundedFurniture(
+                    name="cabinet_0",
+                    description="media cabinet",
+                    world_min=(1.8, -0.4, 0.0),
+                    world_max=(2.4, 0.4, 0.9),
+                )
+            },
+        )
+
+        evaluation = controller.evaluate_scene_state(scene)
+
+        self.assertFalse(evaluation.hard_valid)
+        self.assertEqual(evaluation.hard_reasons, [])
+        self.assertEqual(
+            evaluation.typed_failures[0]["relation_type"], "room_containment"
+        )
+        self.assertEqual(evaluation.typed_failures[0]["primary_object"], "cabinet_0")
+
     def test_asserted_door_blockage_is_hard_without_deterministic_state(self) -> None:
         controller = FurnitureSafetyController({"enabled": True})
 
