@@ -1787,6 +1787,22 @@ class IntentCompiler:
                     "\nThe previous response was truncated. Return a concise but "
                     "complete contract; do not repeat explanations or context."
                 )
+            if "omitted subject_ref" in validation_error:
+                user += (
+                    "\nThe reported relation is missing subject_ref. Use the exact "
+                    "entity_ref from the entity catalog for its subject; a "
+                    "subject_role or subject_cohort is optional metadata, never an "
+                    "endpoint."
+                )
+            if "omitted target_ref" in validation_error:
+                user += (
+                    "\nThe reported relation is missing target_ref. Every relation "
+                    "with a target must use the exact entity_ref from the entity "
+                    "catalog for that target. target_role and target_cohort are "
+                    "optional metadata only; they never replace target_ref. For "
+                    "example, a relation targeting a window uses "
+                    'target_ref="anchor:window".'
+                )
             if "omitted required constraints field" in validation_error:
                 user += (
                     "\nThe top-level constraints field is mandatory, even when it "

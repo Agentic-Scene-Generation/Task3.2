@@ -733,7 +733,10 @@ def intent_compiler_wire_json_schema() -> dict[str, Any]:
                 "items": {"type": "string", "maxLength": 128},
             },
         },
-        "required": ["requirement_id", "kind", "grounding"],
+        # Local Qwen JSON grammar does not reliably enforce the relation-specific
+        # conditional branches below. Require this nullable field in every row so
+        # a relation cannot omit its target; non-relation dispositions use null.
+        "required": ["requirement_id", "kind", "grounding", "target_ref"],
     }
     return {
         "$defs": {"EdgeDistributionGroup": EdgeDistributionGroup.model_json_schema()},

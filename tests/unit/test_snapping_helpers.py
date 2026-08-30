@@ -8,6 +8,7 @@ from pydrake.math import RigidTransform
 
 from scenesmith.agent_utils.room import ObjectType, SceneObject, UniqueID
 from scenesmith.furniture_agents.tools import snapping_helpers
+from scenesmith.utils.mesh_loading import load_object_collision_geometry
 
 
 class _NoCollisionManager:
@@ -53,6 +54,78 @@ def _object(object_id: str, position: tuple[float, float, float]) -> SceneObject
         geometry_path=Path(f"/{object_id}.gltf"),
         sdf_path=Path(f"/{object_id}.sdf"),
     )
+
+
+def _write_collision_sdf(directory: Path, mesh: trimesh.Trimesh) -> Path:
+    """Write a minimal SDF whose collision mesh is already physics-scaled."""
+    mesh_path = directory / "collision.obj"
+    mesh.export(mesh_path)
+    sdf_path = directory / "asset.sdf"
+    sdf_path.write_text(
+        """<sdf version=\"1.7\">
+  <model name=\"asset\">
+    <link name=\"base_link\">
+      <collision name=\"collision\">
+        <geometry><mesh><uri>collision.obj</uri></mesh></geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>
+"""
+    )
+    return sdf_path
+
+
+def test_sdf_collision_geometry_is_not_scaled_again_by_hssd_metadata(tmp_path) -> None:
+    """Snap geometry must agree with the requested dimensions baked into SDF."""
+    sdf_path = _write_collision_sdf(
+        tmp_path,
+        trimesh.creation.box(extents=(1.2, 0.6, 0.7)),
+    )
+    desk = _object("desk", (0.0, 0.0, 0.0))
+    desk.sdf_path = sdf_path
+    desk.scale_factor = 0.9230769
+
+    meshes = load_object_collision_geometry(desk)
+    bounds = np.vstack([mesh.bounds for mesh in meshes])
+    extents = bounds.max(axis=0) - bounds.min(axis=0)
+
+    np.testing.assert_allclose(extents, [1.2, 0.6, 0.7], atol=1e-6)
+
+
+def test_axis_wall_snap_uses_sdf_collision_extent_not_hssd_metadata(tmp_path) -> None:
+    """A furniture-to-wall snap retains the configured clearance in physics."""
+    sdf_path = _write_collision_sdf(
+        tmp_path,
+        trimesh.creation.box(extents=(1.2, 0.6, 0.7)),
+    )
+    desk = _object("desk", (0.0, -0.277, 0.0))
+    desk.sdf_path = sdf_path
+    desk.scale_factor = 0.9230769
+    wall = SceneObject(
+        object_id=UniqueID("south_wall"),
+        object_type=ObjectType.WALL,
+        name="south_wall",
+        description="south wall",
+        transform=RigidTransform(p=[0.0, -1.725, 1.25]),
+        bbox_min=np.array([-2.0, -0.025, -1.25]),
+        bbox_max=np.array([2.0, 0.025, 1.25]),
+        immutable=True,
+    )
+    cfg = OmegaConf.create({"snap_to_object": {"snap_margin_m": 0.01}})
+
+    movement, _ = snapping_helpers.snap_mesh_to_aabb_along_axis(
+        desk,
+        wall,
+        np.array([0.0, -1.0, 0.0]),
+        cfg,
+    )
+
+    final_y = desk.transform.translation()[1] + movement[1]
+    # The south wall's interior face is y=-1.7. With a 0.6m desk and a 1cm
+    # margin, the center must stop at y=-1.39, not at the false smaller-mesh
+    # result near -1.413 that penetrates Drake's wall collision.
+    assert abs(final_y - (-1.39)) < 1e-6
 
 
 def test_axis_snap_stops_chair_front_at_table_footprint(monkeypatch) -> None:

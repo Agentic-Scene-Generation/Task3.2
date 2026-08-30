@@ -2860,6 +2860,58 @@ def test_intent_compiler_retries_hallucinated_ref_then_preserves_unresolved_cove
     assert result["coverage_requirements"][0]["disposition"] == "unresolved"
 
 
+def test_intent_compiler_retry_teaches_catalog_target_ref_not_target_role() -> None:
+    task_spec = SceneTaskSpec(
+        room_type="bedroom", style="standard", required_large_objects=["bed"]
+    )
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "bed_by_window",
+                            "kind": "relation",
+                            "grounding": "prompt:0",
+                            "relation": "next_to",
+                            "subject_ref": "inventory:bed",
+                            "target_role": "window",
+                            "target_cohort": "window",
+                        }
+                    ]
+                )
+            ),
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "bed_by_window",
+                            "kind": "relation",
+                            "grounding": "prompt:0",
+                            "relation": "next_to",
+                            "subject_ref": "inventory:bed",
+                            "target_ref": "anchor:window",
+                            "target_role": "window",
+                            "target_cohort": "window",
+                        }
+                    ]
+                )
+            ),
+        ]
+    )
+
+    result = compiler.compile("Put the bed next to the window.", task_spec=task_spec)
+
+    relation = next(
+        row for row in result["constraints"] if row["relation"] == "next_to"
+    )
+    assert relation["targets"]["category"] == "window"
+    assert compiler.last_trace["status"] == "retry_ok"
+    correction = compiler._test_calls[1]["messages"][1]["content"]
+    assert "target_role and target_cohort are optional metadata only" in correction
+    assert 'target_ref="anchor:window"' in correction
+
+
 def test_intent_compiler_rejects_unbound_inventory_claim_before_coverage_admission() -> (
     None
 ):
@@ -3609,6 +3661,22 @@ def test_intent_compiler_wire_schema_excludes_free_text_provenance() -> None:
         requirement_schema["properties"]
     )
     assert "required_count" not in requirement_schema["properties"]["relation"]["enum"]
+
+
+def test_intent_compiler_wire_schema_requires_an_explicit_target_ref() -> None:
+    schema = intent_compiler_wire_json_schema()
+    requirement_schema = schema["properties"]["requirements"]["items"]
+
+    assert "target_ref" in requirement_schema["required"]
+    assert requirement_schema["properties"]["target_ref"] == {
+        "anyOf": [
+            {
+                "type": "string",
+                "pattern": r"^(inventory|anchor):[a-z0-9_]+$",
+            },
+            {"type": "null"},
+        ]
+    }
 
 
 def test_intent_compiler_expands_grounding_ids_deterministically() -> None:
