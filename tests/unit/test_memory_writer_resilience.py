@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from scenesmith.scene_expert.memory.schemas import (
     FailureMemoryCandidate,
     MemoryWriterResponse,
+    SkillMemoryCandidate,
     SuccessMemoryCandidate,
 )
 from scenesmith.scene_expert.memory.writer import MemoryWriter
@@ -226,6 +227,124 @@ class MemoryWriterResilienceTest(unittest.TestCase):
         )
 
         self.assertEqual([], ops)
+
+    def test_degraded_scene_persists_verified_stage_skill_as_candidate(self) -> None:
+        response = MemoryWriterResponse(
+            skills=[
+                SkillMemoryCandidate(
+                    skill_name="align_seating_to_work_surface",
+                    stage="furniture",
+                    preconditions=["A desk and its assigned chair are present."],
+                    procedure=[
+                        "Bind each chair to its intended desk before placement.",
+                        "Orient the chair toward the desk and verify approach clearance.",
+                    ],
+                    failure_avoidance=["Do not infer alignment from proximity alone."],
+                    postconditions=["Every assigned chair faces its desk."],
+                )
+            ]
+        )
+        writer = MemoryWriter(
+            model="qwen",
+            llm_client=_FakeStructuredClient(StructuredLLMResult(value=response)),
+        )
+
+        ops = writer.write(
+            "Trace: trace_000001",
+            _full_report(passed=False),
+            evidence_payload=_evidence(stage_passed=True),
+        )
+
+        self.assertEqual(1, len(ops))
+        skill = ops[0].content
+        self.assertEqual("skill", ops[0].memory_type)
+        self.assertEqual("candidate", skill["status"])
+        self.assertEqual("stage", skill["promotion_scope"])
+        self.assertFalse(skill["source_scene_passed"])
+        self.assertTrue(
+            skill["semantic_signature"].startswith("sceneexpert.skill_signature.v1:")
+        )
+        self.assertEqual(1, skill["independent_support_count"])
+        self.assertEqual(2, skill["activation_min_independent_support"])
+        self.assertEqual(1, writer.last_trace["llm_skill_candidate_count"])
+        self.assertEqual(1, writer.last_trace["skill_persisted_candidate_count"])
+        self.assertEqual(0, writer.last_trace["skill_promoted_active_count"])
+        self.assertEqual(0, writer.last_trace["skill_rejected_count"])
+        self.assertEqual("persisted_candidate", writer.last_trace["write_status"])
+        self.assertEqual(1, writer.last_trace["persisted_count"])
+        self.assertEqual(0, writer.last_trace["promoted_count"])
+
+    def test_failed_exact_stage_skill_is_rejected_with_structured_reasons(self) -> None:
+        response = MemoryWriterResponse(
+            skills=[
+                SkillMemoryCandidate(
+                    skill_name="verify_support_surface_alignment",
+                    stage="furniture",
+                    procedure=[
+                        "Check support overlap before accepting placement.",
+                        "Move unsupported objects onto a verified support region.",
+                    ],
+                )
+            ]
+        )
+        writer = MemoryWriter(
+            model="qwen",
+            llm_client=_FakeStructuredClient(StructuredLLMResult(value=response)),
+        )
+
+        ops = writer.write(
+            "Trace: trace_000001",
+            _full_report(passed=False),
+            evidence_payload=_evidence(stage_passed=False, hard_failure=True),
+        )
+
+        self.assertEqual([], ops)
+        self.assertEqual(1, writer.last_trace["llm_skill_candidate_count"])
+        self.assertEqual(1, writer.last_trace["skill_rejected_count"])
+        self.assertEqual(
+            {
+                "scene_gate_failed": 1,
+                "score_gate_failed": 1,
+                "stage_gate_failed": 1,
+                "deterministic_stage_failure": 1,
+            },
+            writer.last_trace["skill_rejection_reasons"],
+        )
+        self.assertEqual(
+            "rejected", writer.last_trace["skill_decisions"][0]["decision"]
+        )
+
+    def test_fully_verified_skill_keeps_direct_active_promotion(self) -> None:
+        response = MemoryWriterResponse(
+            skills=[
+                SkillMemoryCandidate(
+                    skill_name="align_seating_to_work_surface",
+                    stage="furniture",
+                    procedure=[
+                        "Bind each chair to its intended desk.",
+                        "Orient every chair toward the assigned work surface.",
+                    ],
+                )
+            ]
+        )
+        writer = MemoryWriter(
+            model="qwen",
+            llm_client=_FakeStructuredClient(StructuredLLMResult(value=response)),
+        )
+
+        ops = writer.write(
+            "Trace: trace_000001",
+            _full_report(passed=True),
+            evidence_payload=_evidence(stage_passed=True),
+        )
+
+        self.assertEqual("active", ops[0].content["status"])
+        self.assertEqual("scene", ops[0].content["promotion_scope"])
+        self.assertTrue(ops[0].content["source_scene_passed"])
+        self.assertEqual(
+            "scene_and_stage_verified", ops[0].content["activation_reason"]
+        )
+        self.assertEqual(1, writer.last_trace["skill_promoted_active_count"])
 
     def test_model_failure_never_writes_fallback_memory(self) -> None:
         client = _FakeStructuredClient(

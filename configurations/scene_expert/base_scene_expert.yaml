@@ -157,6 +157,9 @@ memory:
   writer:
     # Success memory requires both final/stage pass evidence and this score.
     success_min_overall_score: ${oc.env:SCENEEXPERT_MEMORY_SUCCESS_MIN_SCORE,0.75}
+    # Stage-local Skill candidates remain non-retrievable until this many
+    # distinct prompt/task identities provide compatible positive evidence.
+    skill_min_independent_support: ${oc.env:SCENEEXPERT_SKILL_MIN_INDEPENDENT_SUPPORT,2}
   embedding:
     model_id: "${oc.env:SCENEEXPERT_MEMORY_EMBEDDING_MODEL_ID,BAAI/bge-m3}"
     # Actual local loading path. Keep BGE-M3 directly under models_dir/bge-m3.

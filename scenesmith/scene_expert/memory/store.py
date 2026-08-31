@@ -22,11 +22,12 @@ from pydantic import BaseModel
 from scenesmith.scene_expert.memory.schemas import (
     MEMORY_SCHEMA_VERSION,
     FailureCase,
-    MemoryUtilityObservation,
     MemoryUpdateOp,
+    MemoryUtilityObservation,
     Skill,
     SuccessCase,
 )
+from scenesmith.scene_expert.memory.skill_identity import build_skill_semantic_signature
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 
 console_logger = logging.getLogger(__name__)
@@ -230,6 +231,8 @@ class FastMemoryStore:
             "active_success": sum(x.status == "active" for x in self.success_cases),
             "active_failure": sum(x.status == "active" for x in self.failure_cases),
             "active_skill": sum(x.status == "active" for x in self.skills),
+            "candidate_skill": sum(x.status == "candidate" for x in self.skills),
+            "quarantined_skill": sum(x.status == "quarantined" for x in self.skills),
         }
 
     def _disk_signature(self) -> tuple[tuple[int, int], ...]:
@@ -274,7 +277,7 @@ class FastMemoryStore:
 
     @staticmethod
     def _skill_signature(skill: Skill) -> str:
-        return skill.skill_name.strip().casefold()
+        return skill.semantic_signature or build_skill_semantic_signature(skill)
 
     def _rewrite(self, path: Path, records: list[BaseModel]) -> None:
         temporary = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
@@ -506,6 +509,9 @@ class FastMemoryStore:
         added = 0
         updated = 0
         merged = 0
+        skill_candidate_added = 0
+        skill_candidate_merged = 0
+        skill_promoted_active = 0
         with self._file_lock():
             self._manifest = self._read_or_create_manifest_unlocked()
             self._reload_from_disk_unlocked()
@@ -515,6 +521,11 @@ class FastMemoryStore:
                 if op.op == "NOOP":
                     continue
                 if op.op == "ADD":
+                    skill_before: Skill | None = None
+                    incoming_skill: Skill | None = None
+                    if op.memory_type == "skill":
+                        incoming_skill = self._normalized_skill(op.content)
+                        skill_before = self._find_skill_unlocked(incoming_skill)
                     changed, was_merged = self._apply_add_unlocked(op, next_revision)
                     if changed:
                         changed_banks.add(op.memory_type)
@@ -522,6 +533,25 @@ class FastMemoryStore:
                             merged += 1
                         else:
                             added += 1
+                        if incoming_skill is not None:
+                            skill_after = self._find_skill_unlocked(incoming_skill)
+                            if skill_after is not None:
+                                if (
+                                    skill_before is None
+                                    and skill_after.status == "candidate"
+                                ):
+                                    skill_candidate_added += 1
+                                elif (
+                                    skill_before is not None
+                                    and skill_before.status == "candidate"
+                                    and skill_after.status == "candidate"
+                                ):
+                                    skill_candidate_merged += 1
+                                if skill_after.status == "active" and (
+                                    skill_before is None
+                                    or skill_before.status != "active"
+                                ):
+                                    skill_promoted_active += 1
                 elif op.op == "UPDATE":
                     if self._apply_update_unlocked(op, next_revision):
                         changed_banks.add(op.memory_type)
@@ -569,9 +599,46 @@ class FastMemoryStore:
             "updated": updated,
             "merged": merged,
             "changed_banks": sorted(changed_banks),
+            "skill_candidate_added": skill_candidate_added,
+            "skill_candidate_merged": skill_candidate_merged,
+            "skill_promoted_active": skill_promoted_active,
         }
         self.last_apply_summary = summary
         return summary
+
+    @staticmethod
+    def _normalized_skill(content: dict[str, Any]) -> Skill:
+        record = Skill.model_validate(content)
+        signature = record.semantic_signature or build_skill_semantic_signature(record)
+        source_tasks = FastMemoryStore._unique(
+            [
+                *record.source_task_ids,
+                record.source_task_id,
+            ]
+        )
+        aliases = FastMemoryStore._unique([*record.skill_aliases, record.skill_name])
+        return record.model_copy(
+            update={
+                "semantic_signature": signature,
+                "skill_aliases": aliases,
+                "source_task_ids": source_tasks,
+                "independent_support_count": max(1, len(source_tasks)),
+                "activation_min_independent_support": max(
+                    2, int(record.activation_min_independent_support)
+                ),
+            }
+        )
+
+    def _find_skill_unlocked(self, incoming: Skill) -> Skill | None:
+        incoming_signature = self._skill_signature(incoming)
+        return next(
+            (
+                skill
+                for skill in self.skills
+                if self._skill_signature(skill) == incoming_signature
+            ),
+            None,
+        )
 
     def _apply_add_unlocked(
         self, op: MemoryUpdateOp, revision: int
@@ -596,13 +663,31 @@ class FastMemoryStore:
                 identity=lambda item: item.failure_id,
                 signature=self._failure_signature,
             )
-        record = Skill.model_validate(op.content).model_copy(
+        record = self._normalized_skill(op.content).model_copy(
             update={"bank_version": revision}
         )
+        record_tasks = {record.source_task_id, *record.source_task_ids} - {""}
+        if any(
+            skill.skill_name.casefold() == record.skill_name.casefold()
+            and bool(
+                record_tasks & ({skill.source_task_id, *skill.source_task_ids} - {""})
+            )
+            and self._skill_signature(skill) != self._skill_signature(record)
+            for skill in self.skills
+        ):
+            # A retry of the same task is not independent evidence and must not
+            # fork an existing named Skill merely because the LLM paraphrased
+            # its procedure. A genuinely different task may still contribute a
+            # distinct, identically named Skill with different semantics.
+            return False, True
         return self._add_or_merge_unlocked(
             self.skills,
             record,
-            identity=lambda item: item.skill_name,
+            # LLM-generated names are descriptive aliases, not stable identity.
+            # Two identically named Skills may encode incompatible rooms,
+            # relations, or procedures; only the deterministic semantic
+            # signature is safe for cross-task evidence accumulation.
+            identity=self._skill_signature,
             signature=self._skill_signature,
         )
 
@@ -642,7 +727,13 @@ class FastMemoryStore:
                 if (
                     not incoming_tasks
                     or not incoming_runs
-                    or not (incoming_tasks - current_tasks)
+                    or (
+                        not (incoming_tasks - current_tasks)
+                        and not (
+                            current.status == "candidate"
+                            and incoming.status == "active"
+                        )
+                    )
                 ):
                     return False, True
             merged = self._merge_observation(current, incoming)
@@ -706,6 +797,28 @@ class FastMemoryStore:
                 incoming.quality_score,
                 incoming.confidence,
             ) > (current.quality_score, current.confidence)
+            support_count = max(1, len(source_task_ids))
+            activation_threshold = max(
+                2,
+                int(current.activation_min_independent_support),
+                int(incoming.activation_min_independent_support),
+            )
+            if current.status == "quarantined":
+                lifecycle_status = "quarantined"
+                activation_reason = current.activation_reason or "harm_quarantined"
+            elif current.status == "active" or incoming.status == "active":
+                lifecycle_status = "active"
+                activation_reason = (
+                    incoming.activation_reason
+                    if incoming.status == "active"
+                    else current.activation_reason
+                ) or "scene_and_stage_verified"
+            elif support_count >= activation_threshold:
+                lifecycle_status = "active"
+                activation_reason = "independent_stage_support_threshold_met"
+            else:
+                lifecycle_status = "candidate"
+                activation_reason = "awaiting_independent_stage_support"
             updates["applicability"] = current.applicability.model_copy(
                 update={
                     "room_types": self._unique(
@@ -755,6 +868,32 @@ class FastMemoryStore:
                     "postconditions": self._unique(
                         current.postconditions + incoming.postconditions
                     ),
+                    "semantic_signature": (
+                        current.semantic_signature
+                        or incoming.semantic_signature
+                        or self._skill_signature(current)
+                    ),
+                    "skill_aliases": self._unique(
+                        [
+                            *current.skill_aliases,
+                            current.skill_name,
+                            *incoming.skill_aliases,
+                            incoming.skill_name,
+                        ]
+                    ),
+                    "source_scene_passed": (
+                        current.source_scene_passed or incoming.source_scene_passed
+                    ),
+                    "promotion_scope": (
+                        "scene"
+                        if current.promotion_scope == "scene"
+                        or incoming.promotion_scope == "scene"
+                        else "stage"
+                    ),
+                    "independent_support_count": support_count,
+                    "activation_min_independent_support": activation_threshold,
+                    "status": lifecycle_status,
+                    "activation_reason": activation_reason,
                 }
             )
         if same_run and all(

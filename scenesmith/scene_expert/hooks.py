@@ -3038,6 +3038,12 @@ def build_hook_runner(
                 ),
                 0.75,
             ),
+            "skill_min_independent_support": _cfg_int(
+                (memory_cfg.get("writer", {}) or {}).get(
+                    "skill_min_independent_support", 2
+                ),
+                2,
+            ),
         }
         if component_flags["structured_llm"]:
             writer_role_cfg = (structured_llm_cfg.get("roles", {}) or {}).get(

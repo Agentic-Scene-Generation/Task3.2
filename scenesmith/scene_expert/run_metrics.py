@@ -24,7 +24,7 @@ from scenesmith.scene_expert.experiment_identity import stable_source_bundle_has
 
 console_logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "sceneexpert.run_metrics.v5"
+SCHEMA_VERSION = "sceneexpert.run_metrics.v6"
 SCENE_COLUMNS = (
     "run_id",
     "batch_id",
@@ -104,11 +104,19 @@ SCENE_COLUMNS = (
     "memory_writer_status",
     "memory_writer_candidate_count",
     "memory_writer_noop_reason",
+    "memory_writer_persisted",
     "memory_writer_promoted",
     "memory_writer_added",
     "memory_writer_merged",
     "memory_writer_fallback_written",
     "memory_writer_degraded",
+    "llm_skill_candidate_count",
+    "skill_persisted_candidate_count",
+    "skill_promoted_active_count",
+    "skill_rejected_count",
+    "skill_rejection_reasons",
+    "skill_store_candidate_added",
+    "skill_store_candidate_merged",
     "scenesmith_repair_events",
     "scenesmith_repairs_accepted",
     "scenesmith_repairs_rejected",
@@ -590,11 +598,31 @@ def _writer_metrics(
         ),
         "memory_writer_candidate_count": _as_int(status.get("candidate_count")),
         "memory_writer_noop_reason": str(status.get("noop_reason") or ""),
+        "memory_writer_persisted": _as_int(
+            status.get("persisted_count", status.get("promoted_count"))
+        ),
         "memory_writer_promoted": _as_int(status.get("promoted_count")),
         "memory_writer_added": _as_int(store_apply.get("added")),
         "memory_writer_merged": _as_int(store_apply.get("merged")),
         "memory_writer_fallback_written": bool(status.get("fallback_written", False)),
         "memory_writer_degraded": bool(status.get("degraded", False)),
+        "llm_skill_candidate_count": _as_int(status.get("llm_skill_candidate_count")),
+        "skill_persisted_candidate_count": _as_int(
+            status.get("skill_persisted_candidate_count")
+        ),
+        "skill_promoted_active_count": _as_int(
+            store_apply.get(
+                "skill_promoted_active", status.get("skill_promoted_active_count")
+            )
+        ),
+        "skill_rejected_count": _as_int(status.get("skill_rejected_count")),
+        "skill_rejection_reasons": dict(status.get("skill_rejection_reasons") or {}),
+        "skill_store_candidate_added": _as_int(
+            store_apply.get("skill_candidate_added")
+        ),
+        "skill_store_candidate_merged": _as_int(
+            store_apply.get("skill_candidate_merged")
+        ),
     }
 
 
@@ -971,6 +999,13 @@ def collect_run_metrics(
     optional_autonomy_preserved_count = sum(
         len(row["optional_autonomy_preserved_stages"]) for row in scene_rows
     )
+    skill_rejection_reasons: dict[str, int] = {}
+    for row in scene_rows:
+        for reason, count in row["skill_rejection_reasons"].items():
+            reason_text = str(reason)
+            skill_rejection_reasons[reason_text] = int(
+                skill_rejection_reasons.get(reason_text, 0)
+            ) + _as_int(count)
 
     summary = {
         "expected_scenes": expected,
@@ -1049,6 +1084,9 @@ def collect_run_metrics(
         "memory_writer_candidate_records": sum(
             row["memory_writer_candidate_count"] for row in scene_rows
         ),
+        "memory_writer_persisted_records": sum(
+            row["memory_writer_persisted"] for row in scene_rows
+        ),
         "memory_writer_promoted_records": sum(
             row["memory_writer_promoted"] for row in scene_rows
         ),
@@ -1059,6 +1097,23 @@ def collect_run_metrics(
             row["memory_writer_merged"] for row in scene_rows
         ),
         "memory_writer_fallback_writes": len(fallback_writes),
+        "llm_skill_candidate_count": sum(
+            row["llm_skill_candidate_count"] for row in scene_rows
+        ),
+        "skill_persisted_candidate_count": sum(
+            row["skill_persisted_candidate_count"] for row in scene_rows
+        ),
+        "skill_promoted_active_count": sum(
+            row["skill_promoted_active_count"] for row in scene_rows
+        ),
+        "skill_rejected_count": sum(row["skill_rejected_count"] for row in scene_rows),
+        "skill_rejection_reasons": dict(sorted(skill_rejection_reasons.items())),
+        "skill_store_candidate_added": sum(
+            row["skill_store_candidate_added"] for row in scene_rows
+        ),
+        "skill_store_candidate_merged": sum(
+            row["skill_store_candidate_merged"] for row in scene_rows
+        ),
         "scenesmith_repair_events": sum(
             row["scenesmith_repair_events"] for row in scene_rows
         ),
@@ -1233,6 +1288,13 @@ def _markdown(metrics: dict[str, Any]) -> str:
         "memory_injection_delivery_rate",
         "memory_cross_task_verified_scene_coverage",
         "memory_writer_promoted_records",
+        "memory_writer_persisted_records",
+        "llm_skill_candidate_count",
+        "skill_persisted_candidate_count",
+        "skill_promoted_active_count",
+        "skill_rejected_count",
+        "skill_store_candidate_added",
+        "skill_store_candidate_merged",
         "memory_writer_noop_scenes",
         "memory_writer_failure_scenes",
         "memory_writer_fallback_writes",

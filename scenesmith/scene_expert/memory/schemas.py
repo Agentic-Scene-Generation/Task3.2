@@ -286,6 +286,13 @@ class Skill(MemoryRecordBase):
     created_at: str = ""
     last_used_at: str = ""
     usage_count: int = 0
+    semantic_signature: str = ""
+    skill_aliases: list[str] = Field(default_factory=list)
+    promotion_scope: Literal["scene", "stage"] = "stage"
+    source_scene_passed: bool = False
+    independent_support_count: int = Field(default=1, ge=1)
+    activation_min_independent_support: int = Field(default=2, ge=2)
+    activation_reason: str = ""
     applicability: SkillApplicability = Field(default_factory=SkillApplicability)
     utility_observations: list[MemoryUtilityObservation] = Field(default_factory=list)
 

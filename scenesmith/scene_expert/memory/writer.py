@@ -31,6 +31,7 @@ from scenesmith.scene_expert.memory.schemas import (
     SuccessCase,
     SuccessMemoryCandidate,
 )
+from scenesmith.scene_expert.memory.skill_identity import build_skill_semantic_signature
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.schemas import FullVerifyReport
 from scenesmith.scene_expert.structured_llm import (
@@ -90,6 +91,9 @@ Rules:
 - A failure lesson is allowed only when the trace shows a verified repair or a
   deterministic/repeatable hard failure. Never label visual opinion as deterministic.
 - A skill must contain a reusable procedure with at least two concrete steps.
+- A failed final scene may still yield a Skill candidate only from an exact
+  stage whose authoritative verify_report passed. Never propose a Skill from
+  the failed stage itself. Deterministic code decides candidate versus active.
 - Prefer empty arrays with a clear noop_reason over weak, duplicate, or speculative memory.
 - Keep each lesson concise and useful for a different scene with similar requirements.
 """
@@ -123,12 +127,22 @@ class MemoryWriter:
         timeout_seconds: float = 90.0,
         temperature: float = 0.1,
         success_min_overall_score: float = SUCCESS_MEMORY_MIN_OVERALL_SCORE,
+        skill_min_independent_support: int = 2,
         debug_dir: str | Path | None = None,
         llm_client: SceneExpertStructuredLLMClient | None = None,
     ) -> None:
         self._model = model
         self._debug_dir = Path(debug_dir) if debug_dir else None
         self._success_min_overall_score = float(success_min_overall_score)
+        self._skill_min_independent_support = max(
+            2,
+            int(
+                os.environ.get(
+                    "SCENEEXPERT_SKILL_MIN_INDEPENDENT_SUPPORT",
+                    skill_min_independent_support,
+                )
+            ),
+        )
         max_tokens = int(
             os.environ.get("SCENEEXPERT_MEMORY_WRITER_MAX_TOKENS", max_tokens)
         )
@@ -161,6 +175,13 @@ class MemoryWriter:
             "source": "not_run",
             "degraded": False,
             "attempt_count": 0,
+            "persisted_count": 0,
+            "llm_skill_candidate_count": 0,
+            "skill_persisted_candidate_count": 0,
+            "skill_promoted_active_count": 0,
+            "skill_rejected_count": 0,
+            "skill_rejection_reasons": {},
+            "skill_decisions": [],
         }
 
     def write(
@@ -195,6 +216,17 @@ class MemoryWriter:
             profile=self._profile,
         )
         self.last_trace = result.status_dict()
+        self.last_trace.update(
+            {
+                "llm_skill_candidate_count": 0,
+                "skill_persisted_candidate_count": 0,
+                "skill_promoted_active_count": 0,
+                "skill_rejected_count": 0,
+                "skill_rejection_reasons": {},
+                "skill_decisions": [],
+                "persisted_count": 0,
+            }
+        )
 
         if not result.success or result.value is None:
             self.last_trace.update(
@@ -202,6 +234,7 @@ class MemoryWriter:
                     "structured_call_source": self.last_trace.get("source", ""),
                     "source": "no_write",
                     "write_status": "model_failure_no_write",
+                    "persisted_count": 0,
                     "promoted_count": 0,
                     "fallback_written": False,
                 }
@@ -235,16 +268,52 @@ class MemoryWriter:
             evidence_payload=evidence,
         )
         mutating_ops = [op for op in promoted_ops if op.op in {"ADD", "UPDATE"}]
-        status = "promoted" if mutating_ops else "no_valid_candidates"
+        active_promotion_ops = [
+            op
+            for op in mutating_ops
+            if op.memory_type != "skill" or str(op.content.get("status")) == "active"
+        ]
+        skill_decisions = list(getattr(self, "_last_skill_decisions", []))
+        rejection_reasons: dict[str, int] = {}
+        for decision in skill_decisions:
+            if decision.get("decision") != "rejected":
+                continue
+            for reason in decision.get("reasons", []) or []:
+                reason_text = str(reason)
+                rejection_reasons[reason_text] = (
+                    int(rejection_reasons.get(reason_text, 0)) + 1
+                )
+        status = (
+            "promoted"
+            if active_promotion_ops
+            else "persisted_candidate" if mutating_ops else "no_valid_candidates"
+        )
         self.last_trace.update(
             {
                 "write_status": status,
                 "candidate_count": len(candidate_ops),
-                "promoted_count": len(mutating_ops),
+                "persisted_count": len(mutating_ops),
+                "promoted_count": len(active_promotion_ops),
                 "candidate_counts": self._op_counts(candidate_ops),
-                "promoted_counts": self._op_counts(mutating_ops),
+                "persisted_counts": self._op_counts(mutating_ops),
+                "promoted_counts": self._op_counts(active_promotion_ops),
                 "noop_reason": result.value.noop_reason,
                 "fallback_written": False,
+                "llm_skill_candidate_count": len(result.value.skills),
+                "skill_persisted_candidate_count": sum(
+                    decision.get("decision") == "persisted_candidate"
+                    for decision in skill_decisions
+                ),
+                "skill_promoted_active_count": sum(
+                    decision.get("decision") == "promoted_active"
+                    for decision in skill_decisions
+                ),
+                "skill_rejected_count": sum(
+                    decision.get("decision") == "rejected"
+                    for decision in skill_decisions
+                ),
+                "skill_rejection_reasons": rejection_reasons,
+                "skill_decisions": skill_decisions,
             }
         )
         self._save_debug_payload(
@@ -257,7 +326,7 @@ class MemoryWriter:
             result_ops=mutating_ops,
         )
         console_logger.info(
-            "MemoryWriter: promoted %d/%d schema-valid candidates; fallback_written=false",
+            "MemoryWriter: persisted %d/%d schema-valid candidates; fallback_written=false",
             len(mutating_ops),
             len(candidate_ops),
         )
@@ -420,7 +489,7 @@ class MemoryWriter:
             trace_ref=context["trace_id"],
             created_at=now,
             updated_at=now,
-            status="active",
+            status="candidate",
             source="llm",
             source_task_id=context["source_task_id"],
             source_run_id=context["source_run_id"],
@@ -436,6 +505,17 @@ class MemoryWriter:
                 required_object_roles=required_objects,
                 required_relation_types=self._relation_types(stage_evidence),
             ),
+            skill_aliases=[candidate.skill_name],
+            promotion_scope="stage",
+            source_scene_passed=bool(full_report.pass_scene),
+            independent_support_count=1,
+            activation_min_independent_support=max(
+                2, int(getattr(self, "_skill_min_independent_support", 2))
+            ),
+            activation_reason="awaiting_independent_stage_support",
+        )
+        record = record.model_copy(
+            update={"semantic_signature": build_skill_semantic_signature(record)}
         )
         return record.model_dump()
 
@@ -446,6 +526,7 @@ class MemoryWriter:
         evidence_payload: dict[str, Any] | None = None,
     ) -> list[MemoryUpdateOp]:
         """Validate persisted records and enforce deterministic promotion gates."""
+        self._last_skill_decisions: list[dict[str, Any]] = []
         evidence = dict(evidence_payload or {})
         has_structured_evidence = bool(evidence.get("stages"))
         success_threshold = float(
@@ -550,23 +631,112 @@ class MemoryWriter:
             if op.memory_type == "skill":
                 record = self._validate_skill(op.content)
                 if record is None:
+                    self._last_skill_decisions.append(
+                        {
+                            "skill_name": str(op.content.get("skill_name") or ""),
+                            "stage": str(op.content.get("stage") or ""),
+                            "decision": "rejected",
+                            "reasons": ["schema_invalid"],
+                        }
+                    )
                     continue
                 stage_evidence = self._stage_evidence(evidence, record.stage)
-                if (
-                    not full_report.pass_scene
-                    or full_report.overall_score < success_threshold
-                    or (
-                        has_structured_evidence
-                        and not self._stage_passed(stage_evidence)
+                stage_report = self._stage_report(stage_evidence)
+                stage_passed = self._stage_passed(stage_evidence)
+                repair_verified = self._repair_verified(stage_evidence)
+                deterministic_failure = self._deterministic_failure_in_evidence(
+                    stage_evidence
+                )
+                procedure_valid = len(self._clean_list(record.procedure)) >= 2
+                active_eligible = bool(
+                    full_report.pass_scene
+                    and full_report.overall_score >= success_threshold
+                    and (not has_structured_evidence or stage_passed)
+                    and procedure_valid
+                    and not deterministic_failure
+                )
+                candidate_eligible = bool(
+                    has_structured_evidence
+                    and stage_report
+                    and (stage_passed or repair_verified)
+                    and procedure_valid
+                    and not deterministic_failure
+                )
+                if not active_eligible and not candidate_eligible:
+                    reasons: list[str] = []
+                    if not full_report.pass_scene:
+                        reasons.append("scene_gate_failed")
+                    if full_report.overall_score < success_threshold:
+                        reasons.append("score_gate_failed")
+                    if has_structured_evidence and not stage_report:
+                        reasons.append("missing_stage_evidence")
+                    elif has_structured_evidence and not stage_passed:
+                        reasons.append("stage_gate_failed")
+                    if deterministic_failure:
+                        reasons.append("deterministic_stage_failure")
+                    if not procedure_valid:
+                        reasons.append("procedure_too_short")
+                    if not reasons:
+                        reasons.append("insufficient_verified_support")
+                    self._last_skill_decisions.append(
+                        {
+                            "skill_name": record.skill_name,
+                            "stage": record.stage,
+                            "semantic_signature": record.semantic_signature,
+                            "decision": "rejected",
+                            "reasons": reasons,
+                        }
                     )
-                    or len(self._clean_list(record.procedure)) < 2
-                ):
                     console_logger.info(
-                        "MemoryWriter: rejected unsupported skill %s", record.skill_name
+                        "MemoryWriter: rejected unsupported skill %s reasons=%s",
+                        record.skill_name,
+                        ",".join(reasons),
                     )
                     continue
+                if active_eligible:
+                    record = record.model_copy(
+                        update={
+                            "status": "active",
+                            "promotion_scope": "scene",
+                            "source_scene_passed": True,
+                            "activation_reason": "scene_and_stage_verified",
+                        }
+                    )
+                    decision = "promoted_active"
+                else:
+                    stage_quality = self._mean_score(self._stage_scores(stage_evidence))
+                    record = record.model_copy(
+                        update={
+                            "status": "candidate",
+                            "promotion_scope": "stage",
+                            "source_scene_passed": bool(full_report.pass_scene),
+                            "quality_score": stage_quality,
+                            "success_rate": stage_quality,
+                            "confidence": min(float(record.confidence), 0.75),
+                            "activation_reason": (
+                                "verified_repair_awaiting_independent_support"
+                                if repair_verified and not stage_passed
+                                else "stage_pass_awaiting_independent_support"
+                            ),
+                        }
+                    )
+                    decision = "persisted_candidate"
                 record = self._rebuild_embedding(record)
                 filtered.append(op.model_copy(update={"content": record.model_dump()}))
+                self._last_skill_decisions.append(
+                    {
+                        "skill_name": record.skill_name,
+                        "stage": record.stage,
+                        "semantic_signature": record.semantic_signature,
+                        "decision": decision,
+                        "status": record.status,
+                        "independent_support_count": record.independent_support_count,
+                        "activation_min_independent_support": (
+                            record.activation_min_independent_support
+                        ),
+                        "reasons": [],
+                    }
+                )
         return filtered
 
     @staticmethod
@@ -942,9 +1112,11 @@ class MemoryWriter:
         return (
             "Analyze this terminal run, which may have completed or failed. Treat "
             "each evidence.stages[*].verify_report and final_report as authoritative. "
-            "A failed final_report forbids scene-level success and skills, but an "
-            "earlier stage with pass_stage=true may still yield a narrowly scoped "
-            "stage success. Never infer success for a failed stage. Return only "
+            "A failed final_report forbids scene-level success and immediately active "
+            "skills, but an earlier stage with pass_stage=true may still yield a "
+            "narrowly scoped stage success or reusable Skill candidate. Never infer "
+            "success or a Skill for a failed exact stage. Deterministic code owns "
+            "candidate persistence and activation. Return only "
             "schema-valid reusable candidates.\n"
             + json.dumps(payload, ensure_ascii=False, default=str)
         )

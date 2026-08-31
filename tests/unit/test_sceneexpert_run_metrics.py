@@ -77,10 +77,21 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
                 "task_compiler": {"source": "llm", "degraded": False},
                 "memory_writer": {
                     "write_status": "promoted",
-                    "candidate_count": 1,
+                    "candidate_count": 2,
                     "promoted_count": 1,
                     "fallback_written": False,
-                    "store_apply": {"added": 1, "merged": 0},
+                    "llm_skill_candidate_count": 1,
+                    "skill_persisted_candidate_count": 1,
+                    "skill_promoted_active_count": 0,
+                    "skill_rejected_count": 1,
+                    "skill_rejection_reasons": {"stage_gate_failed": 1},
+                    "store_apply": {
+                        "added": 1,
+                        "merged": 0,
+                        "skill_candidate_added": 1,
+                        "skill_candidate_merged": 0,
+                        "skill_promoted_active": 0,
+                    },
                 },
             },
             "stages": [
@@ -313,6 +324,13 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
         "batch_001.log" in warning for warning in metrics["data_quality_warnings"]
     )
     assert metrics["summary"]["memory_writer_fallback_writes"] == 0
+    assert metrics["summary"]["memory_writer_persisted_records"] == 1
+    assert metrics["summary"]["llm_skill_candidate_count"] == 1
+    assert metrics["summary"]["skill_persisted_candidate_count"] == 1
+    assert metrics["summary"]["skill_promoted_active_count"] == 0
+    assert metrics["summary"]["skill_rejected_count"] == 1
+    assert metrics["summary"]["skill_rejection_reasons"] == {"stage_gate_failed": 1}
+    assert metrics["summary"]["skill_store_candidate_added"] == 1
     assert metrics["summary"]["scenesmith_repair_events"] == 1
     assert metrics["summary"]["scenesmith_repairs_accepted"] == 1
     assert metrics["summary"]["scenesmith_repairs_resolved"] == 1
