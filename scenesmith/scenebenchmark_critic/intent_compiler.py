@@ -418,11 +418,27 @@ def _admit_semantic_ir(
                 "relation": relation,
                 "subjects": subjects,
                 "targets": targets,
-                "edge_frame": raw.get("edge_frame"),
-                "groups": raw.get("groups") or [],
-                "orientation": raw.get("orientation"),
                 **source,
             }
+            if relation == "edge_distribution":
+                row.update(
+                    {
+                        "edge_frame": raw.get("edge_frame"),
+                        "groups": raw.get("groups") or [],
+                        "orientation": raw.get("orientation"),
+                    }
+                )
+            else:
+                ignored_edge_fields = [
+                    field
+                    for field in ("edge_frame", "groups", "orientation")
+                    if raw.get(field) not in (None, [])
+                ]
+                if ignored_edge_fields:
+                    ledger_row["ignored_semantic_fields"] = sorted(
+                        set(ledger_row.get("ignored_semantic_fields", []))
+                        | set(ignored_edge_fields)
+                    )
             constraints.append(row)
             ledger_row["disposition"] = "compiled"
         elif kind == "inventory":

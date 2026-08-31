@@ -71,6 +71,32 @@ def test_runner_filters_scope_without_renumbering_batches(tmp_path: Path) -> Non
     assert "[critic_on/batch_044 slot=1]" in result.stdout
     assert "[critic_on/batch_046 slot=1]" in result.stdout
     assert "[critic_on/batch_092 slot=1]" in result.stdout
+    assert "experiment.scene_failure_policy=record" in result.stdout
+
+
+def test_runner_rejects_invalid_scene_failure_policy(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env.update(
+        {
+            "CRITIC_PROBE_ALLOW_HIGH_MEMORY_START": "1",
+            "DRY_RUN": "true",
+            "OUTPUT_ROOT": str(tmp_path / "output"),
+            "PYTHON_BIN": str(PROJECT_ROOT / ".venv" / "bin" / "python"),
+            "SCENE_FAILURE_POLICY": "ignore",
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(RUNNER), "--case-set", "new3", "--scenes", "bedroom"],
+        cwd=PROJECT_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "SCENE_FAILURE_POLICY must be strict or record" in result.stderr
 
 
 def test_runner_rejects_explicit_multi_room_before_output_creation(

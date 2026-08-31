@@ -23,6 +23,7 @@ from omegaconf import DictConfig, OmegaConf
 from scenesmith.agent_utils.articulated_retrieval_server import (
     ArticulatedRetrievalServer,
 )
+from scenesmith.agent_utils.base_stateful_agent import PlannerWorkflowNoMutationError
 from scenesmith.agent_utils.furniture_accessibility_guard import (
     improve_storage_front_access,
 )
@@ -60,6 +61,7 @@ from scenesmith.scenebenchmark_critic.furniture_relation_repair import (
     improve_furniture_relations,
     unresolved_furniture_relation_failures,
 )
+from scenesmith.scenebenchmark_critic.intent_compiler import IntentCompilationError
 from scenesmith.utils.logging import ConsoleLogger, FileLoggingContext
 from scenesmith.utils.openai import configure_reasoning_persistence
 from scenesmith.utils.parallel import run_parallel_isolated
@@ -95,11 +97,21 @@ STAGE_ASSET_DIRS = {
 }
 
 _SCENE_STATUS_FILENAME = "scene_status.json"
+_SCENE_STATUS_SCHEMA_VERSION = "scenesmith.scene_status.v2"
 _SCENE_SUCCESS_MARKER = "_SUCCESS"
 _SCENE_DEGRADED_MARKER = "_DEGRADED"
 _FURNITURE_RENDER_RESUME_MODES = frozenset({"initial", "latest"})
 _QUALITY_FAILURE_POLICIES = frozenset({"strict", "degraded"})
 _RUNTIME_FAILURE_POLICIES = frozenset({"strict", "checkpoint_degraded"})
+_SCENE_FAILURE_POLICIES = frozenset({"strict", "record"})
+_RECORDABLE_SCENE_FAILURE_TYPES = frozenset(
+    {
+        ("intent_unavailable", "IntentCompilationError"),
+        ("stage_unavailable", "PlannerWorkflowNoMutationError"),
+        ("quality_failure", "SceneExpertStageCommitError"),
+        ("quality_failure", "SceneQualityFailureError"),
+    }
+)
 _TRANSIENT_RUNTIME_ERROR_TYPES = frozenset(
     {
         "APITimeoutError",
@@ -120,6 +132,15 @@ class SceneExpertStageCommitError(RuntimeError):
         self.reason = reason
         detail = f": {reason}" if reason else ""
         super().__init__(f"SceneExpert stage '{stage}' was not committed{detail}")
+
+
+class SceneQualityFailureError(RuntimeError):
+    """A deterministic final quality gate rejected an otherwise valid run."""
+
+    def __init__(self, stage: str, reason: str) -> None:
+        self.stage = stage
+        self.reason = reason
+        super().__init__(reason)
 
 
 def _commit_scene_expert_stage(
@@ -166,9 +187,10 @@ def _raise_for_non_degradable_final_blockers(
     """Do not downgrade known structural geometry failures at finalization."""
     blockers = tuple(sorted(set(report.non_degradable_blockers)))
     if blockers:
-        raise RuntimeError(
+        raise SceneQualityFailureError(
+            "final_scene",
             "SceneExpert final verification found non-degradable structural "
-            f"blocker(s): {', '.join(blockers)}"
+            f"blocker(s): {', '.join(blockers)}",
         )
 
 
@@ -198,6 +220,21 @@ def _runtime_failure_policy(cfg_dict: dict[str, Any]) -> str:
         allowed = ", ".join(sorted(_RUNTIME_FAILURE_POLICIES))
         raise ValueError(
             f"experiment.runtime_failure_policy must be one of: {allowed}; got {value!r}"
+        )
+    return value
+
+
+def _scene_failure_policy(cfg_dict: dict[str, Any]) -> str:
+    """Return whether typed terminal scene failures block the whole process."""
+    value = (
+        str((cfg_dict.get("experiment") or {}).get("scene_failure_policy", "strict"))
+        .strip()
+        .lower()
+    )
+    if value not in _SCENE_FAILURE_POLICIES:
+        allowed = ", ".join(sorted(_SCENE_FAILURE_POLICIES))
+        raise ValueError(
+            f"experiment.scene_failure_policy must be one of: {allowed}; got {value!r}"
         )
     return value
 
@@ -268,6 +305,7 @@ def _write_scene_completion(
     prompt: str,
     attempt: int,
     degraded: bool,
+    run_id: str | None = None,
     degraded_provenance: list[dict[str, Any]] | None = None,
 ) -> None:
     """Persist a truthful terminal status and exactly one completion marker."""
@@ -289,6 +327,7 @@ def _write_scene_completion(
         prompt=prompt,
         status=status,
         attempt=attempt,
+        run_id=run_id,
         provenance={"runtime_degraded": degraded_provenance or []},
     )
 
@@ -406,14 +445,17 @@ def _write_scene_status(
     prompt: str,
     status: str,
     attempt: int,
+    run_id: str | None = None,
     error: str | None = None,
     provenance: dict[str, Any] | None = None,
+    failure: dict[str, Any] | None = None,
 ) -> None:
     """Atomically persist the lifecycle state of one scene task."""
     scene_dir = output_dir / f"scene_{scene_id:03d}"
     scene_dir.mkdir(parents=True, exist_ok=True)
     status_path = scene_dir / _SCENE_STATUS_FILENAME
     payload = {
+        "schema_version": _SCENE_STATUS_SCHEMA_VERSION,
         "scene_id": scene_id,
         "prompt": prompt,
         "status": status,
@@ -421,15 +463,203 @@ def _write_scene_status(
         "pid": os.getpid(),
         "updated_at": datetime.now().astimezone().isoformat(),
     }
+    if run_id:
+        payload["run_id"] = run_id
     if error:
         payload["error"] = error
     if provenance:
         payload["provenance"] = provenance
+    if failure:
+        payload["failure"] = failure
     temporary_path = status_path.with_suffix(".json.tmp")
     temporary_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     temporary_path.replace(status_path)
+
+
+def _scene_failure_record(error: Exception, *, attempt: int) -> dict[str, Any]:
+    """Project a typed exception into the stable scene failure taxonomy."""
+    failure_class = "scene_runtime_failure"
+    stage = str(getattr(error, "stage", "") or "unknown")
+    recordable = False
+    provenance: dict[str, Any] = {}
+
+    if isinstance(error, IntentCompilationError):
+        failure_class = "intent_unavailable"
+        stage = "intent_compilation"
+        recordable = True
+        trace = error.trace if isinstance(error.trace, dict) else {}
+        attempts = trace.get("attempts")
+        provenance = {
+            "compiler_attempts": len(attempts) if isinstance(attempts, list) else 0,
+            "compiler_schema_version": str(trace.get("schema_version") or ""),
+        }
+    elif isinstance(error, PlannerWorkflowNoMutationError):
+        failure_class = "stage_unavailable"
+        recordable = True
+        provenance = {
+            "workflow_calls": error.workflow_calls,
+            "successful_mutations": error.successful_mutations,
+            "operation": error.operation,
+            "terminal_evidence": error.evidence,
+        }
+    elif isinstance(error, SceneExpertStageCommitError):
+        failure_class = "quality_failure"
+        recordable = True
+        provenance = {
+            "retryable": error.retryable,
+            "reason": error.reason,
+        }
+    elif isinstance(error, SceneQualityFailureError):
+        failure_class = "quality_failure"
+        recordable = True
+        provenance = {"reason": error.reason}
+
+    return {
+        "failure_class": failure_class,
+        "stage": stage,
+        "error_type": type(error).__name__,
+        "message": str(error),
+        "attempt": attempt,
+        "recordable": recordable,
+        "provenance": provenance,
+    }
+
+
+def _worker_failure_record(
+    error: str, *, attempt: int, status_error: str
+) -> dict[str, Any]:
+    """Create a fail-closed record when a worker has no trusted exception type."""
+    return {
+        "failure_class": "fatal_run_failure",
+        "stage": "worker_process",
+        "error_type": "WorkerProcessFailure",
+        "message": error,
+        "attempt": attempt,
+        "recordable": False,
+        "provenance": {"status_error": status_error},
+    }
+
+
+def _read_scene_status_payload(
+    *, output_dir: Path, scene_id: int
+) -> tuple[dict[str, Any] | None, str]:
+    status_path = output_dir / f"scene_{scene_id:03d}" / _SCENE_STATUS_FILENAME
+    try:
+        payload = json.loads(status_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, f"missing terminal status: {status_path}"
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        return None, f"unreadable terminal status {status_path}: {type(error).__name__}"
+    if not isinstance(payload, dict):
+        return None, f"terminal status is not an object: {status_path}"
+    return payload, ""
+
+
+def _recordable_scene_failure(
+    payload: dict[str, Any] | None,
+    *,
+    scene_id: int,
+    attempt: int,
+    run_id: str,
+) -> tuple[bool, str]:
+    """Validate the complete cross-process record gate without string guessing."""
+    if payload is None:
+        return False, "terminal status is unavailable"
+    if payload.get("schema_version") != _SCENE_STATUS_SCHEMA_VERSION:
+        return False, "terminal status schema is not scene_status.v2"
+    if payload.get("scene_id") != scene_id:
+        return False, "terminal status scene_id does not match the worker task"
+    if payload.get("status") != "failed":
+        return False, "terminal status is not failed"
+    if payload.get("attempt") != attempt:
+        return False, "terminal status attempt does not match the worker result"
+    if payload.get("run_id") != run_id:
+        return False, "terminal status run_id does not match the current run"
+    failure = payload.get("failure")
+    if not isinstance(failure, dict):
+        return False, "terminal status has no structured failure"
+    if failure.get("attempt") != attempt:
+        return False, "structured failure attempt does not match the worker result"
+    if failure.get("recordable") is not True:
+        return False, "structured failure is not recordable"
+    failure_key = (
+        str(failure.get("failure_class") or ""),
+        str(failure.get("error_type") or ""),
+    )
+    if failure_key not in _RECORDABLE_SCENE_FAILURE_TYPES:
+        return False, f"failure type is not allowlisted: {failure_key!r}"
+    if not str(failure.get("stage") or "").strip():
+        return False, "structured failure has no stage"
+    if not str(failure.get("message") or "").strip():
+        return False, "structured failure has no message"
+    if not isinstance(failure.get("provenance"), dict):
+        return False, "structured failure provenance is not an object"
+    return True, ""
+
+
+def _apply_scene_failure_policy(
+    *,
+    policy: str,
+    failures: list[dict[str, Any]],
+    total_scenes: int,
+    run_id: str,
+) -> list[dict[str, Any]]:
+    """Raise or return honest recorded-failure summaries for one scene batch."""
+    if not failures:
+        return []
+
+    unrecordable: list[str] = []
+    summaries: list[dict[str, Any]] = []
+    for result in failures:
+        payload = result.get("status")
+        trusted, reason = _recordable_scene_failure(
+            payload if isinstance(payload, dict) else None,
+            scene_id=int(result["scene_id"]),
+            attempt=int(result["attempt"]),
+            run_id=run_id,
+        )
+        failure = payload.get("failure") if isinstance(payload, dict) else None
+        failure = failure if isinstance(failure, dict) else {}
+        summaries.append(
+            {
+                "scene_id": int(result["scene_id"]),
+                "attempt": int(result["attempt"]),
+                "failure_class": str(failure.get("failure_class") or "unclassified"),
+                "stage": str(failure.get("stage") or "unknown"),
+                "error_type": str(failure.get("error_type") or "unknown"),
+                "status_path": str(result["status_path"]),
+            }
+        )
+        if not trusted:
+            unrecordable.append(f"scene_{int(result['scene_id']):03d}: {reason}")
+
+    if policy == "record" and not unrecordable:
+        console_logger.warning(
+            "Recorded %d/%d typed scene failure(s) without failing the batch: %s",
+            len(summaries),
+            total_scenes,
+            ", ".join(
+                f"scene_{row['scene_id']:03d}={row['failure_class']}"
+                for row in summaries
+            ),
+        )
+        return summaries
+
+    details = []
+    for result, summary in zip(failures, summaries):
+        details.append(
+            f"  - scene_{summary['scene_id']:03d} "
+            f"[{summary['failure_class']}/{summary['error_type']}]: "
+            f"{result['error']}"
+        )
+    if unrecordable:
+        details.extend(f"  - unrecordable: {reason}" for reason in unrecordable)
+    raise RuntimeError(
+        f"{len(failures)}/{total_scenes} scene(s) failed under {policy!r} policy:\n"
+        + "\n".join(details)
+    )
 
 
 def _archive_failed_scene_attempt(
@@ -2889,6 +3119,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             prompt=prompt,
             status="running",
             attempt=attempt,
+            run_id=experiment_run_id,
         )
 
         # Always create log file.
@@ -3102,9 +3333,10 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                             )
                             if not verify_report.deterministic_pass:
                                 if quality_failure_policy == "strict":
-                                    raise RuntimeError(
+                                    raise SceneQualityFailureError(
+                                        "floor_plan",
                                         "SceneExpert deterministic verification "
-                                        "failed; refusing to mark scene successful"
+                                        "failed; refusing to mark scene successful",
                                     )
                                 quality_degraded = True
                                 console_logger.warning(
@@ -3121,6 +3353,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                             prompt=prompt,
                             attempt=attempt,
                             degraded=quality_degraded,
+                            run_id=experiment_run_id,
                         )
                         return
 
@@ -3243,9 +3476,10 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                                 quality_failure_policy == "strict"
                                 and not targeted_replay
                             ):
-                                raise RuntimeError(
+                                raise SceneQualityFailureError(
+                                    "final_scene",
                                     "SceneExpert deterministic verification failed; "
-                                    "refusing to mark scene successful"
+                                    "refusing to mark scene successful",
                                 )
                             quality_degraded = True
                             reason = (
@@ -3282,7 +3516,9 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     prompt=prompt,
                     status="failed",
                     attempt=attempt,
+                    run_id=experiment_run_id,
                     error=str(e),
+                    failure=_scene_failure_record(e, attempt=attempt),
                 )
                 console_logger.error(f"Scene generation failed: {e}")
                 raise
@@ -3293,6 +3529,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             prompt=prompt,
             attempt=attempt,
             degraded=quality_degraded,
+            run_id=experiment_run_id,
             degraded_provenance=runtime_degraded_provenance,
         )
 
@@ -3301,20 +3538,23 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         prompts_with_ids: list[tuple[int, str]],
         cfg_dict: dict,
         experiment_run_id: str,
-    ) -> None:
+    ) -> list[dict[str, Any]]:
         """Run scenes in YAML order, each in a fresh isolated process."""
         console_logger.info(
             "Running scene generation serially with per-scene process isolation"
         )
         failed_scenes: list[tuple[int, str]] = []
+        recorded_failures: list[dict[str, Any]] = []
         for scene_id, prompt in prompts_with_ids:
             try:
-                self._run_isolated_scene_generation(
-                    prompts_with_ids=[(scene_id, prompt)],
-                    cfg_dict=cfg_dict,
-                    experiment_run_id=experiment_run_id,
-                    num_workers=1,
-                    capture_logs=False,
+                recorded_failures.extend(
+                    self._run_isolated_scene_generation(
+                        prompts_with_ids=[(scene_id, prompt)],
+                        cfg_dict=cfg_dict,
+                        experiment_run_id=experiment_run_id,
+                        num_workers=1,
+                        capture_logs=False,
+                    )
                 )
             except RuntimeError as error:
                 console_logger.error(
@@ -3331,6 +3571,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                 f"{len(failed_scenes)}/{len(prompts_with_ids)} scene(s) failed:\n"
                 f"{failure_details}"
             )
+        return recorded_failures
 
     def _run_parallel_generation(
         self,
@@ -3338,7 +3579,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         cfg_dict: dict,
         experiment_run_id: str,
         num_workers: int,
-    ) -> None:
+    ) -> list[dict[str, Any]]:
         """Run scene generation in parallel with fault tolerance.
 
         Uses isolated processes per scene instead of a shared executor pool.
@@ -3351,7 +3592,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         console_logger.info(
             f"Running scene generation with {num_workers} isolated workers"
         )
-        self._run_isolated_scene_generation(
+        return self._run_isolated_scene_generation(
             prompts_with_ids=prompts_with_ids,
             cfg_dict=cfg_dict,
             experiment_run_id=experiment_run_id,
@@ -3366,8 +3607,9 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         experiment_run_id: str,
         num_workers: int,
         capture_logs: bool,
-    ) -> None:
+    ) -> list[dict[str, Any]]:
         """Run complete scene tasks with clean-process retry semantics."""
+        scene_failure_policy = _scene_failure_policy(cfg_dict)
         retry_budget = max(
             0, int(cfg_dict["experiment"].get("scene_retry_attempts", 1))
         )
@@ -3380,7 +3622,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             pending[task_id] = (scene_id, prompt, render_gpu_id)
             console_logger.info(f"Queued {task_id} (GPU {render_gpu_id}): {prompt}")
 
-        final_results: dict[str, tuple[bool, str | None]] = {}
+        final_results: dict[str, dict[str, Any]] = {}
         attempt = 1
         while pending:
             tasks: list[tuple[str, Callable, dict]] = []
@@ -3409,19 +3651,46 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                 scene_id, prompt, _ = metadata
                 success, result_or_error = results[task_id]
                 if success:
-                    final_results[task_id] = (True, None)
+                    final_results[task_id] = {"success": True}
                     console_logger.info(f"Completed {task_id} on attempt {attempt}")
                     continue
 
                 error = str(result_or_error)
-                _write_scene_status(
+                status_path = (
+                    self.output_dir / f"scene_{scene_id:03d}" / _SCENE_STATUS_FILENAME
+                )
+                status_payload, status_error = _read_scene_status_payload(
                     output_dir=self.output_dir,
                     scene_id=scene_id,
-                    prompt=prompt,
-                    status="failed",
-                    attempt=attempt,
-                    error=error[-8000:],
                 )
+                status_is_terminal = (
+                    isinstance(status_payload, dict)
+                    and status_payload.get("status") == "failed"
+                )
+                if status_payload is None and status_path.exists():
+                    console_logger.error(status_error)
+                elif not status_is_terminal:
+                    fallback_failure = _worker_failure_record(
+                        error[-8000:],
+                        attempt=attempt,
+                        status_error=(
+                            status_error or "worker returned no failed status"
+                        ),
+                    )
+                    _write_scene_status(
+                        output_dir=self.output_dir,
+                        scene_id=scene_id,
+                        prompt=prompt,
+                        status="failed",
+                        attempt=attempt,
+                        run_id=experiment_run_id,
+                        error=error[-8000:],
+                        failure=fallback_failure,
+                    )
+                    status_payload, status_error = _read_scene_status_payload(
+                        output_dir=self.output_dir,
+                        scene_id=scene_id,
+                    )
                 can_retry = attempt <= retry_budget and _is_retryable_scene_failure(
                     error
                 )
@@ -3438,7 +3707,15 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     )
                     retry_pending[task_id] = metadata
                 else:
-                    final_results[task_id] = (False, error)
+                    final_results[task_id] = {
+                        "success": False,
+                        "scene_id": scene_id,
+                        "attempt": attempt,
+                        "error": error,
+                        "status": status_payload,
+                        "status_error": status_error,
+                        "status_path": status_path,
+                    }
                     console_logger.error(
                         f"{task_id} failed permanently after attempt {attempt}: {error}"
                     )
@@ -3447,18 +3724,14 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             attempt += 1
 
         failed_scenes = [
-            (task_id, error)
-            for task_id, (success, error) in final_results.items()
-            if not success
+            result for result in final_results.values() if not result["success"]
         ]
-        if failed_scenes:
-            failure_details = "\n".join(
-                f"  - {task_id}: {error}" for task_id, error in failed_scenes
-            )
-            raise RuntimeError(
-                f"{len(failed_scenes)}/{len(prompts_with_ids)} scene(s) failed:\n"
-                f"{failure_details}"
-            )
+        return _apply_scene_failure_policy(
+            policy=scene_failure_policy,
+            failures=failed_scenes,
+            total_scenes=len(prompts_with_ids),
+            run_id=experiment_run_id,
+        )
 
     def generate_scenes(self) -> None:
         """Generate scenes with parallel support."""
@@ -3521,6 +3794,10 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
 
         # Convert config to dictionary for static method.
         cfg_dict = OmegaConf.to_container(self.cfg, resolve=True)
+        _quality_failure_policy(cfg_dict)
+        _runtime_failure_policy(cfg_dict)
+        scene_failure_policy = _scene_failure_policy(cfg_dict)
+        console_logger.info("Scene failure policy: %s", scene_failure_policy)
 
         try:
             # Start GPU servers (CUDA init happens here).
@@ -3531,24 +3808,33 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             self._start_materials_server()
 
             if num_workers == 1:
-                self._run_serial_generation(
+                recorded_failures = self._run_serial_generation(
                     prompts_with_ids=prompts_with_ids,
                     cfg_dict=cfg_dict,
                     experiment_run_id=experiment_run_id,
                 )
             else:
-                self._run_parallel_generation(
+                recorded_failures = self._run_parallel_generation(
                     prompts_with_ids=prompts_with_ids,
                     cfg_dict=cfg_dict,
                     experiment_run_id=experiment_run_id,
                     num_workers=num_workers,
                 )
 
-            console_logger.info("All scenes completed")
+            if recorded_failures:
+                console_logger.warning(
+                    "Scene batch reached terminal state with %d recorded failure(s)",
+                    len(recorded_failures),
+                )
+            else:
+                console_logger.info("All scenes completed")
 
             # Log clear completion message.
             console_logger.info("=" * 60)
-            console_logger.info(bold_green("ALL SCENES COMPLETED!"))
+            if recorded_failures:
+                console_logger.warning("SCENE BATCH FINISHED WITH RECORDED FAILURES")
+            else:
+                console_logger.info(bold_green("ALL SCENES COMPLETED!"))
             console_logger.info("=" * 60)
             console_logger.info(yellow("Press Ctrl+C to exit the script."))
             console_logger.info("=" * 60)

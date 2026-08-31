@@ -87,6 +87,31 @@ from scenesmith.utils.openai import (
 console_logger = logging.getLogger(__name__)
 
 
+class PlannerWorkflowNoMutationError(RuntimeError):
+    """A bounded designer workflow completed without a committed scene change."""
+
+    def __init__(
+        self,
+        *,
+        stage: str,
+        workflow_calls: int,
+        successful_mutations: int,
+        operation: str,
+        evidence: dict[str, Any] | None = None,
+    ) -> None:
+        self.stage = stage
+        self.workflow_calls = workflow_calls
+        self.successful_mutations = successful_mutations
+        self.operation = operation
+        self.evidence = dict(evidence or {})
+        super().__init__(
+            f"Planner stage '{stage}' exhausted its bounded workflow after "
+            f"{workflow_calls} designer call(s) but produced "
+            f"{successful_mutations} committed scene mutation(s); "
+            f"last operation={operation}"
+        )
+
+
 def _cfg_get(cfg: Any, key: str, default: Any) -> Any:
     if cfg is None:
         return default
@@ -213,6 +238,9 @@ class BaseStatefulAgent(ABC):
         safety_cfg = getattr(cfg, "furniture_safety_controller", None)
         self.furniture_safety_controller = FurnitureSafetyController(safety_cfg)
         self._planner_initial_design_tool_calls = 0
+        self._planner_designer_workflow_calls = 0
+        self._planner_last_designer_workflow_operation = ""
+        self._planner_last_designer_workflow_evidence: dict[str, Any] = {}
         self._planner_critique_tool_calls = 0
         self._planner_design_change_tool_calls = 0
         self._planner_budget_exhausted = False
@@ -2039,11 +2067,10 @@ class BaseStatefulAgent(ABC):
 
         result = await run_once(runner_input, event="coordinate_stage")
 
-        # A planner can return a natural-language acknowledgement without ever
-        # invoking a workflow tool.  Letting that response pass makes the stage
-        # look successful while leaving required surfaces empty.  A normal fresh
-        # stage uses initial design, while a restored/retry candidate can already
-        # complete real design work through a successful designer mutation.
+        # A planner can return a natural-language acknowledgement, or a designer
+        # workflow can finish without committing a scene mutation. Both require
+        # one bounded recovery turn, but they are different failure modes and
+        # must remain distinguishable in the terminal status.
         if (
             require_initial_design
             and getattr(self, "_planner_successful_designer_mutations", 0) == 0
@@ -2055,20 +2082,35 @@ class BaseStatefulAgent(ABC):
                 raise RuntimeError(
                     "Planner stopped after " f"{self._planner_terminal_failure_text()}"
                 )
-            recovery_input = (
-                "MANDATORY WORKFLOW RECOVERY: your previous turn returned without "
-                "calling a workflow tool, so no design work has been completed. "
-                "Do not return a summary, ask a question, or describe what you "
-                "would do. Immediately execute the workflow now. For placement "
-                "stages, call select_placement_style() first if it has not already "
-                "been called; then call request_initial_design(). For non-placement "
-                "stages, call request_initial_design() immediately. Continue using "
-                "the workflow tools only after the initial design tool has returned."
-            )
-            console_logger.warning(
-                "Planner returned without request_initial_design; running one "
-                "mandatory workflow recovery turn."
-            )
+            workflow_calls = getattr(self, "_planner_designer_workflow_calls", 0)
+            if workflow_calls:
+                recovery_input = (
+                    "MANDATORY NO-MUTATION RECOVERY: a designer workflow was called "
+                    "but produced no committed scene mutation. Do not repeat a "
+                    "one-shot request_initial_design() call. Inspect the returned "
+                    "failure evidence and immediately call request_design_change() "
+                    "once with a concrete alternative that respects the open circuit "
+                    "breaker and remaining workflow budget."
+                )
+                console_logger.warning(
+                    "Planner designer workflow produced no committed mutation; "
+                    "running one bounded no-mutation recovery turn."
+                )
+            else:
+                recovery_input = (
+                    "MANDATORY WORKFLOW RECOVERY: your previous turn returned without "
+                    "calling a workflow tool, so no design work has been completed. "
+                    "Do not return a summary, ask a question, or describe what you "
+                    "would do. Immediately execute the workflow now. For placement "
+                    "stages, call select_placement_style() first if it has not already "
+                    "been called; then call request_initial_design(). For non-placement "
+                    "stages, call request_initial_design() immediately. Continue using "
+                    "the workflow tools only after the initial design tool has returned."
+                )
+                console_logger.warning(
+                    "Planner returned without request_initial_design; running one "
+                    "mandatory workflow recovery turn."
+                )
             # ``finish_stage`` marks the planner budget exhausted.  That marker
             # is valid only after initial design and must not block this recovery.
             self._planner_budget_exhausted = False
@@ -2076,9 +2118,43 @@ class BaseStatefulAgent(ABC):
                 recovery_input,
                 event="coordinate_stage_recovery",
             )
-            if getattr(self, "_planner_successful_designer_mutations", 0) == 0:
+            terminal_failure = getattr(self, "_planner_terminal_failure", None)
+            if isinstance(terminal_failure, dict) and not terminal_failure.get(
+                "recovered", False
+            ):
                 raise RuntimeError(
-                    "Planner exited without completing a scene mutation after the "
+                    "Planner stopped after " f"{self._planner_terminal_failure_text()}"
+                )
+            if getattr(self, "_planner_successful_designer_mutations", 0) == 0:
+                workflow_calls = getattr(self, "_planner_designer_workflow_calls", 0)
+                if workflow_calls:
+                    evidence = {
+                        "last_workflow": dict(
+                            getattr(
+                                self,
+                                "_planner_last_designer_workflow_evidence",
+                                {},
+                            )
+                        )
+                    }
+                    if isinstance(terminal_failure, dict):
+                        evidence["terminal_failure"] = dict(terminal_failure)
+                    raise PlannerWorkflowNoMutationError(
+                        stage=self.agent_type.value,
+                        workflow_calls=workflow_calls,
+                        successful_mutations=0,
+                        operation=(
+                            getattr(
+                                self,
+                                "_planner_last_designer_workflow_operation",
+                                "",
+                            )
+                            or "unknown"
+                        ),
+                        evidence=evidence,
+                    )
+                raise RuntimeError(
+                    "Planner exited without calling a designer workflow after the "
                     "mandatory workflow recovery turn"
                 )
         elif (
@@ -2546,6 +2622,9 @@ class BaseStatefulAgent(ABC):
 
     def _reset_planner_budget_tracking(self) -> None:
         self._planner_initial_design_tool_calls = 0
+        self._planner_designer_workflow_calls = 0
+        self._planner_last_designer_workflow_operation = ""
+        self._planner_last_designer_workflow_evidence = {}
         self._planner_successful_designer_mutations = 0
         self._planner_critique_tool_calls = 0
         self._planner_design_change_tool_calls = 0
@@ -2573,6 +2652,19 @@ class BaseStatefulAgent(ABC):
         """Count only designer calls whose final committed scene state changed."""
         if self._planner_scene_hash() != before_hash:
             self._planner_successful_designer_mutations += 1
+
+    def _record_designer_workflow_attempt(self, operation: str) -> None:
+        """Audit a designer call independently from its committed mutation."""
+        self._planner_designer_workflow_calls += 1
+        self._planner_last_designer_workflow_operation = operation
+
+    def _record_designer_workflow_evidence(self, operation: str, result: Any) -> None:
+        """Keep a bounded terminal summary for cross-process failure diagnosis."""
+        self._planner_last_designer_workflow_evidence = {
+            "operation": operation,
+            "result_type": type(result).__name__,
+            "result": str(result)[-2000:],
+        }
 
     def _persist_runtime_failure_checkpoint(self, failure: dict[str, Any]) -> None:
         """Persist only a previously mutated scene for bounded runtime salvage.
@@ -2833,6 +2925,7 @@ class BaseStatefulAgent(ABC):
             # Consume before delegation so a failed child call cannot be retried in
             # a planner loop and obscure its original failure.
             self._hard_repair_design_change_calls += 1
+            self._record_designer_workflow_attempt("request_design_change")
             scene_hash_before = self._planner_scene_hash()
             try:
                 result = await self._run_planner_delegation(
@@ -2842,6 +2935,7 @@ class BaseStatefulAgent(ABC):
                     detail={"instruction": repair_instruction, "source": source},
                 )
                 self._record_successful_designer_mutation(scene_hash_before)
+                self._record_designer_workflow_evidence("request_design_change", result)
             except Exception as exc:
                 console_logger.exception("Planner hard-repair design change failed")
                 return self._stop_planner_after_failure(
@@ -2880,6 +2974,7 @@ class BaseStatefulAgent(ABC):
                     "completed."
                 )
             self._planner_initial_design_tool_calls += 1
+            self._record_designer_workflow_attempt("request_initial_design")
             scene_hash_before = self._planner_scene_hash()
             try:
                 result = await self._run_planner_delegation(
@@ -2888,6 +2983,9 @@ class BaseStatefulAgent(ABC):
                     action=self._request_initial_design_impl,
                 )
                 self._record_successful_designer_mutation(scene_hash_before)
+                self._record_designer_workflow_evidence(
+                    "request_initial_design", result
+                )
             except Exception as exc:
                 console_logger.exception("Planner-requested initial design failed")
                 return self._stop_planner_after_failure(
@@ -3001,6 +3099,7 @@ class BaseStatefulAgent(ABC):
                     source="request_design_change",
                 )
 
+            self._record_designer_workflow_attempt("request_design_change")
             scene_hash_before = self._planner_scene_hash()
             try:
                 result = await self._run_planner_delegation(
@@ -3010,6 +3109,7 @@ class BaseStatefulAgent(ABC):
                     detail={"instruction": instruction},
                 )
                 self._record_successful_designer_mutation(scene_hash_before)
+                self._record_designer_workflow_evidence("request_design_change", result)
             except Exception as exc:
                 console_logger.exception("Planner-requested design change failed")
                 return self._stop_planner_after_failure(

@@ -2828,6 +2828,66 @@ def test_intent_compiler_projects_grounded_catalog_relations_and_coverage() -> N
     )
 
 
+@pytest.mark.parametrize("relation", ["flanking", "in_front_of", "near"])
+def test_intent_compiler_drops_edge_only_fields_from_normal_relations(
+    relation: str,
+) -> None:
+    task_spec = SceneTaskSpec(
+        room_type="office",
+        style="standard",
+        required_large_objects=["chair", "chair", "desk"],
+    )
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "ordinary_relation",
+                            "kind": "relation",
+                            "grounding": "prompt:0",
+                            "relation": relation,
+                            "subject_ref": "inventory:chair",
+                            "target_ref": "inventory:desk",
+                            "subject_count": 2,
+                            "edge_frame": "target_local_rectangle",
+                            "groups": [
+                                {
+                                    "edge_class": "long",
+                                    "counts_per_edge": [1, 1],
+                                }
+                            ],
+                            "orientation": "toward_target",
+                        }
+                    ]
+                )
+            )
+        ]
+    )
+
+    result = compiler.compile(
+        "Place two chairs in relation to the desk.", task_spec=task_spec
+    )
+
+    constraint = next(
+        row for row in result["constraints"] if row["relation"] == relation
+    )
+    assert constraint.get("edge_frame") is None
+    assert constraint.get("groups") == []
+    assert constraint.get("orientation") is None
+    ledger = next(
+        row
+        for row in result["coverage_ledger"]
+        if row["requirement_id"] == "ordinary_relation"
+    )
+    assert ledger["ignored_semantic_fields"] == [
+        "edge_frame",
+        "groups",
+        "orientation",
+    ]
+    assert len(compiler._test_calls) == 1
+
+
 def test_intent_compiler_retries_hallucinated_ref_then_preserves_unresolved_coverage() -> (
     None
 ):

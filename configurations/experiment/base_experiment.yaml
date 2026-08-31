@@ -99,6 +99,9 @@ quality_failure_policy: "strict"  # Options: "strict", "degraded"
 # continues a transient child failure after a persisted, hash-consistent,
 # minimally validated stage checkpoint exists.
 runtime_failure_policy: "strict"  # Options: "strict", "checkpoint_degraded"
+# Terminal scene failures remain process-blocking in production. Critic probes
+# may use "record" only for typed, persisted, explicitly allowlisted failures.
+scene_failure_policy: "strict"  # Options: "strict", "record"
 
 # Pipeline stage control
 # Stages run in order: floor_plan → furniture → wall_mounted → ceiling_mounted → manipuland

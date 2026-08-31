@@ -1000,3 +1000,33 @@ def test_planner_terminal_child_failure_skips_no_mutation_recovery(monkeypatch) 
         )
 
     assert run.await_count == 1
+
+
+def test_planner_no_mutation_recovery_reports_called_workflow(monkeypatch) -> None:
+    agent = _ReviewPlannerAgent()
+    agent._planner_successful_designer_mutations = 0
+    agent._planner_designer_workflow_calls = 1
+    agent._planner_last_designer_workflow_operation = "request_initial_design"
+    agent.planner = SimpleNamespace(instructions="planner")
+    agent.planner_session = SimpleNamespace(session_id="planner-test")
+    agent._reasoning_persistence_context_for_session = lambda _: nullcontext()
+    agent._create_run_config = lambda: None
+    agent._record_module_timing = lambda *args, **kwargs: None
+    agent._record_llm_call_debug = lambda **kwargs: None
+    run = AsyncMock(return_value=SimpleNamespace(final_output="stopped"))
+    monkeypatch.setattr(base_stateful_agent.Runner, "run", run)
+
+    with pytest.raises(
+        base_stateful_agent.PlannerWorkflowNoMutationError,
+        match="produced 0 committed scene mutation",
+    ):
+        asyncio.run(
+            agent._run_planner_workflow(
+                runner_input="start", max_turns=2, require_initial_design=True
+            )
+        )
+
+    assert run.await_count == 2
+    recovery_input = run.await_args_list[1].kwargs["input"]
+    assert "produced no committed scene mutation" in recovery_input
+    assert "returned without calling a workflow tool" not in recovery_input
