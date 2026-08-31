@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Iterable
 
+from scenesmith.scene_expert.experiment_identity import stable_source_bundle_hash
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     MemoryPack,
@@ -35,6 +36,10 @@ console_logger = logging.getLogger(__name__)
 
 
 _DEFAULT_CODE_PROVENANCE_PATHS = (
+    "scenesmith/experiments/indoor_scene_generation.py",
+    "scenesmith/scene_expert/config_utils.py",
+    "scenesmith/scene_expert/global_planner.py",
+    "scenesmith/scene_expert/harness.py",
     "scenesmith/scene_expert/hooks.py",
     "scenesmith/scene_expert/experiment_identity.py",
     "scenesmith/scene_expert/memory/activity.py",
@@ -43,7 +48,9 @@ _DEFAULT_CODE_PROVENANCE_PATHS = (
     "scenesmith/scene_expert/memory/schemas.py",
     "scenesmith/scene_expert/memory/writer.py",
     "scenesmith/scene_expert/run_metrics.py",
+    "scenesmith/scene_expert/schemas.py",
     "scenesmith/scene_expert/task_compiler.py",
+    "scenesmith/scene_expert/trace_logger.py",
     "scenesmith/scene_expert/verifier.py",
     "scenesmith/scene_expert/repair_controller.py",
     "scenesmith/scenebenchmark_critic/intent_contract.py",
@@ -78,6 +85,7 @@ def collect_code_provenance(
         "git_status_hash": "",
         "dirty": None,
         "source_hashes": {},
+        "source_bundle_hash": "",
     }
 
     git_executable = _git_executable()
@@ -119,6 +127,8 @@ def collect_code_provenance(
             content = path.read_bytes().replace(b"\r\n", b"\n")
             source_hashes[str(relative_path)] = hashlib.sha256(content).hexdigest()
     provenance["source_hashes"] = source_hashes
+    provenance["source_bundle_hash"] = stable_source_bundle_hash(source_hashes)
+    provenance["source_file_count"] = len(source_hashes)
     return provenance
 
 
@@ -149,7 +159,7 @@ class TraceLogger:
     One TraceLogger instance per scene generation run.
     """
 
-    SCHEMA_VERSION = "1.6"
+    SCHEMA_VERSION = "1.7"
 
     def __init__(
         self,
@@ -381,10 +391,16 @@ class TraceLogger:
         self._full_report = full_report
         self._exports = exports
         outcome_status = str(full_report.outcome_status or "COMPLETE").casefold()
+        generation_status = str(full_report.generation_status or "unknown").casefold()
         trace_status = (
             "degraded_incomplete"
-            if outcome_status == "degraded_incomplete"
+            if outcome_status == "degraded_incomplete" or generation_status == "partial"
             else "completed"
+        )
+        result_degraded = bool(
+            generation_status in {"partial", "failed"}
+            or full_report.requirement_status in {"partial", "unsatisfied"}
+            or full_report.quality_status in {"degraded", "failed"}
         )
 
         trace = {
@@ -393,7 +409,9 @@ class TraceLogger:
             "scene_id": self._scene_id,
             "status": trace_status,
             "degraded": bool(
-                self._degraded_components() or trace_status == "degraded_incomplete"
+                self._degraded_components()
+                or trace_status == "degraded_incomplete"
+                or result_degraded
             ),
             "degraded_components": self._degraded_components(),
             "component_flags": self._component_flags,

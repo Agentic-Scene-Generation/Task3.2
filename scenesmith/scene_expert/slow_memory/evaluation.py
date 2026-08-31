@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from scenesmith.scene_expert.experiment_identity import stable_source_bundle_hash
+
 
 _COMPLETE = {"completed", "completed_with_quality_issues"}
 
@@ -73,14 +75,24 @@ def evaluate_scene_level_promotion(
         failures.append("model identity is missing")
     elif baseline_models == candidate_models:
         failures.append("base and adapter runs unexpectedly use the same model")
-    for key in ("code_revisions",):
-        if _identity_values(baseline, key) != _identity_values(candidate, key):
-            failures.append(f"controlled identity mismatch: {key}")
-    for key in ("git_status_hash", "source_hashes"):
-        left = (baseline.get("code_provenance") or {}).get(key)
-        right = (candidate.get("code_provenance") or {}).get(key)
-        if not left or left != right:
-            failures.append(f"controlled code provenance mismatch: {key}")
+    baseline_provenance = baseline.get("code_provenance") or {}
+    candidate_provenance = candidate.get("code_provenance") or {}
+    baseline_bundle = str(baseline_provenance.get("source_bundle_hash") or "")
+    candidate_bundle = str(candidate_provenance.get("source_bundle_hash") or "")
+    if not baseline_bundle and isinstance(
+        baseline_provenance.get("source_hashes"), dict
+    ):
+        baseline_bundle = stable_source_bundle_hash(
+            baseline_provenance["source_hashes"]
+        )
+    if not candidate_bundle and isinstance(
+        candidate_provenance.get("source_hashes"), dict
+    ):
+        candidate_bundle = stable_source_bundle_hash(
+            candidate_provenance["source_hashes"]
+        )
+    if not baseline_bundle or baseline_bundle != candidate_bundle:
+        failures.append("controlled code provenance mismatch: source_bundle_hash")
     left_memory = sorted(
         str(value)
         for value in (baseline.get("memory_identity") or {}).get("memory_bank_ids", [])

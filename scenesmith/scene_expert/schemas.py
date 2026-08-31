@@ -10,6 +10,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+REQUIRED_FIRST_DIRECTIVE = (
+    "Execution order: place and stabilize prompt-required assets first; then use "
+    "native designer judgment for useful same-stage optional additions."
+)
+
 # ---------------------------------------------------------------------------
 # TaskCompiler output
 # ---------------------------------------------------------------------------
@@ -394,6 +399,7 @@ class StageBrief(BaseModel):
             lines.append(
                 "  - None explicitly named. This does NOT disable or skip the stage."
             )
+        lines.append(f"REQUIRED-FIRST EXECUTION: {REQUIRED_FIRST_DIRECTIVE}")
         if self.optional_assets_allowed:
             lines.append("OPTIONAL ASSET RECOMMENDATIONS (soft, capacity-aware):")
             if self.optional_asset_recommendations:
@@ -472,6 +478,13 @@ class StageVerifyReport(BaseModel):
     vlm_scoring_performed: bool = False
     hard_check_report: dict = Field(default_factory=dict)
     runtime_repair_events: list[str] = Field(default_factory=list)
+    required_objects: list[str] = Field(default_factory=list)
+    required_satisfied_objects: list[str] = Field(default_factory=list)
+    required_missing_objects: list[str] = Field(default_factory=list)
+    required_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
+    requirement_status: Literal[
+        "satisfied", "partial", "unsatisfied", "not_applicable", "unknown"
+    ] = "unknown"
 
 
 class FullVerifyReport(BaseModel):
@@ -497,6 +510,11 @@ class FullVerifyReport(BaseModel):
     degraded_reasons: list[str] = Field(default_factory=list)
     measured_metrics: dict[str, bool] = Field(default_factory=dict)
     metric_sources: dict[str, str] = Field(default_factory=dict)
+    generation_status: Literal["complete", "partial", "failed", "unknown"] = "unknown"
+    requirement_status: Literal[
+        "satisfied", "partial", "unsatisfied", "not_applicable", "unknown"
+    ] = "unknown"
+    quality_status: Literal["passed", "degraded", "failed", "unknown"] = "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +553,18 @@ class StageExecutionEvidence(BaseModel):
     optional_assets_allowed: bool = True
     required_objects: list[str] = Field(default_factory=list)
     optional_asset_recommendations: list[dict[str, Any]] = Field(default_factory=list)
+    required_first_instruction_applicable: bool = False
+    required_first_instruction_delivered: bool = False
+    optional_autonomy_preserved: bool = False
+    required_satisfied_objects: list[str] = Field(default_factory=list)
+    required_missing_objects: list[str] = Field(default_factory=list)
+    required_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
+    requirement_status: Literal[
+        "satisfied", "partial", "unsatisfied", "not_applicable", "unknown"
+    ] = "unknown"
+    stage_outcome: Literal[
+        "running", "passed", "quality_issue", "verification_error", "runtime_failed"
+    ] = "running"
     stage_agent_invoked: bool = False
     retrieved_memory_ids: list[str] = Field(default_factory=list)
     retrieved_skill_names: list[str] = Field(default_factory=list)

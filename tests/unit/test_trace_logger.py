@@ -28,6 +28,8 @@ def test_collect_code_provenance_hashes_requested_source_files(tmp_path) -> None
     assert provenance["source_hashes"] == {
         "tracked.py": hashlib.sha256(b"answer = 42\n").hexdigest()
     }
+    assert provenance["source_bundle_hash"]
+    assert provenance["source_file_count"] == 1
     assert provenance["git_revision"] == ""
     assert provenance["dirty"] is None
 

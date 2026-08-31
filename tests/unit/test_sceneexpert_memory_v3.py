@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 from scenesmith.scene_expert.experiment_identity import (
     stable_config_hash,
     stable_experiment_signature,
+    stable_source_bundle_hash,
 )
 from scenesmith.scene_expert.memory.activity import MemoryActivityLogger
 from scenesmith.scene_expert.memory.injection import build_memory_injection_bundle
@@ -83,6 +84,50 @@ def test_experiment_signature_ignores_batch_labels_and_port_ranges() -> None:
     assert stable_experiment_signature(first) == stable_experiment_signature(second)
     second["experiment"]["name"] = "semantically_distinct_experiment"
     assert stable_experiment_signature(first) != stable_experiment_signature(second)
+
+
+def test_experiment_signature_ignores_per_scene_prompt_and_identity() -> None:
+    first = {
+        "experiment": {
+            "name": "ablation_4c",
+            "prompt": "A classroom.",
+            "scene_id": 1,
+            "pipeline": {"stop_stage": "manipuland"},
+        }
+    }
+    second = {
+        "experiment": {
+            "name": "ablation_4c",
+            "prompt": "A bedroom.",
+            "scene_id": 99,
+            "pipeline": {"stop_stage": "manipuland"},
+        }
+    }
+
+    assert stable_config_hash(first) != stable_config_hash(second)
+    assert stable_experiment_signature(first) == stable_experiment_signature(second)
+
+
+def test_experiment_signature_keeps_agent_prompt_template_selection() -> None:
+    first = {
+        "experiment": {"prompts": ["A classroom."]},
+        "furniture_agent": {"agents": {"designer": {"prompt": "DESIGNER_AGENT"}}},
+    }
+    second = {
+        "experiment": {"prompts": ["A bedroom."]},
+        "furniture_agent": {
+            "agents": {"designer": {"prompt": "EXPERIMENTAL_DESIGNER_AGENT"}}
+        },
+    }
+
+    assert stable_experiment_signature(first) != stable_experiment_signature(second)
+
+
+def test_source_bundle_hash_is_path_separator_and_order_stable() -> None:
+    first = {"scenesmith/a.py": "aaa", "scenesmith/b.py": "bbb"}
+    second = {"scenesmith\\b.py": "bbb", "scenesmith\\a.py": "aaa"}
+
+    assert stable_source_bundle_hash(first) == stable_source_bundle_hash(second)
 
 
 def test_canonical_bundle_does_not_repeat_memory_directives() -> None:

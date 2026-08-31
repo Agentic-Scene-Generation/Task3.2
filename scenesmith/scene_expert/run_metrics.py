@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from scenesmith.scene_expert.experiment_identity import stable_source_bundle_hash
+
 console_logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "sceneexpert.run_metrics.v5"
@@ -54,12 +56,17 @@ SCENE_COLUMNS = (
     "critic_zero_fail",
     "sceneexpert_overall_score",
     "sceneexpert_pass_scene",
+    "generation_status",
+    "requirement_status",
+    "quality_status",
+    "required_coverage",
     "hard_constraint_pass",
     "hard_violation_count",
     "relation_satisfaction",
     "experiment_name",
     "config_hash",
     "experiment_signature",
+    "source_bundle_hash",
     "model",
     "code_revision",
     "code_dirty",
@@ -73,6 +80,13 @@ SCENE_COLUMNS = (
     "stage_agent_invoked_stages",
     "missing_stage_agent_invocation_stages",
     "optional_asset_recommendation_count",
+    "required_first_instruction_stages",
+    "required_first_missing_instruction_stages",
+    "optional_autonomy_preserved_stages",
+    "required_objects_by_stage",
+    "required_satisfied_objects_by_stage",
+    "required_missing_objects_by_stage",
+    "requirement_status_by_stage",
     "observed_stages",
     "memory_retrieved_stages",
     "memory_retrieved_ids",
@@ -411,6 +425,14 @@ def _component_execution_metrics(
     missing_stage_agent_invocation: list[str] = []
     stage_policies: dict[str, str] = {}
     optional_recommendation_count = 0
+    required_first_instruction_stages: list[str] = []
+    required_first_missing_instruction_stages: list[str] = []
+    optional_autonomy_preserved_stages: list[str] = []
+    required_objects_by_stage: dict[str, list[str]] = {}
+    required_satisfied_by_stage: dict[str, list[str]] = {}
+    required_missing_by_stage: dict[str, list[str]] = {}
+    requirement_status_by_stage: dict[str, str] = {}
+    required_coverage_by_stage: dict[str, float] = {}
     for stage_payload in stages:
         stage = str(stage_payload.get("stage") or "")
         planner_status = str(
@@ -419,10 +441,43 @@ def _component_execution_metrics(
         if planner_status in planner_by_status:
             planner_by_status[planner_status].append(stage)
         evidence = stage_payload.get("execution_evidence") or {}
-        stage_policies[stage] = str(evidence.get("stage_policy") or "unknown")
+        stage_policy = str(evidence.get("stage_policy") or "unknown")
+        if stage_policy != "unknown" or stage not in stage_policies:
+            stage_policies[stage] = stage_policy
         optional_recommendation_count += len(
             evidence.get("optional_asset_recommendations") or []
         )
+        required_objects = [
+            str(item) for item in evidence.get("required_objects") or [] if str(item)
+        ]
+        required_satisfied = [
+            str(item)
+            for item in evidence.get("required_satisfied_objects") or []
+            if str(item)
+        ]
+        required_missing = [
+            str(item)
+            for item in evidence.get("required_missing_objects") or []
+            if str(item)
+        ]
+        if required_objects or stage not in required_objects_by_stage:
+            required_objects_by_stage[stage] = required_objects
+        if required_satisfied or stage not in required_satisfied_by_stage:
+            required_satisfied_by_stage[stage] = required_satisfied
+        if required_missing or stage not in required_missing_by_stage:
+            required_missing_by_stage[stage] = required_missing
+        requirement_status = str(evidence.get("requirement_status") or "unknown")
+        if requirement_status != "unknown" or stage not in requirement_status_by_stage:
+            requirement_status_by_stage[stage] = requirement_status
+        required_coverage = _as_float(evidence.get("required_coverage"))
+        if required_coverage is not None and required_objects:
+            required_coverage_by_stage[stage] = required_coverage
+        if bool(evidence.get("required_first_instruction_delivered")):
+            required_first_instruction_stages.append(stage)
+        elif bool(evidence.get("required_first_instruction_applicable")):
+            required_first_missing_instruction_stages.append(stage)
+        if bool(evidence.get("optional_autonomy_preserved")):
+            optional_autonomy_preserved_stages.append(stage)
         if bool(evidence.get("stage_agent_invoked")):
             stage_agent_invoked.append(stage)
         else:
@@ -438,10 +493,37 @@ def _component_execution_metrics(
         "brief_injection_verified_stages": _unique(brief_verified),
         "stage_policies": stage_policies,
         "stage_agent_invoked_stages": _unique(stage_agent_invoked),
-        "missing_stage_agent_invocation_stages": _unique(
-            missing_stage_agent_invocation
+        "missing_stage_agent_invocation_stages": sorted(
+            set(missing_stage_agent_invocation) - set(stage_agent_invoked)
         ),
         "optional_asset_recommendation_count": optional_recommendation_count,
+        "required_first_instruction_stages": _unique(required_first_instruction_stages),
+        "required_first_missing_instruction_stages": sorted(
+            set(required_first_missing_instruction_stages)
+            - set(required_first_instruction_stages)
+        ),
+        "optional_autonomy_preserved_stages": _unique(
+            optional_autonomy_preserved_stages
+        ),
+        "required_objects_by_stage": required_objects_by_stage,
+        "required_satisfied_objects_by_stage": required_satisfied_by_stage,
+        "required_missing_objects_by_stage": required_missing_by_stage,
+        "requirement_status_by_stage": requirement_status_by_stage,
+        "required_coverage": (
+            round(
+                sum(
+                    len(required_objects_by_stage.get(stage) or []) * value
+                    for stage, value in required_coverage_by_stage.items()
+                )
+                / sum(
+                    len(required_objects_by_stage.get(stage) or [])
+                    for stage in required_coverage_by_stage
+                ),
+                6,
+            )
+            if required_coverage_by_stage
+            else None
+        ),
     }
 
 
@@ -656,12 +738,27 @@ def _scene_metrics(
     stages = _stage_payloads(scene_dir, trace, warnings)
     final_report = trace.get("final_report") or {}
     code_provenance = dict(trace.get("code_provenance") or {})
+    source_bundle_hash = str(code_provenance.get("source_bundle_hash") or "")
+    if not source_bundle_hash:
+        source_hashes = code_provenance.get("source_hashes") or {}
+        if isinstance(source_hashes, dict):
+            source_bundle_hash = stable_source_bundle_hash(source_hashes)
+    if source_bundle_hash:
+        code_provenance["source_bundle_hash"] = source_bundle_hash
     status = str(status_payload.get("status") or "missing")
     failure = status_payload.get("failure")
     failure = failure if isinstance(failure, dict) else {}
     failure_class = str(failure.get("failure_class") or "")
     if status == "failed" and not failure_class:
         failure_class = "unclassified_legacy"
+    generation_status = str(final_report.get("generation_status") or "")
+    if not generation_status:
+        if status in {"completed", "completed_with_quality_issues"}:
+            generation_status = "complete"
+        elif status == "failed":
+            generation_status = "failed"
+        else:
+            generation_status = "unknown"
     row: dict[str, Any] = {
         "run_id": run_id,
         "batch_id": manifest_row["batch_id"],
@@ -689,9 +786,13 @@ def _scene_metrics(
         "sceneexpert_pass_scene": (
             bool(final_report.get("pass_scene")) if final_report else None
         ),
+        "generation_status": generation_status,
+        "requirement_status": str(final_report.get("requirement_status") or "unknown"),
+        "quality_status": str(final_report.get("quality_status") or "unknown"),
         "experiment_name": str(trace.get("experiment_name") or ""),
         "config_hash": str(trace.get("config_hash") or ""),
         "experiment_signature": str(trace.get("experiment_signature") or ""),
+        "source_bundle_hash": source_bundle_hash,
         "model": str(trace.get("model") or ""),
         "code_revision": str(
             (trace.get("code_provenance") or {}).get("git_revision") or ""
@@ -802,6 +903,7 @@ def collect_run_metrics(
     revisions = _unique(row["code_revision"] for row in scene_rows)
     config_hashes = _unique(row["config_hash"] for row in scene_rows)
     experiment_signatures = _unique(row["experiment_signature"] for row in scene_rows)
+    source_bundle_hashes = _unique(row["source_bundle_hash"] for row in scene_rows)
     experiment_names = _unique(row["experiment_name"] for row in scene_rows)
     models = _unique(row["model"] for row in scene_rows)
     provenance_by_signature = {
@@ -813,18 +915,23 @@ def collect_run_metrics(
     }
     if len(revisions) > 1:
         warnings.append(f"mixed_code_revisions:{len(revisions)}")
-    if len(provenance_by_signature) > 1:
-        warnings.append(f"mixed_code_provenance:{len(provenance_by_signature)}")
-    if len(config_hashes) > 1:
-        warnings.append(f"mixed_config_hashes:{len(config_hashes)}")
+    if len(source_bundle_hashes) > 1:
+        warnings.append(f"mixed_source_bundle_hashes:{len(source_bundle_hashes)}")
+    elif len(provenance_by_signature) > 1:
+        # Git/path metadata may legitimately vary across workers. Source bytes,
+        # not worktree layout, own controlled code identity.
+        console_logger.info(
+            "Run contains %d provenance envelopes with one source bundle",
+            len(provenance_by_signature),
+        )
     if len(experiment_signatures) > 1:
         warnings.append(f"mixed_experiment_signatures:{len(experiment_signatures)}")
-    if not revisions:
-        warnings.append("missing_code_revision")
     if not config_hashes:
         warnings.append("missing_config_hash")
     if not experiment_signatures:
         warnings.append("missing_experiment_signature")
+    if not source_bundle_hashes:
+        warnings.append("missing_source_bundle_hash")
     if not experiment_names:
         warnings.append("missing_experiment_name")
 
@@ -841,6 +948,29 @@ def collect_run_metrics(
             for revision in row["memory_bank_revisions"]
         }
     )
+    requirement_observed = [
+        row
+        for row in scene_rows
+        if row["requirement_status"] not in {"", "unknown", "not_applicable"}
+    ]
+    quality_observed = [
+        row for row in scene_rows if row["quality_status"] not in {"", "unknown"}
+    ]
+    required_first_applicable_count = sum(
+        len(row["required_first_instruction_stages"])
+        + len(row["required_first_missing_instruction_stages"])
+        for row in scene_rows
+    )
+    required_first_delivered_count = sum(
+        len(row["required_first_instruction_stages"]) for row in scene_rows
+    )
+    auto_stage_count = sum(
+        sum(policy == "auto" for policy in row["stage_policies"].values())
+        for row in scene_rows
+    )
+    optional_autonomy_preserved_count = sum(
+        len(row["optional_autonomy_preserved_stages"]) for row in scene_rows
+    )
 
     summary = {
         "expected_scenes": expected,
@@ -853,6 +983,27 @@ def collect_run_metrics(
         ),
         "missing_or_nonterminal_scenes": len(missing),
         "completion_rate": _rate(len(completed), expected),
+        "generation_complete_rate": _rate(
+            sum(row["generation_status"] == "complete" for row in scene_rows),
+            expected,
+        ),
+        "required_satisfaction_rate": _rate(
+            sum(row["requirement_status"] == "satisfied" for row in scene_rows),
+            len(requirement_observed),
+        ),
+        "mean_required_coverage": _mean(row["required_coverage"] for row in scene_rows),
+        "quality_pass_rate": _rate(
+            sum(row["quality_status"] == "passed" for row in scene_rows),
+            len(quality_observed),
+        ),
+        "required_first_instruction_delivery_rate": _rate(
+            required_first_delivered_count,
+            required_first_applicable_count,
+        ),
+        "optional_autonomy_preservation_rate": _rate(
+            optional_autonomy_preserved_count,
+            auto_stage_count,
+        ),
         "trace_coverage": _rate(len(trace_observed), expected),
         "mean_scene_time_sec": _mean(row["trace_time_sec"] for row in scene_rows),
         "median_scene_time_sec": _median(row["trace_time_sec"] for row in scene_rows),
@@ -982,6 +1133,10 @@ def collect_run_metrics(
         and cross_task_verified
         and injected
     )
+    provenance_variants = list(provenance_by_signature.values())
+    run_code_provenance = dict(provenance_variants[0]) if provenance_variants else {}
+    if len(provenance_variants) > 1:
+        run_code_provenance["variants"] = provenance_variants
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -993,7 +1148,9 @@ def collect_run_metrics(
         "experiment_identity": {
             "experiment_names": experiment_names,
             "config_hashes": config_hashes,
+            "exact_config_hashes": config_hashes,
             "experiment_signatures": experiment_signatures,
+            "source_bundle_hashes": source_bundle_hashes,
             "models": models,
             "code_revisions": revisions,
             "code_dirty_values": sorted(
@@ -1004,11 +1161,7 @@ def collect_run_metrics(
                 }
             ),
         },
-        "code_provenance": (
-            next(iter(provenance_by_signature.values()), {})
-            if len(provenance_by_signature) <= 1
-            else {"variants": list(provenance_by_signature.values())}
-        ),
+        "code_provenance": run_code_provenance,
         "memory_identity": {
             "scope": "persistent_configured_bank",
             "memory_dirs": memory_dirs,
@@ -1067,6 +1220,10 @@ def _markdown(metrics: dict[str, Any]) -> str:
         "recorded_failed_scenes",
         "missing_or_nonterminal_scenes",
         "completion_rate",
+        "generation_complete_rate",
+        "required_satisfaction_rate",
+        "mean_required_coverage",
+        "quality_pass_rate",
         "mean_scene_time_sec",
         "critic_coverage",
         "critic_mean_score",
@@ -1097,6 +1254,8 @@ def _markdown(metrics: dict[str, Any]) -> str:
         "missing_native_stage_agent_invocation_count",
         "native_stage_agent_invocation_rate",
         "optional_asset_recommendation_count",
+        "required_first_instruction_delivery_rate",
+        "optional_autonomy_preservation_rate",
     ):
         lines.append(f"| `{key}` | {summary.get(key)} |")
     lines.extend(
@@ -1105,6 +1264,22 @@ def _markdown(metrics: dict[str, Any]) -> str:
             "## Scene failures",
             "",
             f"- Failure class counts: `{summary.get('failure_class_counts', {})}`",
+        ]
+    )
+    experiment_identity = metrics.get("experiment_identity") or {}
+    lines.extend(
+        [
+            "",
+            "## Experiment identity",
+            "",
+            "- Exact configuration hashes: "
+            f"`{experiment_identity.get('exact_config_hashes', [])}`",
+            "- Semantic experiment signatures: "
+            f"`{experiment_identity.get('experiment_signatures', [])}`",
+            "- Source-bundle hashes: "
+            f"`{experiment_identity.get('source_bundle_hashes', [])}`",
+            "- Git revisions (diagnostic only): "
+            f"`{experiment_identity.get('code_revisions', [])}`",
         ]
     )
     identity = metrics.get("memory_identity") or {}

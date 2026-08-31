@@ -505,15 +505,7 @@ def _check_required_objects(
     """
     issues: list[VerifyIssue] = []
 
-    stage_required: list[str] = []
-    if stage == "furniture":
-        stage_required = task_spec.required_large_objects
-    elif stage == "wall_mounted":
-        stage_required = task_spec.required_wall_objects
-    elif stage == "ceiling_mounted":
-        stage_required = task_spec.required_ceiling_objects
-    elif stage == "manipuland":
-        stage_required = task_spec.required_small_objects
+    stage_required = _required_objects_for_stage(task_spec, stage)
 
     if not stage_required:
         return issues
@@ -595,6 +587,88 @@ def _check_required_objects(
             )
 
     return issues
+
+
+def _required_objects_for_stage(task_spec: SceneTaskSpec, stage: str) -> list[str]:
+    """Return prompt-explicit assets owned by one generated asset stage."""
+    return list(
+        {
+            "furniture": task_spec.required_large_objects,
+            "wall_mounted": task_spec.required_wall_objects,
+            "ceiling_mounted": task_spec.required_ceiling_objects,
+            "manipuland": task_spec.required_small_objects,
+        }.get(stage, [])
+    )
+
+
+def _required_asset_evidence(
+    task_spec: SceneTaskSpec,
+    stage: str,
+    object_issues: list[VerifyIssue],
+) -> dict[str, object]:
+    """Build requirement coverage without conflating it with scene quality."""
+    required = [
+        item
+        for item in _required_objects_for_stage(task_spec, stage)
+        if not (
+            stage == "manipuland"
+            and _normalize_object_label(item) in _VIRTUAL_MANIPULAND_GROUPS
+        )
+    ]
+    if not required:
+        return {
+            "required_objects": [],
+            "required_satisfied_objects": [],
+            "required_missing_objects": [],
+            "required_coverage": None,
+            "requirement_status": "not_applicable",
+        }
+
+    missing = [
+        issue.object_name
+        for issue in object_issues
+        if issue.issue_type == "missing_object" and issue.object_name
+    ]
+    remaining_missing = list(missing)
+    satisfied: list[str] = []
+    for required_object in required:
+        match_index = next(
+            (
+                index
+                for index, missing_object in enumerate(remaining_missing)
+                if _normalize_object_label(required_object)
+                == _normalize_object_label(missing_object)
+            ),
+            None,
+        )
+        if match_index is None:
+            satisfied.append(required_object)
+        else:
+            remaining_missing.pop(match_index)
+    coverage = len(satisfied) / len(required)
+    if not missing:
+        status = "satisfied"
+    elif satisfied:
+        status = "partial"
+    else:
+        status = "unsatisfied"
+    return {
+        "required_objects": required,
+        "required_satisfied_objects": satisfied,
+        "required_missing_objects": missing,
+        "required_coverage": coverage,
+        "requirement_status": status,
+    }
+
+
+def evaluate_required_asset_coverage(
+    task_spec: SceneTaskSpec,
+    stage: str,
+    scene_state_info: dict,
+) -> dict[str, object]:
+    """Public read-only requirement evidence for traces and evaluation."""
+    object_issues = _check_required_objects(task_spec, stage, scene_state_info)
+    return _required_asset_evidence(task_spec, stage, object_issues)
 
 
 # These are prompt-level aggregate concepts, not independently instantiated
@@ -767,6 +841,13 @@ class StageVerifier:
 
         issues: list[VerifyIssue] = []
         repair_suggestions: list[str] = []
+        requirement_evidence: dict[str, object] = {
+            "required_objects": [],
+            "required_satisfied_objects": [],
+            "required_missing_objects": [],
+            "required_coverage": None,
+            "requirement_status": "unknown",
+        }
 
         # --- 1. Load SceneSmith scores ---
         scores_path = (
@@ -833,6 +914,11 @@ class StageVerifier:
                         "Regenerate the floor plan with at least one valid room and positive dimensions"
                     )
             object_issues = _check_required_objects(task_spec, stage, scene_state_info)
+            requirement_evidence = _required_asset_evidence(
+                task_spec,
+                stage,
+                object_issues,
+            )
             issues.extend(object_issues)
             if object_issues:
                 for issue in object_issues:
@@ -970,6 +1056,7 @@ class StageVerifier:
                 self._critic_bridge_enabled and bool(bridged_scores)
             ),
             hard_check_report=hard_check_report,
+            **requirement_evidence,
         )
 
 
@@ -1057,6 +1144,12 @@ class FullVerifier:
             self._deterministic_stage_passes(stage_reports) and not final_failures
         )
         visual_scores_pass = overall >= self._pass_threshold and pass_plausibility
+        requirement_status = self._aggregate_requirement_status(stage_reports)
+        quality_status = (
+            ("passed" if visual_scores_pass else "degraded")
+            if all_scores
+            else "unknown"
+        )
         report = FullVerifyReport(
             semantic_score=semantic,
             aesthetic_score=aesthetic,
@@ -1075,6 +1168,8 @@ class FullVerifier:
                 if self._visual_score_hard_gate
                 else deterministic_pass
             ),
+            requirement_status=requirement_status,
+            quality_status=quality_status,
         )
 
         console_logger.info(
@@ -1086,6 +1181,24 @@ class FullVerifier:
             f"visual_gate={self._visual_score_hard_gate}"
         )
         return report
+
+    @staticmethod
+    def _aggregate_requirement_status(
+        stage_reports: list[StageVerifyReport],
+    ) -> str:
+        """Aggregate required-asset fulfillment independently from quality."""
+        statuses = [
+            report.requirement_status
+            for report in stage_reports
+            if report.requirement_status not in {"not_applicable", "unknown"}
+        ]
+        if not statuses:
+            return "not_applicable"
+        if all(status == "satisfied" for status in statuses):
+            return "satisfied"
+        if all(status == "unsatisfied" for status in statuses):
+            return "unsatisfied"
+        return "partial"
 
     @staticmethod
     def _deterministic_stage_passes(stage_reports: list[StageVerifyReport]) -> bool:

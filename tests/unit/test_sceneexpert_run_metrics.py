@@ -104,6 +104,16 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
                     },
                     "planner_trace": {"status": "ok"},
                     "execution_evidence": {
+                        "stage_policy": "auto",
+                        "optional_assets_allowed": True,
+                        "required_objects": ["bed"],
+                        "required_first_instruction_applicable": True,
+                        "required_first_instruction_delivered": True,
+                        "optional_autonomy_preserved": True,
+                        "required_satisfied_objects": ["bed"],
+                        "required_missing_objects": [],
+                        "required_coverage": 1.0,
+                        "requirement_status": "satisfied",
                         "designer_prompt_contains_brief": True,
                         "injected_memory_hash": "abc",
                         "designer_prompt_contains_memory": True,
@@ -156,7 +166,13 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
                     ],
                 },
             ],
-            "final_report": {"overall_score": 0.8, "pass_scene": True},
+            "final_report": {
+                "overall_score": 0.8,
+                "pass_scene": True,
+                "generation_status": "complete",
+                "requirement_status": "satisfied",
+                "quality_status": "passed",
+            },
         },
     )
     _write_json(
@@ -264,6 +280,12 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
     assert metrics["summary"]["hard_constraint_pass_rate"] == 1.0
     assert metrics["summary"]["mean_relation_satisfaction"] == 0.9
     assert metrics["summary"]["memory_injection_delivery_rate"] == 1.0
+    assert metrics["summary"]["generation_complete_rate"] == 0.5
+    assert metrics["summary"]["required_satisfaction_rate"] == 1.0
+    assert metrics["summary"]["mean_required_coverage"] == 1.0
+    assert metrics["summary"]["quality_pass_rate"] == 1.0
+    assert metrics["summary"]["required_first_instruction_delivery_rate"] == 1.0
+    assert metrics["summary"]["optional_autonomy_preservation_rate"] == 1.0
     assert metrics["summary"]["memory_cross_task_verified_scene_coverage"] == 0.5
     assert metrics["memory_closed_loop_observed"] is True
     assert metrics["summary"]["task_compiler_llm_scenes"] == 1
@@ -271,6 +293,14 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
     assert metrics["summary"]["brief_injection_verified_stage_count"] == 1
     assert metrics["memory_identity"]["memory_bank_ids"] == ["bank-1"]
     assert metrics["code_provenance"]["git_revision"] == "abc123"
+    assert metrics["code_provenance"]["source_bundle_hash"]
+    assert metrics["experiment_identity"]["source_bundle_hashes"] == [
+        metrics["code_provenance"]["source_bundle_hash"]
+    ]
+    assert metrics["scenes"][0]["generation_status"] == "complete"
+    assert metrics["scenes"][0]["requirement_status"] == "satisfied"
+    assert metrics["scenes"][0]["quality_status"] == "passed"
+    assert metrics["scenes"][0]["required_objects_by_stage"] == {"furniture": ["bed"]}
     assert metrics["scenes"][0]["memory_retrieved_source_task_ids"]["success-1"] == [
         "task_from_another_prompt",
         "task_from_first_stage",

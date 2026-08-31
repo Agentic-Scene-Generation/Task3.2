@@ -11,12 +11,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-SCHEMA_VERSION = "sceneexpert.paired_metrics.v2"
+from scenesmith.scene_expert.experiment_identity import stable_source_bundle_hash
+
+SCHEMA_VERSION = "sceneexpert.paired_metrics.v3"
 PAIR_COLUMNS = (
     "case_id",
     "prompt_match",
     "baseline_status",
     "treatment_status",
+    "baseline_generation_status",
+    "treatment_generation_status",
+    "baseline_requirement_status",
+    "treatment_requirement_status",
+    "baseline_quality_status",
+    "treatment_quality_status",
+    "baseline_required_coverage",
+    "treatment_required_coverage",
+    "required_coverage_delta",
     "outcome_transition",
     "memory_benefit_signal",
     "baseline_time_sec",
@@ -148,6 +159,11 @@ def compare_run_metrics(
         )
 
     identity_checks: dict[str, bool] = {}
+    semantic_identity_keys = {
+        "experiment_names",
+        "experiment_signatures",
+        "models",
+    }
     for key in (
         "experiment_names",
         "experiment_signatures",
@@ -159,20 +175,36 @@ def compare_run_metrics(
         treatment_values = _identity_values(treatment, key)
         matches = bool(baseline_values) and baseline_values == treatment_values
         identity_checks[key] = matches
-        if not matches:
+        if key in semantic_identity_keys and not matches:
             warnings.append(
                 f"identity_mismatch:{key}:"
                 f"baseline={baseline_values}:treatment={treatment_values}"
             )
     baseline_provenance = baseline.get("code_provenance") or {}
     treatment_provenance = treatment.get("code_provenance") or {}
+    baseline_bundle = str(baseline_provenance.get("source_bundle_hash") or "")
+    treatment_bundle = str(treatment_provenance.get("source_bundle_hash") or "")
+    if not baseline_bundle and isinstance(
+        baseline_provenance.get("source_hashes"), dict
+    ):
+        baseline_bundle = stable_source_bundle_hash(
+            baseline_provenance["source_hashes"]
+        )
+    if not treatment_bundle and isinstance(
+        treatment_provenance.get("source_hashes"), dict
+    ):
+        treatment_bundle = stable_source_bundle_hash(
+            treatment_provenance["source_hashes"]
+        )
+    bundle_matches = bool(baseline_bundle) and baseline_bundle == treatment_bundle
+    identity_checks["code_provenance.source_bundle_hash"] = bundle_matches
+    if not bundle_matches:
+        warnings.append("identity_mismatch:code_provenance.source_bundle_hash")
     for key in ("git_status_hash", "source_hashes"):
         before_value = baseline_provenance.get(key)
         after_value = treatment_provenance.get(key)
         matches = bool(before_value) and before_value == after_value
         identity_checks[f"code_provenance.{key}"] = matches
-        if not matches:
-            warnings.append(f"identity_mismatch:code_provenance.{key}")
     for key in ("memory_bank_ids", "memory_dirs"):
         before_values = sorted(
             str(value)
@@ -205,6 +237,8 @@ def compare_run_metrics(
         wrapper_delta = _delta(after_wrapper, before_wrapper)
         before_status = str(before.get("status") or "")
         after_status = str(after.get("status") or "")
+        before_required_coverage = _number(before.get("required_coverage"))
+        after_required_coverage = _number(after.get("required_coverage"))
         if not _is_completed(before_status) and _is_completed(after_status):
             outcome_transition = "rescued"
         elif _is_completed(before_status) and not _is_completed(after_status):
@@ -221,6 +255,30 @@ def compare_run_metrics(
                 "prompt_match": prompt_match,
                 "baseline_status": before_status,
                 "treatment_status": after_status,
+                "baseline_generation_status": str(
+                    before.get("generation_status") or "unknown"
+                ),
+                "treatment_generation_status": str(
+                    after.get("generation_status") or "unknown"
+                ),
+                "baseline_requirement_status": str(
+                    before.get("requirement_status") or "unknown"
+                ),
+                "treatment_requirement_status": str(
+                    after.get("requirement_status") or "unknown"
+                ),
+                "baseline_quality_status": str(
+                    before.get("quality_status") or "unknown"
+                ),
+                "treatment_quality_status": str(
+                    after.get("quality_status") or "unknown"
+                ),
+                "baseline_required_coverage": before_required_coverage,
+                "treatment_required_coverage": after_required_coverage,
+                "required_coverage_delta": _delta(
+                    after_required_coverage,
+                    before_required_coverage,
+                ),
                 "outcome_transition": outcome_transition,
                 "memory_benefit_signal": _benefit_signal(
                     before_status=before_status,
@@ -266,9 +324,7 @@ def compare_run_metrics(
         "experiment_names",
         "experiment_signatures",
         "models",
-        "code_revisions",
-        "code_provenance.git_status_hash",
-        "code_provenance.source_hashes",
+        "code_provenance.source_bundle_hash",
         "memory_identity.memory_bank_ids",
     }
     outcome_comparison_ready = bool(
@@ -347,6 +403,19 @@ def compare_run_metrics(
             ),
             "mean_sceneexpert_score_delta": _mean(
                 row["sceneexpert_score_delta"] for row in completed_pairs
+            ),
+            "mean_required_coverage_delta": _mean(
+                row["required_coverage_delta"] for row in pairs
+            ),
+            "requirement_coverage_wins": sum(
+                row["required_coverage_delta"] is not None
+                and row["required_coverage_delta"] > 0
+                for row in pairs
+            ),
+            "requirement_coverage_losses": sum(
+                row["required_coverage_delta"] is not None
+                and row["required_coverage_delta"] < 0
+                for row in pairs
             ),
             "cross_task_memory_verified_pairs": sum(
                 row["treatment_cross_task_verified"] for row in completed_pairs

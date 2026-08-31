@@ -54,6 +54,7 @@ from scenesmith.scene_expert.memory.writer import MemoryWriter
 from scenesmith.scene_expert.relation_context import StageRelationProjector
 from scenesmith.scene_expert.repair_controller import RepairController
 from scenesmith.scene_expert.schemas import (
+    REQUIRED_FIRST_DIRECTIVE,
     FullVerifyReport,
     MemoryInjectionBundle,
     MemoryPack,
@@ -996,6 +997,26 @@ class SceneExpertHookRunner:
                 "stage_agent_invoked": (
                     self._current_execution_evidence.stage_agent_invoked
                 ),
+                "required_first_instruction_applicable": (
+                    self._current_execution_evidence.required_first_instruction_applicable
+                ),
+                "required_first_instruction_delivered": (
+                    self._current_execution_evidence.required_first_instruction_delivered
+                ),
+                "optional_autonomy_preserved": (
+                    self._current_execution_evidence.optional_autonomy_preserved
+                ),
+                "required_satisfied_objects": (
+                    self._current_execution_evidence.required_satisfied_objects
+                ),
+                "required_missing_objects": (
+                    self._current_execution_evidence.required_missing_objects
+                ),
+                "required_coverage": self._current_execution_evidence.required_coverage,
+                "requirement_status": (
+                    self._current_execution_evidence.requirement_status
+                ),
+                "stage_outcome": self._current_execution_evidence.stage_outcome,
                 "stage_skip_allowed": False,
             }
             path = audit_dir / f"{self._current_stage}.json"
@@ -1027,6 +1048,8 @@ class SceneExpertHookRunner:
             self._harness.validate_stage_order(self._completed_stages, stage)
         self._completed_stages.append(stage)
         self._pending_stage_repairs.pop(stage, None)
+        self._current_execution_evidence.continuation_policy = "degraded_quality"
+        self._write_stage_policy_audit()
         console_logger.warning(
             "[SceneExpert] Accepted stage %s with degraded quality", stage
         )
@@ -1045,6 +1068,12 @@ class SceneExpertHookRunner:
         memory_text = self._current_injection_bundle.memory_text
         placement_reference = self._current_injection_bundle.placement_text
         final_text = self._current_injection_bundle.final_text
+        required_objects = self._stage_required_objects(self._current_stage)
+        optional_assets_allowed = (
+            self._current_stage_brief.optional_assets_allowed
+            if self._current_stage_brief is not None
+            else self._current_stage_policy == "auto"
+        )
         return StageExecutionEvidence(
             task_spec_source=(
                 "fallback"
@@ -1057,12 +1086,8 @@ class SceneExpertHookRunner:
                 else "disabled_or_unavailable"
             ),
             stage_policy=self._current_stage_policy,
-            optional_assets_allowed=(
-                self._current_stage_brief.optional_assets_allowed
-                if self._current_stage_brief is not None
-                else self._current_stage_policy == "auto"
-            ),
-            required_objects=self._stage_required_objects(self._current_stage),
+            optional_assets_allowed=optional_assets_allowed,
+            required_objects=required_objects,
             optional_asset_recommendations=(
                 [
                     item.model_dump(mode="json")
@@ -1070,6 +1095,14 @@ class SceneExpertHookRunner:
                 ]
                 if self._current_stage_brief is not None
                 else []
+            ),
+            required_first_instruction_applicable=bool(required_objects),
+            required_first_instruction_delivered=bool(
+                self._current_stage_brief is not None
+                and REQUIRED_FIRST_DIRECTIVE in str(prompt)
+            ),
+            optional_autonomy_preserved=bool(
+                self._current_stage_policy == "auto" and optional_assets_allowed
             ),
             retrieved_memory_ids=self._current_injection_bundle.selected_memory_ids,
             retrieved_skill_names=(
@@ -1131,6 +1164,31 @@ class SceneExpertHookRunner:
                 self._current_stage,
                 error,
             )
+
+    def _record_required_first_outcome(
+        self,
+        verify_report: StageVerifyReport | None,
+        *,
+        verification_error: bool,
+    ) -> None:
+        """Attach final requirement coverage without changing stage disposition."""
+        evidence = self._current_execution_evidence
+        if verify_report is None:
+            evidence.stage_outcome = (
+                "verification_error" if verification_error else "quality_issue"
+            )
+            self._write_stage_policy_audit()
+            return
+        evidence.required_satisfied_objects = list(
+            verify_report.required_satisfied_objects
+        )
+        evidence.required_missing_objects = list(verify_report.required_missing_objects)
+        evidence.required_coverage = verify_report.required_coverage
+        evidence.requirement_status = verify_report.requirement_status
+        evidence.stage_outcome = (
+            "passed" if verify_report.pass_stage else "quality_issue"
+        )
+        self._write_stage_policy_audit()
 
     def _record_memory_post_stage_activity(
         self,
@@ -2009,6 +2067,11 @@ class SceneExpertHookRunner:
                 f"[SceneExpert] Verification failed for {stage}: {e}"
             )
 
+        self._record_required_first_outcome(
+            verify_report,
+            verification_error=verification_error,
+        )
+
         # Log stage trace entry
         elapsed = time.time() - self._stage_start_time
         self._commit_stage_memory(
@@ -2188,6 +2251,39 @@ class SceneExpertHookRunner:
             lifecycle["writer_skip_reason"] = ""
         return lifecycle
 
+    def _enrich_result_dimensions(
+        self,
+        full_report: FullVerifyReport,
+    ) -> FullVerifyReport:
+        """Separate execution, requirement, and quality outcomes for evaluation."""
+        completed_set = set(getattr(self, "_completed_stages", []))
+        completed = [
+            stage for stage in GENERATION_STAGE_ORDER if stage in completed_set
+        ]
+        missing = [stage for stage in GENERATION_STAGE_ORDER if stage not in completed]
+        generation_status = "complete" if not missing else "partial"
+        degraded_reasons = list(full_report.degraded_reasons)
+        if missing:
+            degraded_reasons.append("generation_stages_incomplete:" + ",".join(missing))
+        if full_report.requirement_status in {"partial", "unsatisfied"}:
+            degraded_reasons.append(f"required_assets_{full_report.requirement_status}")
+        if full_report.quality_status == "degraded":
+            degraded_reasons.append("visual_quality_degraded")
+        return full_report.model_copy(
+            update={
+                "expected_stages": list(GENERATION_STAGE_ORDER),
+                "completed_stages": completed,
+                "missing_stages": missing,
+                "generation_status": generation_status,
+                "outcome_status": (
+                    "DEGRADED_INCOMPLETE"
+                    if generation_status == "partial"
+                    else full_report.outcome_status
+                ),
+                "degraded_reasons": list(dict.fromkeys(degraded_reasons)),
+            }
+        )
+
     def _write_long_term_memory(
         self,
         full_report: FullVerifyReport,
@@ -2352,6 +2448,7 @@ class SceneExpertHookRunner:
             )
         except Exception as e:
             console_logger.warning(f"FullVerifier failed: {e}")
+        full_report = self._enrich_result_dimensions(full_report)
 
         # Save trace
         final_path = Path(final_scene_path)
@@ -2454,6 +2551,11 @@ class SceneExpertHookRunner:
             self.save_partial_trace(error=error)
             return
 
+        self._record_required_first_outcome(
+            failure_report,
+            verification_error=False,
+        )
+
         if self._current_stage not in self._completed_stages:
             self._stage_reports.append(failure_report)
             self._trace_logger.log_stage(
@@ -2506,6 +2608,9 @@ class SceneExpertHookRunner:
             completed_stages=list(self._completed_stages),
             missing_stages=missing_stages,
             outcome_status="FAILED",
+            generation_status="failed",
+            requirement_status=failure_report.requirement_status,
+            quality_status="failed",
             degraded_reasons=[str(error)],
             metric_sources={"failure": "scenesmith_main_hard_gate"},
         )
@@ -2591,6 +2696,7 @@ class SceneExpertHookRunner:
             "planner_diagnostics": planner_diagnostics,
         }
         self._current_execution_evidence.degraded = True
+        self._current_execution_evidence.stage_outcome = "runtime_failed"
         self._current_execution_evidence.runtime_failure = runtime_failure
         self._trace_logger.record_component_status(
             "runtime_failure",

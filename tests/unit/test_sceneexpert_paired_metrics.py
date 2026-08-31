@@ -29,6 +29,10 @@ def _run(run_id: str, *, ready: bool, time_sec: float, critic: float) -> dict:
                 "case_id": "bedroom_a",
                 "prompt": "A bedroom.",
                 "status": "completed" if ready else "failed",
+                "generation_status": "complete" if ready else "failed",
+                "requirement_status": "satisfied" if ready else "partial",
+                "quality_status": "passed" if ready else "degraded",
+                "required_coverage": critic,
                 "trace_time_sec": time_sec,
                 "critic_score": critic,
                 "sceneexpert_overall_score": critic - 0.1,
@@ -52,6 +56,26 @@ def test_ready_pair_reports_signed_deltas() -> None:
     assert result["summary"]["mean_time_delta_sec"] == -20.0
     assert result["summary"]["median_speedup_ratio"] == 1.25
     assert result["summary"]["mean_critic_score_delta"] == 0.1
+    assert result["summary"]["mean_required_coverage_delta"] == 0.1
+    assert result["summary"]["requirement_coverage_wins"] == 1
+    assert result["pairs"][0]["baseline_generation_status"] == "complete"
+    assert result["pairs"][0]["treatment_requirement_status"] == "satisfied"
+
+
+def test_source_bundle_allows_controlled_pair_without_git_metadata() -> None:
+    baseline = _run("cold", ready=True, time_sec=100.0, critic=0.8)
+    treatment = _run("warm", ready=True, time_sec=90.0, critic=0.9)
+    for metrics in (baseline, treatment):
+        metrics["experiment_identity"]["code_revisions"] = []
+        metrics["code_provenance"] = {"source_bundle_hash": "stable-source-bundle"}
+
+    result = compare_run_metrics(baseline, treatment)
+
+    assert result["comparison_ready"] is True
+    assert result["identity_checks"]["code_provenance.source_bundle_hash"] is True
+    assert not any(
+        "git" in warning.casefold() for warning in result["data_quality_warnings"]
+    )
 
 
 def test_incomplete_run_keeps_outcome_comparison_but_guards_quality_claim() -> None:
