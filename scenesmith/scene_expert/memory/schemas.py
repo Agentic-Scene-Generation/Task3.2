@@ -137,6 +137,8 @@ class SuccessCase(MemoryRecordBase):
     """A recorded successful scene generation pattern."""
 
     case_id: str
+    promotion_scope: Literal["scene", "stage"] = "scene"
+    source_scene_passed: bool = True
     room_type: str
     style: str = ""
     stage: str

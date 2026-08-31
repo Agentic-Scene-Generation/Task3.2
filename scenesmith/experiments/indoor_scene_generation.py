@@ -3636,7 +3636,10 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             except Exception as e:
                 if scene_expert_hooks:
                     try:
-                        scene_expert_hooks.finalize_failure(error=str(e))
+                        scene_expert_hooks.finalize_failure(
+                            error=str(e),
+                            error_type=type(e).__name__,
+                        )
                     except Exception as hook_error:
                         # Additive diagnostics must never replace main's original
                         # exception or change its success/failure semantics.

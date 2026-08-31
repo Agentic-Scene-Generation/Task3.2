@@ -153,6 +153,8 @@ class MemoryWriterResilienceTest(unittest.TestCase):
         content = ops[0].content
         self.assertEqual("active", content["status"])
         self.assertEqual("llm", content["source"])
+        self.assertEqual("scene", content["promotion_scope"])
+        self.assertTrue(content["source_scene_passed"])
         self.assertEqual("bedroom", content["room_type"])
         self.assertEqual(["bed", "nightstand"], content["required_objects"])
         self.assertTrue(content["source_run_id"].startswith("run_"))
@@ -165,6 +167,65 @@ class MemoryWriterResilienceTest(unittest.TestCase):
         self.assertIs(client.calls[0]["response_model"], MemoryWriterResponse)
         self.assertEqual("json_schema", client.calls[0]["profile"].response_format)
         self.assertEqual("none", client.calls[0]["profile"].thinking_mode)
+        self.assertEqual(
+            {"success_case": 1, "failure_case": 0, "skill": 0},
+            writer.last_trace["promoted_counts"],
+        )
+
+    def test_degraded_scene_promotes_only_verified_stage_local_success(self) -> None:
+        response = MemoryWriterResponse(
+            success_cases=[
+                SuccessMemoryCandidate(
+                    stage="furniture",
+                    successful_pattern=[
+                        "Anchor the required desk before arranging nearby chairs."
+                    ],
+                    positive_guidance=[
+                        "Keep chair orientation aligned with the desk work surface."
+                    ],
+                )
+            ]
+        )
+        writer = MemoryWriter(
+            model="qwen",
+            llm_client=_FakeStructuredClient(StructuredLLMResult(value=response)),
+        )
+
+        ops = writer.write(
+            "Trace: trace_000001",
+            _full_report(passed=False),
+            evidence_payload=_evidence(stage_passed=True),
+        )
+
+        self.assertEqual(1, len(ops))
+        content = ops[0].content
+        self.assertEqual("stage", content["promotion_scope"])
+        self.assertFalse(content["source_scene_passed"])
+        self.assertAlmostEqual(0.85, content["quality_score"])
+        self.assertLessEqual(content["confidence"], 0.75)
+        self.assertIn("promotion_scope=stage", content["embedding_text"])
+
+    def test_degraded_scene_rejects_success_from_failed_exact_stage(self) -> None:
+        response = MemoryWriterResponse(
+            success_cases=[
+                SuccessMemoryCandidate(
+                    stage="furniture",
+                    successful_pattern=["Place the bed before secondary furniture."],
+                )
+            ]
+        )
+        writer = MemoryWriter(
+            model="qwen",
+            llm_client=_FakeStructuredClient(StructuredLLMResult(value=response)),
+        )
+
+        ops = writer.write(
+            "Trace: trace_000001",
+            _full_report(passed=False),
+            evidence_payload=_evidence(stage_passed=False),
+        )
+
+        self.assertEqual([], ops)
 
     def test_model_failure_never_writes_fallback_memory(self) -> None:
         client = _FakeStructuredClient(

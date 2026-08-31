@@ -84,6 +84,9 @@ Rules:
   ceiling_mounted, or manipuland.
 - Do not invent IDs, scores, object coordinates, task metadata, or provenance.
 - A success lesson must describe what transferred well, not merely that a stage passed.
+- A failed or degraded final scene may still contain a reusable success from an
+  earlier stage, but propose it only when that exact stage has an authoritative
+  passing verify_report. It will be stored as stage-local, never scene-level.
 - A failure lesson is allowed only when the trace shows a verified repair or a
   deterministic/repeatable hard failure. Never label visual opinion as deterministic.
 - A skill must contain a reusable procedure with at least two concrete steps.
@@ -238,6 +241,8 @@ class MemoryWriter:
                 "write_status": status,
                 "candidate_count": len(candidate_ops),
                 "promoted_count": len(mutating_ops),
+                "candidate_counts": self._op_counts(candidate_ops),
+                "promoted_counts": self._op_counts(mutating_ops),
                 "noop_reason": result.value.noop_reason,
                 "fallback_written": False,
             }
@@ -292,9 +297,14 @@ class MemoryWriter:
         stage_evidence = self._stage_evidence(context, candidate.stage)
         required_objects = self._required_objects(context["task_spec"], candidate.stage)
         scores = self._stage_scores(stage_evidence)
+        scene_passed = bool(full_report.pass_scene)
+        promotion_scope = "scene" if scene_passed else "stage"
+        stage_quality = self._mean_score(scores)
         now = self._now()
         record = SuccessCase(
             case_id=self._record_id("success", candidate, context),
+            promotion_scope=promotion_scope,
+            source_scene_passed=scene_passed,
             room_type=context["room_type"],
             style=context["style"],
             stage=candidate.stage,
@@ -307,9 +317,14 @@ class MemoryWriter:
             trace_ref=context["trace_id"],
             required_objects=required_objects,
             functional_zones=context["functional_zones"],
-            scene_summary=f"Evidence-backed {candidate.stage} lesson from {context['trace_id']}.",
+            scene_summary=(
+                f"Evidence-backed {promotion_scope}-level {candidate.stage} lesson "
+                f"from {context['trace_id']}."
+            ),
             confidence=self._evidence_confidence(stage_evidence),
-            quality_score=float(full_report.overall_score),
+            quality_score=(
+                float(full_report.overall_score) if scene_passed else stage_quality
+            ),
             created_at=now,
             updated_at=now,
             status="active",
@@ -449,20 +464,48 @@ class MemoryWriter:
                 if record is None:
                     continue
                 stage_evidence = self._stage_evidence(evidence, record.stage)
-                if (
-                    not full_report.pass_scene
-                    or full_report.overall_score < success_threshold
-                    or (
-                        has_structured_evidence
-                        and not self._stage_passed(stage_evidence)
-                    )
-                ):
+                stage_passed = self._stage_passed(stage_evidence)
+                scene_success = bool(
+                    full_report.pass_scene
+                    and full_report.overall_score >= success_threshold
+                )
+                stage_local_success = bool(
+                    has_structured_evidence
+                    and not full_report.pass_scene
+                    and stage_passed
+                )
+                if has_structured_evidence and not stage_passed:
                     console_logger.info(
-                        "MemoryWriter: rejected success %s because final/stage "
-                        "evidence did not pass",
+                        "MemoryWriter: rejected success %s because its exact stage "
+                        "did not pass authoritative verification",
                         record.case_id,
                     )
                     continue
+                if not scene_success and not stage_local_success:
+                    console_logger.info(
+                        "MemoryWriter: rejected success %s because neither the "
+                        "scene gate nor the stage-local degraded gate passed",
+                        record.case_id,
+                    )
+                    continue
+                if stage_local_success:
+                    record = record.model_copy(
+                        update={
+                            "promotion_scope": "stage",
+                            "source_scene_passed": False,
+                            "confidence": min(float(record.confidence), 0.75),
+                            "quality_score": self._mean_score(
+                                self._stage_scores(stage_evidence)
+                            ),
+                        }
+                    )
+                else:
+                    record = record.model_copy(
+                        update={
+                            "promotion_scope": "scene",
+                            "source_scene_passed": True,
+                        }
+                    )
                 record = self._rebuild_embedding(record)
                 filtered.append(op.model_copy(update={"content": record.model_dump()}))
                 continue
@@ -525,6 +568,15 @@ class MemoryWriter:
                 record = self._rebuild_embedding(record)
                 filtered.append(op.model_copy(update={"content": record.model_dump()}))
         return filtered
+
+    @staticmethod
+    def _op_counts(ops: list[MemoryUpdateOp]) -> dict[str, int]:
+        """Return stable per-type counts for writer observability."""
+        counts = {"success_case": 0, "failure_case": 0, "skill": 0}
+        for op in ops:
+            if op.op in {"ADD", "UPDATE"} and op.memory_type in counts:
+                counts[op.memory_type] += 1
+        return counts
 
     def _validate_success(self, content: dict[str, Any]) -> SuccessCase | None:
         try:
@@ -785,6 +837,14 @@ class MemoryWriter:
             if isinstance(value, (int, float))
         }
 
+    @staticmethod
+    def _mean_score(scores: dict[str, float]) -> float:
+        """Return a conservative stage quality when no scene score is valid."""
+        values = [float(value) for value in scores.values()]
+        if not values:
+            return 0.5
+        return max(0.0, min(1.0, sum(values) / len(values)))
+
     def _repair_verified(self, stage_evidence: dict[str, Any]) -> bool:
         repairs = stage_evidence.get("repair_actions") or []
         return any(
@@ -881,9 +941,12 @@ class MemoryWriter:
         }
         return (
             "Analyze this terminal run, which may have completed or failed. Treat "
-            "evidence.verify_report and final_report as authoritative. Never infer "
-            "success from a failed final_report. Return only schema-valid reusable "
-            "candidates.\n" + json.dumps(payload, ensure_ascii=False, default=str)
+            "each evidence.stages[*].verify_report and final_report as authoritative. "
+            "A failed final_report forbids scene-level success and skills, but an "
+            "earlier stage with pass_stage=true may still yield a narrowly scoped "
+            "stage success. Never infer success for a failed stage. Return only "
+            "schema-valid reusable candidates.\n"
+            + json.dumps(payload, ensure_ascii=False, default=str)
         )
 
     def _save_debug_payload(

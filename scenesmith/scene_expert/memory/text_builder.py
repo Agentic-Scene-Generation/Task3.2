@@ -67,6 +67,8 @@ def _append_provenance(lines: list[str], record: MemoryRecord) -> None:
 def _build_success_text(record: SuccessCase) -> str:
     lines = [
         "memory_type=success",
+        f"promotion_scope={record.promotion_scope}",
+        f"source_scene_passed={str(record.source_scene_passed).lower()}",
         f"stage={record.stage}",
         f"room_type={record.room_type}",
     ]

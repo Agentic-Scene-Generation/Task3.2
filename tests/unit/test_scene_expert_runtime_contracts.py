@@ -118,6 +118,14 @@ class SceneExpertRuntimeBoundaryTest(unittest.TestCase):
         hooks_source = self._source("scenesmith/scene_expert/hooks.py")
 
         self.assertIn(
+            "GENERATION_TERMINAL_STAGE = GENERATION_STAGE_ORDER[-1]",
+            hooks_source,
+        )
+        self.assertIn(
+            "allow_long_term_memory_updates=(stop_stage == GENERATION_TERMINAL_STAGE)",
+            hooks_source,
+        )
+        self.assertNotIn(
             "allow_long_term_memory_updates=(stop_stage == CONTRACT_STAGE_ORDER[-1])",
             hooks_source,
         )

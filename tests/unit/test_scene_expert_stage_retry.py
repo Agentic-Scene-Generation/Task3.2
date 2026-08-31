@@ -389,6 +389,60 @@ def test_hook_finalize_does_not_promote_partial_shared_base(tmp_path) -> None:
     assert runner._pending_skill_observations == []
 
 
+@pytest.mark.parametrize("start_stage", ["floor_plan", "furniture"])
+def test_terminal_fresh_and_reuse_runs_are_memory_writer_eligible(
+    start_stage: str,
+) -> None:
+    runner = object.__new__(SceneExpertHookRunner)
+    runner._start_stage = start_stage
+    runner._configured_stop_stage = "manipuland"
+    runner._allow_long_term_memory_updates = True
+    runner._completed_stages = [
+        "floor_plan",
+        "furniture",
+        "wall_mounted",
+        "ceiling_mounted",
+        "manipuland",
+    ]
+
+    lifecycle = runner._memory_writer_eligibility()
+
+    assert lifecycle["writer_eligible"] is True
+    assert lifecycle["effective_generation_terminal"] == "manipuland"
+    assert lifecycle["missing_generation_stages"] == []
+
+
+def test_floor_plan_shared_base_is_memory_writer_ineligible() -> None:
+    runner = object.__new__(SceneExpertHookRunner)
+    runner._start_stage = "floor_plan"
+    runner._configured_stop_stage = "floor_plan"
+    runner._allow_long_term_memory_updates = False
+    runner._completed_stages = ["floor_plan"]
+
+    lifecycle = runner._memory_writer_eligibility()
+
+    assert lifecycle["writer_eligible"] is False
+    assert lifecycle["writer_skip_reason"] == "memory_updates_disabled_for_pipeline"
+    assert lifecycle["missing_generation_stages"] == [
+        "furniture",
+        "wall_mounted",
+        "ceiling_mounted",
+        "manipuland",
+    ]
+
+
+def test_reuse_initial_completed_stages_follow_generation_order() -> None:
+    runner = object.__new__(SceneExpertHookRunner)
+
+    assert runner._initial_completed_stages("furniture") == ["floor_plan"]
+    assert runner._initial_completed_stages("manipuland") == [
+        "floor_plan",
+        "furniture",
+        "wall_mounted",
+        "ceiling_mounted",
+    ]
+
+
 def test_wall_post_stage_passes_fresh_deterministic_payload_to_verifier(
     tmp_path,
 ) -> None:
@@ -1210,6 +1264,11 @@ def test_planner_terminal_child_failure_skips_no_mutation_recovery(monkeypatch) 
     assert error.value.root_error_type == "APITimeoutError"
     assert error.value.retryable is True
     assert run.await_count == 1
+    diagnostics = agent.scene.metadata["scenesmith_planner_failure"]
+    assert diagnostics["finish_reason"] == "child_delegation_failure"
+    assert diagnostics["successful_designer_mutations"] == 0
+    assert diagnostics["terminal_failure"]["error_type"] == "APITimeoutError"
+    assert "checkpoint_state" in diagnostics
 
 
 def test_planner_no_mutation_recovery_reports_called_workflow(monkeypatch) -> None:

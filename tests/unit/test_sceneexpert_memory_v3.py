@@ -42,6 +42,8 @@ def test_v2_record_loads_with_conservative_v3_defaults() -> None:
 
     assert MEMORY_SCHEMA_VERSION == "sceneexpert.memory.v3"
     assert record.schema_version == "sceneexpert.memory.v2"
+    assert record.promotion_scope == "scene"
+    assert record.source_scene_passed is True
     assert record.spatial_relations == []
     assert record.provenance.trace_id == ""
 

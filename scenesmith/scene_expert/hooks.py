@@ -40,7 +40,11 @@ from scenesmith.scene_expert.experiment_identity import (
 )
 from scenesmith.scene_expert.failure_evidence import main_hard_failure_report
 from scenesmith.scene_expert.global_planner import GlobalPlanner
-from scenesmith.scene_expert.harness import Harness, RepairDecision
+from scenesmith.scene_expert.harness import (
+    STAGE_ORDER as HARNESS_STAGE_ORDER,
+    Harness,
+    RepairDecision,
+)
 from scenesmith.scene_expert.memory.activity import MemoryActivityLogger
 from scenesmith.scene_expert.memory.injection import build_memory_injection_bundle
 from scenesmith.scene_expert.memory.retriever import MemoryRetriever
@@ -90,6 +94,12 @@ console_logger = logging.getLogger(__name__)
 
 # Valid ablation modes
 ABLATION_MODES = frozenset(["disabled", "harness_only", "harness_memory", "full"])
+
+# SceneSmith's generation lifecycle ends at ``manipuland``.  The critic relation
+# registry additionally owns an evaluator-only ``final`` stage, so it must never
+# be used to decide whether an online run is eligible to promote long-term memory.
+GENERATION_STAGE_ORDER = tuple(HARNESS_STAGE_ORDER)
+GENERATION_TERMINAL_STAGE = GENERATION_STAGE_ORDER[-1]
 
 
 @dataclass(frozen=True)
@@ -820,7 +830,8 @@ class SceneExpertHookRunner:
         config_hash: str = "",
         experiment_signature: str = "",
         start_stage: str = "floor_plan",
-        allow_long_term_memory_updates: bool = True,
+        configured_stop_stage: str = GENERATION_TERMINAL_STAGE,
+        allow_long_term_memory_updates: bool | None = None,
         intent_contract: dict[str, Any] | None = None,
         intent_trace: dict[str, Any] | None = None,
         task_compiler_trace: dict[str, Any] | None = None,
@@ -855,11 +866,18 @@ class SceneExpertHookRunner:
         self._config_hash = config_hash
         self._experiment_signature = experiment_signature
         self._start_stage = start_stage
+        self._configured_stop_stage = str(
+            configured_stop_stage or GENERATION_TERMINAL_STAGE
+        )
         # A normal, intentionally truncated pipeline (for example the
         # floor-plan-only shared base used by critic probes) is not a complete
         # scene outcome.  It may read memory and emit local audit artifacts,
         # but it must not promote long-term memories or update skill utility.
-        self._allow_long_term_memory_updates = allow_long_term_memory_updates
+        self._allow_long_term_memory_updates = (
+            self._configured_stop_stage == GENERATION_TERMINAL_STAGE
+            if allow_long_term_memory_updates is None
+            else bool(allow_long_term_memory_updates)
+        )
         self._intent_contract = dict(intent_contract or {})
         self._intent_trace = dict(intent_trace or {})
         self._critic_config = critic_config
@@ -1688,6 +1706,10 @@ class SceneExpertHookRunner:
         if self._component_enabled("harness"):
             self._validate_stage_transition(stage)
         self._current_stage = stage
+        # Keep the live scene available if the native stage raises before
+        # ``post_stage``.  This is read-only failure evidence; it does not alter
+        # SceneSmith's exception or recovery policy.
+        self._latest_scene = scene
         self._current_stage_policy = self.stage_policy(stage)
         self._stage_start_time = time.time()
         self._qwen_calls = 0
@@ -2107,8 +2129,70 @@ class SceneExpertHookRunner:
     # Finalize: called after all stages complete
     # ------------------------------------------------------------------
 
+    def _memory_writer_eligibility(self) -> dict[str, Any]:
+        """Return auditable eligibility for normal terminal memory promotion."""
+        configured_stop_stage = str(
+            getattr(self, "_configured_stop_stage", GENERATION_TERMINAL_STAGE)
+            or GENERATION_TERMINAL_STAGE
+        )
+        completed = set(getattr(self, "_completed_stages", []))
+        completed_generation_stages = [
+            stage for stage in GENERATION_STAGE_ORDER if stage in completed
+        ]
+        missing_generation_stages = [
+            stage
+            for stage in GENERATION_STAGE_ORDER
+            if stage not in completed_generation_stages
+        ]
+        updates_allowed = bool(
+            getattr(
+                self,
+                "_allow_long_term_memory_updates",
+                configured_stop_stage == GENERATION_TERMINAL_STAGE,
+            )
+        )
+        if not updates_allowed:
+            skip_reason = "memory_updates_disabled_for_pipeline"
+        elif configured_stop_stage != GENERATION_TERMINAL_STAGE:
+            skip_reason = "configured_stop_stage_not_generation_terminal"
+        elif missing_generation_stages:
+            skip_reason = "generation_stages_incomplete"
+        else:
+            skip_reason = ""
+        return {
+            "configured_start_stage": str(
+                getattr(self, "_start_stage", "floor_plan") or "floor_plan"
+            ),
+            "configured_stop_stage": configured_stop_stage,
+            "effective_generation_terminal": GENERATION_TERMINAL_STAGE,
+            "completed_generation_stages": completed_generation_stages,
+            "missing_generation_stages": missing_generation_stages,
+            "writer_eligible": not skip_reason,
+            "writer_skip_reason": skip_reason,
+            "eligibility_basis": "complete_generation_lifecycle",
+        }
+
+    def _authoritative_failure_memory_lifecycle(self) -> dict[str, Any]:
+        """Allow only evidence-gated failure lessons from a recognized main gate."""
+        lifecycle = self._memory_writer_eligibility()
+        terminal_pipeline = bool(
+            lifecycle["configured_stop_stage"] == GENERATION_TERMINAL_STAGE
+            and getattr(self, "_allow_long_term_memory_updates", True)
+        )
+        lifecycle["eligibility_basis"] = "authoritative_main_hard_failure"
+        if terminal_pipeline:
+            # A run intended to execute the complete generation lifecycle may
+            # learn an evidence-gated negative lesson even when a main hard gate
+            # interrupts it before manipuland.
+            lifecycle["writer_eligible"] = True
+            lifecycle["writer_skip_reason"] = ""
+        return lifecycle
+
     def _write_long_term_memory(
-        self, full_report: FullVerifyReport
+        self,
+        full_report: FullVerifyReport,
+        *,
+        lifecycle: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Run the strict writer and atomically apply its evidence-gated ops."""
         if (
@@ -2120,6 +2204,8 @@ class SceneExpertHookRunner:
             return None
         try:
             memory_start = time.time()
+            lifecycle_payload = dict(lifecycle or self._memory_writer_eligibility())
+            revision_before = int(self._memory_store.revision)
             trace_summary = (
                 self._trace_logger.build_trace_summary()
                 if self._trace_enabled()
@@ -2130,31 +2216,33 @@ class SceneExpertHookRunner:
                 )
             )
             related_old_memory = self._format_related_memory_for_writer()
+            evidence_payload = (
+                self._trace_logger.build_memory_writer_evidence()
+                if self._trace_enabled()
+                else {
+                    "trace_id": f"trace_{self._scene_id:06d}",
+                    "run_id": str(self._output_dir.resolve()),
+                    "prompt": self._prompt,
+                    "experiment_name": self._experiment_name,
+                    "config_hash": self._config_hash,
+                    "experiment_signature": self._experiment_signature,
+                    "task_spec": self._task_spec.model_dump(),
+                    "stages": [
+                        {
+                            "stage": report.stage,
+                            "verify_report": report.model_dump(),
+                            "repair_actions": [],
+                        }
+                        for report in self._stage_reports
+                    ],
+                }
+            )
+            evidence_payload["memory_lifecycle"] = lifecycle_payload
             ops = self._memory_writer.write(
                 trace_summary=trace_summary,
                 full_report=full_report,
                 related_old_memory=related_old_memory,
-                evidence_payload=(
-                    self._trace_logger.build_memory_writer_evidence()
-                    if self._trace_enabled()
-                    else {
-                        "trace_id": f"trace_{self._scene_id:06d}",
-                        "run_id": str(self._output_dir.resolve()),
-                        "prompt": self._prompt,
-                        "experiment_name": self._experiment_name,
-                        "config_hash": self._config_hash,
-                        "experiment_signature": self._experiment_signature,
-                        "task_spec": self._task_spec.model_dump(),
-                        "stages": [
-                            {
-                                "stage": report.stage,
-                                "verify_report": report.model_dump(),
-                                "repair_actions": [],
-                            }
-                            for report in self._stage_reports
-                        ],
-                    }
-                ),
+                evidence_payload=evidence_payload,
             )
             if self._trace_enabled():
                 self._trace_logger.save_memory_update_ops(ops, full_report)
@@ -2170,6 +2258,9 @@ class SceneExpertHookRunner:
                     {
                         **dict(self._memory_writer.last_trace),
                         "store_apply": apply_summary,
+                        **lifecycle_payload,
+                        "bank_revision_before": revision_before,
+                        "bank_revision_after": int(apply_summary["revision"]),
                     },
                 )
             console_logger.info(
@@ -2210,6 +2301,7 @@ class SceneExpertHookRunner:
                         "write_status": "exception_no_write",
                         "fallback_written": False,
                         "error": f"{type(e).__name__}: {e}",
+                        **dict(lifecycle or self._memory_writer_eligibility()),
                     },
                 )
                 self._trace_logger.save_memory_update_ops([], full_report)
@@ -2280,12 +2372,15 @@ class SceneExpertHookRunner:
                 model=self._qwen_model,
             )
 
-        # Only terminal pipeline runs own a complete scene outcome.  Shared
-        # bases deliberately stop at floor_plan and are later resumed by a
-        # critic-on run; promoting their partial reports would contaminate the
-        # active bank and count one task twice.
-        if getattr(self, "_allow_long_term_memory_updates", True):
-            self._write_long_term_memory(full_report)
+        # Only a complete SceneSmith generation lifecycle owns a terminal scene
+        # outcome.  The evaluator-only ``final`` contract stage is deliberately
+        # excluded, while floor-plan-only shared bases remain ineligible.
+        memory_lifecycle = self._memory_writer_eligibility()
+        if memory_lifecycle["writer_eligible"]:
+            self._write_long_term_memory(
+                full_report,
+                lifecycle=memory_lifecycle,
+            )
             self._flush_skill_outcomes()
         else:
             self._pending_skill_observations = []
@@ -2296,10 +2391,8 @@ class SceneExpertHookRunner:
                         "success": True,
                         "skipped": True,
                         "write_status": "skipped_non_terminal_pipeline",
-                        "reason": (
-                            "Long-term memory promotion requires a run whose "
-                            "configured stop_stage is manipuland."
-                        ),
+                        "reason": memory_lifecycle["writer_skip_reason"],
+                        **memory_lifecycle,
                     },
                 )
             console_logger.info(
@@ -2329,7 +2422,7 @@ class SceneExpertHookRunner:
         )
         return full_report
 
-    def finalize_failure(self, error: str = "") -> None:
+    def finalize_failure(self, error: str = "", error_type: str = "") -> None:
         """Persist a failed trace and curate only recognized main hard-gate evidence.
 
         This does not catch, suppress, retry, or otherwise change main's failure.
@@ -2354,6 +2447,10 @@ class SceneExpertHookRunner:
             return
         failure_report = main_hard_failure_report(error, self._current_stage)
         if failure_report is None:
+            self._record_inflight_runtime_failure(
+                error=error,
+                error_type=error_type or "RuntimeError",
+            )
             self.save_partial_trace(error=error)
             return
 
@@ -2399,13 +2496,13 @@ class SceneExpertHookRunner:
 
         missing_stages = [
             stage
-            for stage in CONTRACT_STAGE_ORDER
+            for stage in GENERATION_STAGE_ORDER
             if stage not in self._completed_stages
         ]
         full_report = FullVerifyReport(
             deterministic_pass=False,
             pass_scene=False,
-            expected_stages=list(CONTRACT_STAGE_ORDER),
+            expected_stages=list(GENERATION_STAGE_ORDER),
             completed_stages=list(self._completed_stages),
             missing_stages=missing_stages,
             outcome_status="FAILED",
@@ -2418,8 +2515,25 @@ class SceneExpertHookRunner:
             exports=exports,
             model=self._qwen_model,
         )
-        self._write_long_term_memory(full_report)
-        self._flush_skill_outcomes()
+        memory_lifecycle = self._authoritative_failure_memory_lifecycle()
+        if memory_lifecycle["writer_eligible"]:
+            self._write_long_term_memory(
+                full_report,
+                lifecycle=memory_lifecycle,
+            )
+            self._flush_skill_outcomes()
+        else:
+            self._pending_skill_observations = []
+            self._trace_logger.record_component_status(
+                "memory_writer",
+                {
+                    "success": True,
+                    "skipped": True,
+                    "write_status": "skipped_non_terminal_pipeline",
+                    "reason": memory_lifecycle["writer_skip_reason"],
+                    **memory_lifecycle,
+                },
+            )
         trace_dict = self._trace_logger.finalize(
             full_report=full_report,
             exports=exports,
@@ -2442,15 +2556,83 @@ class SceneExpertHookRunner:
                 f"[SceneExpert] Failed to save partial trace: {save_error}"
             )
 
+    def _record_inflight_runtime_failure(
+        self,
+        *,
+        error: str,
+        error_type: str,
+    ) -> None:
+        """Persist the current native-stage boundary without changing its failure."""
+        if not self._trace_enabled() or not getattr(self, "_current_stage", ""):
+            return
+        stage = self._current_stage
+        if stage in getattr(self, "_completed_stages", []):
+            return
+        planner_diagnostics: dict[str, Any] = {}
+        latest_scene = getattr(self, "_latest_scene", None)
+        metadata = getattr(latest_scene, "metadata", None)
+        if isinstance(metadata, dict):
+            candidate = metadata.get("scenesmith_planner_failure")
+            if isinstance(candidate, dict):
+                planner_diagnostics = dict(candidate)
+            runtime_checkpoint = metadata.get("scenesmith_runtime_failure")
+            if isinstance(runtime_checkpoint, dict):
+                planner_diagnostics.setdefault(
+                    "runtime_failure_checkpoint",
+                    dict(runtime_checkpoint),
+                )
+        runtime_failure = {
+            "stage": stage,
+            "error_type": str(error_type or "RuntimeError"),
+            "error": str(error),
+            "stage_agent_invoked": bool(
+                self._current_execution_evidence.stage_agent_invoked
+            ),
+            "planner_diagnostics": planner_diagnostics,
+        }
+        self._current_execution_evidence.degraded = True
+        self._current_execution_evidence.runtime_failure = runtime_failure
+        self._trace_logger.record_component_status(
+            "runtime_failure",
+            {
+                "success": False,
+                "degraded": True,
+                **runtime_failure,
+            },
+        )
+        planner_trace = dict(self._current_planner_trace)
+        planner_trace["native_stage_runtime_failure"] = runtime_failure
+        self._trace_logger.log_stage(
+            stage=stage,
+            memory_pack=self._current_memory_pack,
+            relation_context=self._current_relation_context,
+            planner_trace=planner_trace,
+            stage_brief=self._current_stage_brief,
+            scene_state_path=str(self._scene_debug_dir.parent),
+            verify_report=None,
+            repair_actions=[],
+            qwen_calls=self._qwen_calls,
+            stage_time_sec=max(0.0, time.time() - self._stage_start_time),
+            execution_evidence=self._current_execution_evidence,
+        )
+        self._trace_logger.save_stage_context(
+            stage=stage,
+            memory_pack=self._current_memory_pack,
+            relation_context=self._current_relation_context,
+            stage_brief=self._current_stage_brief,
+            phase="failure",
+            execution_evidence=self._current_execution_evidence,
+        )
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _initial_completed_stages(self, start_stage: str) -> list[str]:
         """Return the stage-order prefix already satisfied by a resumed run."""
-        if start_stage not in CONTRACT_STAGE_ORDER:
+        if start_stage not in GENERATION_STAGE_ORDER:
             return []
-        return CONTRACT_STAGE_ORDER[: CONTRACT_STAGE_ORDER.index(start_stage)]
+        return list(GENERATION_STAGE_ORDER[: GENERATION_STAGE_ORDER.index(start_stage)])
 
     def _validate_stage_transition(self, stage: str) -> None:
         """Enforce Harness FSM order while tolerating sequential multi-room runs."""
@@ -2511,7 +2693,7 @@ class SceneExpertHookRunner:
 
         lines: list[str] = []
         seen: set[str] = set()
-        for stage in CONTRACT_STAGE_ORDER:
+        for stage in GENERATION_STAGE_ORDER:
             try:
                 pack = self._retriever.retrieve(self._task_spec, stage)
             except Exception:
@@ -2883,10 +3065,11 @@ def build_hook_runner(
         .get("pipeline", {})
         .get("start_stage", "floor_plan")
     )
-    stop_stage = (
+    stop_stage = str(
         cfg_dict.get("experiment", {})
         .get("pipeline", {})
-        .get("stop_stage", CONTRACT_STAGE_ORDER[-1])
+        .get("stop_stage", GENERATION_TERMINAL_STAGE)
+        or GENERATION_TERMINAL_STAGE
     )
     config_hash = _stable_config_hash(cfg_dict)
     experiment_signature = _stable_experiment_signature(cfg_dict)
@@ -2953,7 +3136,8 @@ def build_hook_runner(
         config_hash=config_hash,
         experiment_signature=experiment_signature,
         start_stage=start_stage,
-        allow_long_term_memory_updates=(stop_stage == CONTRACT_STAGE_ORDER[-1]),
+        configured_stop_stage=stop_stage,
+        allow_long_term_memory_updates=(stop_stage == GENERATION_TERMINAL_STAGE),
         intent_contract=intent_contract,
         intent_trace=intent_trace,
         task_compiler_trace=task_compiler_trace,
