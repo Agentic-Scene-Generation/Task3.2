@@ -68,6 +68,7 @@ from scenesmith.wall_agents.stateful_wall_agent import StatefulWallAgent
 
 if TYPE_CHECKING:
     from scenesmith.scene_expert.hooks import SceneExpertHookRunner
+    from scenesmith.scene_expert.schemas import FullVerifyReport
 
 console_logger = logging.getLogger(__name__)
 
@@ -157,6 +158,18 @@ def _commit_scene_expert_stage(
         retryable=result.retryable,
         reason=result.reason,
     )
+
+
+def _raise_for_non_degradable_final_blockers(
+    report: "FullVerifyReport",
+) -> None:
+    """Do not downgrade known structural geometry failures at finalization."""
+    blockers = tuple(sorted(set(report.non_degradable_blockers)))
+    if blockers:
+        raise RuntimeError(
+            "SceneExpert final verification found non-degradable structural "
+            f"blocker(s): {', '.join(blockers)}"
+        )
 
 
 def _quality_failure_policy(cfg_dict: dict[str, Any]) -> str:
@@ -3219,6 +3232,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                         verify_report = scene_expert_hooks.finalize(
                             final_scene_path=str(scene_dir / "combined_house")
                         )
+                        _raise_for_non_degradable_final_blockers(verify_report)
                         if not verify_report.deterministic_pass:
                             targeted_replay = _is_targeted_manipuland_replay(
                                 cfg_dict=cfg_dict,

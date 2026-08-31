@@ -3943,6 +3943,46 @@ def test_intent_compiler_retries_when_provider_omits_required_target_ref() -> No
     )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("subject_count", "1"),
+        ("subject_count", True),
+        ("surface_mentions", "desk and wall"),
+    ],
+)
+def test_intent_compiler_retries_when_decoded_semantic_ir_violates_wire_types(
+    field: str, value: object
+) -> None:
+    task_spec = SceneTaskSpec(
+        room_type="office", style="standard", required_large_objects=["desk"]
+    )
+    malformed_requirement = {
+        "requirement_id": "desk_by_wall",
+        "kind": "relation",
+        "grounding": "prompt:0",
+        "relation": "near",
+        "subject_ref": "inventory:desk",
+        "target_ref": "anchor:wall",
+        field: value,
+    }
+    compiler = _compiler_with_responses(
+        [
+            _response(_semantic_ir([malformed_requirement])),
+            _response(_semantic_scope("prompt:0")),
+        ]
+    )
+
+    result = compiler.compile("An office with a desk.", task_spec=task_spec)
+
+    assert result["retry_count"] == 1
+    assert compiler.last_trace["status"] == "retry_ok"
+    assert (
+        "semantic IR wire schema validation failed"
+        in compiler.last_trace["attempts"][0]["error"]
+    )
+
+
 def test_intent_compiler_expands_grounding_ids_deterministically() -> None:
     prompt = "Place a desk near the wall. Keep the entrance clear."
     task_spec = {

@@ -230,6 +230,45 @@ def test_full_verifier_fails_fresh_final_deterministic_payload() -> None:
     assert not report.pass_scene
 
 
+def test_final_room_containment_blocker_survives_resumed_stage_filtering() -> None:
+    payload = {
+        "results": [
+            {
+                "check_id": "room_containment__cabinet_0",
+                "metric": "functional_dependency",
+                "relation_type": "room_containment",
+                "label": "fail",
+                "scoring_tier": "core",
+                "primary_object": "cabinet_0",
+                "diagnostics": {"earliest_stage": "furniture"},
+            }
+        ]
+    }
+
+    resumed_stage = StageVerifier().verify(
+        stage="wall_mounted",
+        stage_output_dir=".",
+        task_spec=SceneTaskSpec(room_type="living_room", style="standard"),
+        scene_state_info={"object_names": []},
+        deterministic_critic_payload=payload,
+    )
+    assert resumed_stage.pass_stage
+
+    final_report = FullVerifier().verify(
+        stage_reports=[resumed_stage], deterministic_critic_payload=payload
+    )
+
+    assert final_report.non_degradable_blockers == ["room_containment"]
+    with pytest.raises(RuntimeError, match="non-degradable structural blocker"):
+        scene_generation._raise_for_non_degradable_final_blockers(final_report)
+
+
+def test_finalization_keeps_ordinary_quality_failure_degradable() -> None:
+    scene_generation._raise_for_non_degradable_final_blockers(
+        FullVerifyReport(deterministic_pass=False)
+    )
+
+
 def test_hook_finalize_refreshes_final_deterministic_payload(tmp_path) -> None:
     fresh_payload = _binding_failure_payload(earliest_stage="manipuland")
     scene = SimpleNamespace()

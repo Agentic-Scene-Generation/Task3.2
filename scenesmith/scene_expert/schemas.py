@@ -489,6 +489,7 @@ class FullVerifyReport(BaseModel):
     overall_score: float = 0.0
     deterministic_pass: bool = False
     pass_scene: bool = False
+    non_degradable_blockers: list[str] = Field(default_factory=list)
     expected_stages: list[str] = Field(default_factory=list)
     completed_stages: list[str] = Field(default_factory=list)
     missing_stages: list[str] = Field(default_factory=list)

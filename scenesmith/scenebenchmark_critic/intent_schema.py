@@ -11,9 +11,16 @@ import hashlib
 import json
 import re
 from copy import deepcopy
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from scenesmith.scenebenchmark_critic.object_taxonomy import (
     canonical_object_category,
@@ -89,6 +96,10 @@ LEGACY_INTENT_CONTRACT_SCHEMA_VERSIONS = frozenset(
 INTENT_CONTRACT_SCHEMA_VERSION = "scenesmith.intent_contract.v7"
 INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v16"
 INTENT_COMPILER_SEMANTIC_IR_VERSION = "scenesmith.intent_compiler.semantic_ir.v1"
+
+_SEMANTIC_IR_ENTITY_REF = Annotated[
+    str, Field(pattern=r"^(inventory|anchor):[a-z0-9_]+$")
+]
 
 _WALL_QUALIFIED_DIRECTION_PATTERN = re.compile(
     r"(?P<subject>[^,.;!?]{1,100}?)\s+against\s+"
@@ -223,6 +234,107 @@ class EdgeDistributionGroup(BaseModel):
         if any(item < 0 for item in counts):
             raise ValueError("counts_per_edge values must be non-negative")
         return sorted(counts, reverse=True)
+
+
+class CompilerSemanticIREdgeDistributionGroup(BaseModel):
+    """Strict wire-only edge group emitted by the semantic compiler."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    edge_class: Literal["long", "short"]
+    counts_per_edge: list[int] = Field(min_length=2, max_length=2)
+    spacing: Literal["equal_segments", "unconstrained"] = "equal_segments"
+
+
+class CompilerSemanticIRRequirement(BaseModel):
+    """Strict decoded shape before semantic admission projects runtime rows."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    requirement_id: str = Field(min_length=1, max_length=64)
+    kind: Literal[
+        "inventory",
+        "forbidden_inventory",
+        "relation",
+        "unsupported",
+        "unresolved",
+        "soft_scope",
+    ]
+    grounding: str = Field(pattern=r"^(prompt|interaction|aesthetic):[0-9]+$")
+    relation: str | None = None
+    subject_ref: _SEMANTIC_IR_ENTITY_REF | None = None
+    # This must stay required even though coverage-only rows use null. Local
+    # llama.cpp grammars can otherwise omit a nullable field entirely.
+    target_ref: _SEMANTIC_IR_ENTITY_REF | None
+    secondary_target_ref: _SEMANTIC_IR_ENTITY_REF | None = None
+    subject_count: int | None = Field(default=None, ge=1)
+    target_count: int | None = Field(default=None, ge=1)
+    subject_quantifier: Literal["all", "exactly", "at_least", "minimum"] | None = None
+    target_quantifier: Literal["all", "exactly", "at_least", "minimum"] | None = None
+    subject_role: str | None = Field(default=None, max_length=64)
+    target_role: str | None = Field(default=None, max_length=64)
+    subject_cohort: str | None = Field(default=None, max_length=64)
+    target_cohort: str | None = Field(default=None, max_length=64)
+    edge_frame: Literal["target_local_rectangle"] | None = None
+    groups: list[CompilerSemanticIREdgeDistributionGroup] | None = None
+    orientation: (
+        Literal[
+            "toward_target",
+            "away_from_target",
+            "parallel_to_edge",
+            "unconstrained",
+        ]
+        | None
+    ) = None
+    forbidden_category: str | None = Field(default=None, max_length=64)
+    reason: str | None = Field(default=None, max_length=256)
+    surface_mentions: list[Annotated[str, Field(max_length=128)]] | None = None
+
+    @field_validator("relation")
+    @classmethod
+    def _validate_relation(cls, value: str | None) -> str | None:
+        if value is not None and value not in set(RELATION_REGISTRY) - {
+            "required_count"
+        }:
+            raise ValueError("unknown semantic IR relation")
+        return value
+
+
+class CompilerSemanticIR(BaseModel):
+    """Provider-decoded wire envelope, validated before semantic admission."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    schema_version: Literal[INTENT_COMPILER_SEMANTIC_IR_VERSION]
+    requirements: list[CompilerSemanticIRRequirement]
+
+
+def validate_compiler_semantic_ir(payload: Any) -> None:
+    """Reject malformed provider JSON before it can affect a hard contract."""
+
+    try:
+        CompilerSemanticIR.model_validate(payload)
+    except ValidationError as exc:
+        errors = exc.errors(include_url=False)
+        if any(
+            tuple(error.get("loc") or ()) == ("schema_version",) for error in errors
+        ):
+            raise ValueError(
+                "semantic IR schema_version is missing or unsupported"
+            ) from exc
+        if any(
+            error.get("type") == "missing"
+            and tuple(error.get("loc") or ())[-1:] == ("target_ref",)
+            for error in errors
+        ):
+            raise ValueError("semantic IR requirement omitted target_ref") from exc
+        error = errors[0] if errors else {"loc": (), "msg": str(exc)}
+        location = ".".join(str(part) for part in error.get("loc") or ())
+        raise ValueError(
+            "semantic IR wire schema validation failed"
+            + (f" at {location}" if location else "")
+            + f": {error.get('msg') or exc}"
+        ) from exc
 
 
 class IntentRelation(BaseModel):

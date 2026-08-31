@@ -25,6 +25,7 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
     canonical_selector_category,
     intent_compiler_wire_json_schema,
     selector_categories_overlap,
+    validate_compiler_semantic_ir,
     validate_intent_contract,
 )
 from scenesmith.scenebenchmark_critic.intent_contract import (
@@ -255,6 +256,10 @@ def _admit_semantic_ir(
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, str]]]:
     """Validate LLM semantics without interpreting prompt wording in code."""
 
+    # The provider receives this schema too, but local JSON grammars do not
+    # consistently enforce every field type. Admission is the final boundary
+    # before SemanticIR becomes hard runtime intent.
+    validate_compiler_semantic_ir(payload)
     if payload.get("schema_version") != INTENT_COMPILER_SEMANTIC_IR_VERSION:
         raise ValueError("semantic IR schema_version is missing or unsupported")
     unexpected_top_level = set(payload) - {"schema_version", "requirements"}
