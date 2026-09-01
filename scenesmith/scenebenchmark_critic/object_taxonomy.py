@@ -232,9 +232,35 @@ _EQUIVALENT_CATEGORY_GROUPS = (
     frozenset({"wastebasket", "trash_can", "trash_bin"}),
 )
 
-# Directional taxonomy edges are deliberately explicit.  They let a concrete
+# Directional taxonomy edges are deliberately explicit. They let a concrete
 # generated label satisfy a requested family without treating arbitrary shared
-# words in IDs or descriptions as semantic evidence.
+# words in IDs or descriptions as semantic evidence. Keep this registry shared
+# by selector binding and SceneExpert inventory verification: using separate
+# parent maps can make a relation bind while the same object is reported absent.
+GENERIC_CATEGORY_PARENTS = {
+    "freestanding_bathtub": "bathtub",
+    "ceiling_light": "lamp",
+    "pendant_light": "lamp",
+    "string_light": "lamp",
+    "wall_light": "lamp",
+    "conference_table": "table",
+    "dining_table": "table",
+    "coffee_table": "table",
+    "side_table": "table",
+    "office_chair": "chair",
+    "guest_chair": "chair",
+    "dining_chair": "chair",
+    "student_chair": "chair",
+    "teacher_chair": "chair",
+    "armchair": "chair",
+    "stool": "chair",
+    "bench": "chair",
+    "student_desk": "desk",
+    "teacher_desk": "desk",
+    "reception_desk": "desk",
+    "storage_cabinet": "cabinet",
+}
+
 _PARENT_CATEGORY_EDGES = {
     "frame_portrait": "picture_frame",
     "framed_portrait": "picture_frame",
@@ -245,6 +271,7 @@ _PARENT_CATEGORY_EDGES = {
     "decorative_pillow": "pillow",
     "plush_bear": "plush_toy",
     "stuffed_bear": "plush_toy",
+    **GENERIC_CATEGORY_PARENTS,
 }
 
 # These objects normally stand on the floor unless an explicit support relation

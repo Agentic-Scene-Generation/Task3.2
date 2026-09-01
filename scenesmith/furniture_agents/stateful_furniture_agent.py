@@ -516,16 +516,12 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         # A rejected SceneExpert candidate must not inherit the prior planner's
         # terminal or budget state. Keep the original sessions for audit only.
         if scene_expert_retry_attempt:
-            session_prefix = f"scene_expert_retry_{scene_expert_retry_attempt:02d}_"
             self.designer_session, self.critic_session = self._create_sessions(
-                session_prefix=session_prefix
+                stage_execution_attempt=scene_expert_retry_attempt + 1
             )
             console_logger.info(
-                "Created isolated SceneExpert retry sessions: %splanner.db, "
-                "%sdesigner.db, %scritic.db",
-                session_prefix,
-                session_prefix,
-                session_prefix,
+                "Created isolated SceneExpert retry sessions for attempt %d",
+                scene_expert_retry_attempt + 1,
             )
 
         # Create designer, critic, and planner with tools once for this scene.

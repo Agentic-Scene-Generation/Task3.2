@@ -198,7 +198,9 @@ class TestSceneTaskIsolation(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        self.assertEqual(status["schema_version"], "scenesmith.scene_status.v2")
+        self.assertEqual(status["schema_version"], "scenesmith.scene_status.v3")
+        self.assertEqual(status["failure"]["reason"], "no_mutation")
+        self.assertFalse(status["failure"]["retryable"])
         self.assertEqual(
             status["failure"]["provenance"]["terminal_evidence"],
             {"asset_circuit_breaker": "open"},
@@ -302,7 +304,7 @@ class TestSceneTaskIsolation(unittest.TestCase):
 
     def test_record_gate_requires_complete_matching_terminal_status(self) -> None:
         valid = {
-            "schema_version": "scenesmith.scene_status.v2",
+            "schema_version": "scenesmith.scene_status.v3",
             "scene_id": 0,
             "status": "failed",
             "attempt": 1,
@@ -312,7 +314,13 @@ class TestSceneTaskIsolation(unittest.TestCase):
                 "stage": "ceiling_mounted",
                 "error_type": "PlannerWorkflowNoMutationError",
                 "message": "no committed mutation",
+                "reason": "no_mutation",
+                "operation": "request_design_change",
+                "root_error_type": "",
+                "root_error_message": "",
+                "retryable": False,
                 "attempt": 1,
+                "stage_execution_attempt": 1,
                 "recordable": True,
                 "provenance": {"workflow_calls": 2},
             },
@@ -351,6 +359,9 @@ class TestSceneTaskIsolation(unittest.TestCase):
             "stage": ("stage", ""),
             "message": ("message", ""),
             "provenance": ("provenance", []),
+            "reason": ("reason", "child_failure"),
+            "retryable": ("retryable", True),
+            "stage_execution_attempt": ("stage_execution_attempt", 0),
         }
         for label, (field, value) in invalid_failure_cases.items():
             with self.subTest(label=label):
@@ -363,6 +374,151 @@ class TestSceneTaskIsolation(unittest.TestCase):
                     run_id="test-run",
                 )
                 self.assertFalse(trusted)
+
+    def test_child_timeout_is_retryable_but_never_recordable(self) -> None:
+        error = scene_generation.PlannerStageFailure(
+            reason="child_failure",
+            stage="ceiling_mounted",
+            workflow_calls=1,
+            successful_mutations=0,
+            operation="request_initial_design",
+            stage_execution_attempt=2,
+            retryable=True,
+            root_error_type="APITimeoutError",
+            root_error_message="request timed out",
+        )
+
+        failure = scene_generation._scene_failure_record(error, attempt=2)
+        payload = {
+            "schema_version": "scenesmith.scene_status.v3",
+            "scene_id": 7,
+            "status": "failed",
+            "attempt": 2,
+            "run_id": "current-run",
+            "failure": failure,
+        }
+
+        self.assertEqual(failure["failure_class"], "scene_runtime_failure")
+        self.assertEqual(failure["stage"], "ceiling_mounted")
+        self.assertEqual(failure["reason"], "child_failure")
+        self.assertEqual(failure["root_error_type"], "APITimeoutError")
+        self.assertTrue(failure["retryable"])
+        self.assertFalse(failure["recordable"])
+        self.assertTrue(
+            scene_generation._is_retryable_scene_failure(
+                payload,
+                scene_id=7,
+                attempt=2,
+                retry_budget=2,
+                run_id="current-run",
+            )
+        )
+        self.assertFalse(
+            scene_generation._is_retryable_scene_failure(
+                payload,
+                scene_id=7,
+                attempt=3,
+                retry_budget=2,
+                run_id="current-run",
+            )
+        )
+
+    def test_retry_gate_rejects_stale_or_mismatched_structured_status(self) -> None:
+        failure = scene_generation._worker_failure_record(
+            "APITimeoutError: request timed out",
+            attempt=1,
+            status_error="missing status",
+        )
+        payload = {
+            "schema_version": "scenesmith.scene_status.v3",
+            "scene_id": 4,
+            "status": "failed",
+            "attempt": 1,
+            "run_id": "old-run",
+            "failure": failure,
+        }
+
+        self.assertFalse(
+            scene_generation._is_retryable_scene_failure(
+                payload,
+                scene_id=4,
+                attempt=1,
+                retry_budget=1,
+                run_id="current-run",
+            )
+        )
+        payload["run_id"] = "current-run"
+        payload["schema_version"] = "scenesmith.scene_status.v2"
+        self.assertFalse(
+            scene_generation._is_retryable_scene_failure(
+                payload,
+                scene_id=4,
+                attempt=1,
+                retry_budget=1,
+                run_id="current-run",
+            )
+        )
+
+    def test_retry_gate_rejects_malformed_or_forged_retry_disposition(self) -> None:
+        error = scene_generation.PlannerStageFailure(
+            reason="child_failure",
+            stage="furniture",
+            workflow_calls=1,
+            successful_mutations=0,
+            operation="request_initial_design",
+            retryable=True,
+            root_error_type="APITimeoutError",
+            root_error_message="request timed out",
+        )
+        payload = {
+            "schema_version": "scenesmith.scene_status.v3",
+            "scene_id": 5,
+            "status": "failed",
+            "attempt": 1,
+            "run_id": "current-run",
+            "failure": scene_generation._scene_failure_record(error, attempt=1),
+        }
+
+        for field in ("reason", "root_error_type", "recordable"):
+            with self.subTest(missing=field):
+                malformed = json.loads(json.dumps(payload))
+                malformed["failure"].pop(field)
+                self.assertFalse(
+                    scene_generation._is_retryable_scene_failure(
+                        malformed,
+                        scene_id=5,
+                        attempt=1,
+                        retry_budget=1,
+                        run_id="current-run",
+                    )
+                )
+
+        forged = json.loads(json.dumps(payload))
+        forged["failure"]["root_error_type"] = "ValueError"
+        self.assertFalse(
+            scene_generation._is_retryable_scene_failure(
+                forged,
+                scene_id=5,
+                attempt=1,
+                retry_budget=1,
+                run_id="current-run",
+            )
+        )
+
+    def test_worker_retry_fallback_accepts_native_exit_only(self) -> None:
+        api_failure = scene_generation._worker_failure_record(
+            "APITimeoutError: request timed out",
+            attempt=1,
+            status_error="status write failed",
+        )
+        native_failure = scene_generation._worker_failure_record(
+            "Process crashed (exitcode=-11 (SIGSEGV))",
+            attempt=1,
+            status_error="missing status",
+        )
+
+        self.assertFalse(api_failure["retryable"])
+        self.assertTrue(native_failure["retryable"])
 
     def test_invalid_scene_failure_policy_fails_before_dispatch(self) -> None:
         self.cfg_dict["experiment"]["scene_failure_policy"] = "ignore"
@@ -415,7 +571,7 @@ class TestSceneTaskIsolation(unittest.TestCase):
         self.assertTrue((scene_dir / "_DEGRADED").exists())
         self.assertFalse((scene_dir / "_SUCCESS").exists())
         status = (scene_dir / "scene_status.json").read_text(encoding="utf-8")
-        self.assertIn('"schema_version": "scenesmith.scene_status.v2"', status)
+        self.assertIn('"schema_version": "scenesmith.scene_status.v3"', status)
         self.assertIn('"status": "completed_with_quality_issues"', status)
 
 

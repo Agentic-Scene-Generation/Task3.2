@@ -183,6 +183,7 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
     _write_json(
         scene1 / "scene_status.json",
         {
+            "schema_version": "scenesmith.scene_status.v2",
             "status": "failed",
             "attempt": 1,
             "prompt": "living room",
@@ -320,7 +321,7 @@ def test_recorded_failure_stays_out_of_quality_denominators(tmp_path) -> None:
     _write_json(
         scene1 / "scene_status.json",
         {
-            "schema_version": "scenesmith.scene_status.v2",
+            "schema_version": "scenesmith.scene_status.v3",
             "scene_id": 1,
             "status": "failed",
             "attempt": 1,
@@ -331,6 +332,10 @@ def test_recorded_failure_stays_out_of_quality_denominators(tmp_path) -> None:
                 "stage": "ceiling_mounted",
                 "error_type": "PlannerWorkflowNoMutationError",
                 "message": "bounded ceiling workflow produced no mutation",
+                "reason": "no_mutation",
+                "retryable": False,
+                "root_error_type": "",
+                "stage_execution_attempt": 1,
                 "attempt": 1,
                 "recordable": True,
                 "provenance": {"workflow_calls": 2},

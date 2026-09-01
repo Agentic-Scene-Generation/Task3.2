@@ -23,7 +23,10 @@ from omegaconf import DictConfig, OmegaConf
 from scenesmith.agent_utils.articulated_retrieval_server import (
     ArticulatedRetrievalServer,
 )
-from scenesmith.agent_utils.base_stateful_agent import PlannerWorkflowNoMutationError
+from scenesmith.agent_utils.base_stateful_agent import (
+    PlannerStageFailure,
+    PlannerWorkflowNoMutationError,
+)
 from scenesmith.agent_utils.furniture_accessibility_guard import (
     improve_storage_front_access,
 )
@@ -97,7 +100,7 @@ STAGE_ASSET_DIRS = {
 }
 
 _SCENE_STATUS_FILENAME = "scene_status.json"
-_SCENE_STATUS_SCHEMA_VERSION = "scenesmith.scene_status.v2"
+_SCENE_STATUS_SCHEMA_VERSION = "scenesmith.scene_status.v3"
 _SCENE_SUCCESS_MARKER = "_SUCCESS"
 _SCENE_DEGRADED_MARKER = "_DEGRADED"
 _FURNITURE_RENDER_RESUME_MODES = frozenset({"initial", "latest"})
@@ -107,6 +110,7 @@ _SCENE_FAILURE_POLICIES = frozenset({"strict", "record"})
 _RECORDABLE_SCENE_FAILURE_TYPES = frozenset(
     {
         ("intent_unavailable", "IntentCompilationError"),
+        ("stage_unavailable", "PlannerStageFailure"),
         ("stage_unavailable", "PlannerWorkflowNoMutationError"),
         ("quality_failure", "SceneExpertStageCommitError"),
         ("quality_failure", "SceneQualityFailureError"),
@@ -484,20 +488,37 @@ def _scene_failure_record(error: Exception, *, attempt: int) -> dict[str, Any]:
     stage = str(getattr(error, "stage", "") or "unknown")
     recordable = False
     provenance: dict[str, Any] = {}
+    reason = ""
+    operation = ""
+    root_error_type = ""
+    root_error_message = ""
+    retryable = False
+    stage_execution_attempt = 1
 
     if isinstance(error, IntentCompilationError):
         failure_class = "intent_unavailable"
         stage = "intent_compilation"
         recordable = True
+        reason = "intent_compilation"
         trace = error.trace if isinstance(error.trace, dict) else {}
         attempts = trace.get("attempts")
         provenance = {
             "compiler_attempts": len(attempts) if isinstance(attempts, list) else 0,
             "compiler_schema_version": str(trace.get("schema_version") or ""),
         }
-    elif isinstance(error, PlannerWorkflowNoMutationError):
-        failure_class = "stage_unavailable"
-        recordable = True
+    elif isinstance(error, PlannerStageFailure):
+        reason = error.reason
+        operation = error.operation
+        root_error_type = error.root_error_type or ""
+        root_error_message = error.root_error_message or ""
+        retryable = error.retryable
+        stage_execution_attempt = error.stage_execution_attempt
+        failure_class = (
+            "stage_unavailable"
+            if error.reason in {"no_tool_call", "no_mutation"}
+            else "scene_runtime_failure"
+        )
+        recordable = failure_class == "stage_unavailable"
         provenance = {
             "workflow_calls": error.workflow_calls,
             "successful_mutations": error.successful_mutations,
@@ -507,6 +528,8 @@ def _scene_failure_record(error: Exception, *, attempt: int) -> dict[str, Any]:
     elif isinstance(error, SceneExpertStageCommitError):
         failure_class = "quality_failure"
         recordable = True
+        reason = "stage_commit_rejected"
+        retryable = error.retryable
         provenance = {
             "retryable": error.retryable,
             "reason": error.reason,
@@ -514,6 +537,7 @@ def _scene_failure_record(error: Exception, *, attempt: int) -> dict[str, Any]:
     elif isinstance(error, SceneQualityFailureError):
         failure_class = "quality_failure"
         recordable = True
+        reason = "final_quality_rejected"
         provenance = {"reason": error.reason}
 
     return {
@@ -521,7 +545,13 @@ def _scene_failure_record(error: Exception, *, attempt: int) -> dict[str, Any]:
         "stage": stage,
         "error_type": type(error).__name__,
         "message": str(error),
+        "reason": reason,
+        "operation": operation,
+        "root_error_type": root_error_type,
+        "root_error_message": root_error_message,
+        "retryable": retryable,
         "attempt": attempt,
+        "stage_execution_attempt": stage_execution_attempt,
         "recordable": recordable,
         "provenance": provenance,
     }
@@ -536,7 +566,13 @@ def _worker_failure_record(
         "stage": "worker_process",
         "error_type": "WorkerProcessFailure",
         "message": error,
+        "reason": "worker_process_failure",
+        "operation": "",
+        "root_error_type": "",
+        "root_error_message": "",
+        "retryable": _is_retryable_worker_exit(error),
         "attempt": attempt,
+        "stage_execution_attempt": 1,
         "recordable": False,
         "provenance": {"status_error": status_error},
     }
@@ -565,23 +601,14 @@ def _recordable_scene_failure(
     run_id: str,
 ) -> tuple[bool, str]:
     """Validate the complete cross-process record gate without string guessing."""
-    if payload is None:
-        return False, "terminal status is unavailable"
-    if payload.get("schema_version") != _SCENE_STATUS_SCHEMA_VERSION:
-        return False, "terminal status schema is not scene_status.v2"
-    if payload.get("scene_id") != scene_id:
-        return False, "terminal status scene_id does not match the worker task"
-    if payload.get("status") != "failed":
-        return False, "terminal status is not failed"
-    if payload.get("attempt") != attempt:
-        return False, "terminal status attempt does not match the worker result"
-    if payload.get("run_id") != run_id:
-        return False, "terminal status run_id does not match the current run"
-    failure = payload.get("failure")
-    if not isinstance(failure, dict):
-        return False, "terminal status has no structured failure"
-    if failure.get("attempt") != attempt:
-        return False, "structured failure attempt does not match the worker result"
+    failure, validation_error = _validated_scene_failure(
+        payload,
+        scene_id=scene_id,
+        attempt=attempt,
+        run_id=run_id,
+    )
+    if failure is None:
+        return False, validation_error
     if failure.get("recordable") is not True:
         return False, "structured failure is not recordable"
     failure_key = (
@@ -590,13 +617,68 @@ def _recordable_scene_failure(
     )
     if failure_key not in _RECORDABLE_SCENE_FAILURE_TYPES:
         return False, f"failure type is not allowlisted: {failure_key!r}"
-    if not str(failure.get("stage") or "").strip():
-        return False, "structured failure has no stage"
-    if not str(failure.get("message") or "").strip():
-        return False, "structured failure has no message"
-    if not isinstance(failure.get("provenance"), dict):
-        return False, "structured failure provenance is not an object"
+    if failure_key[0] == "stage_unavailable" and failure.get("reason") not in {
+        "no_tool_call",
+        "no_mutation",
+    }:
+        return False, "structured failure reason is not recordable"
+    if failure.get("retryable") is not False:
+        return False, "structured failure retryable disposition is invalid"
     return True, ""
+
+
+def _validated_scene_failure(
+    payload: dict[str, Any] | None,
+    *,
+    scene_id: int,
+    attempt: int,
+    run_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Return only a complete failure record belonging to this worker run."""
+    if payload is None:
+        return None, "terminal status is unavailable"
+    if payload.get("schema_version") != _SCENE_STATUS_SCHEMA_VERSION:
+        return None, "terminal status schema is not scene_status.v3"
+    if type(payload.get("scene_id")) is not int or payload.get("scene_id") != scene_id:
+        return None, "terminal status scene_id does not match the worker task"
+    if payload.get("status") != "failed":
+        return None, "terminal status is not failed"
+    if type(payload.get("attempt")) is not int or payload.get("attempt") != attempt:
+        return None, "terminal status attempt does not match the worker result"
+    if payload.get("run_id") != run_id:
+        return None, "terminal status run_id does not match the current run"
+    failure = payload.get("failure")
+    if not isinstance(failure, dict):
+        return None, "terminal status has no structured failure"
+    if type(failure.get("attempt")) is not int or failure.get("attempt") != attempt:
+        return None, "structured failure attempt does not match the worker result"
+    for field in (
+        "failure_class",
+        "stage",
+        "error_type",
+        "message",
+        "reason",
+        "operation",
+        "root_error_type",
+        "root_error_message",
+    ):
+        if field not in failure or not isinstance(failure[field], str):
+            return None, f"structured failure {field} is missing or not a string"
+    for field in ("failure_class", "stage", "error_type", "message", "reason"):
+        if not failure[field].strip():
+            return None, f"structured failure has no {field}"
+    if not isinstance(failure.get("provenance"), dict):
+        return None, "structured failure provenance is not an object"
+    if not isinstance(failure.get("retryable"), bool):
+        return None, "structured failure retryable disposition is missing"
+    if not isinstance(failure.get("recordable"), bool):
+        return None, "structured failure recordable disposition is missing"
+    if (
+        type(failure.get("stage_execution_attempt")) is not int
+        or failure["stage_execution_attempt"] < 1
+    ):
+        return None, "structured failure has no stage execution attempt"
+    return failure, ""
 
 
 def _apply_scene_failure_policy(
@@ -682,8 +764,8 @@ def _archive_failed_scene_attempt(
     return archive_path
 
 
-def _is_retryable_scene_failure(error: str) -> bool:
-    """Return whether a fresh process can plausibly recover this failure."""
+def _is_retryable_worker_exit(error: str) -> bool:
+    """Classify only native exits that could not write a typed scene status."""
     normalized = error.lower()
     transient_markers = (
         "sigsegv",
@@ -693,18 +775,53 @@ def _is_retryable_scene_failure(error: str) -> bool:
         "exitcode=-6",
         "exitcode=-9",
         "exitcode=137",
-        "apitimeouterror",
-        "request timed out",
-        "connection reset",
-        "connection refused",
-        "rate limit",
-        "rate-limited",
-        "status code: 429",
-        "status_code=429",
-        "temporarily unavailable",
-        "upstream overloaded",
     )
     return any(marker in normalized for marker in transient_markers)
+
+
+def _is_retryable_scene_failure(
+    payload: dict[str, Any] | None,
+    *,
+    scene_id: int,
+    attempt: int,
+    retry_budget: int,
+    run_id: str,
+) -> bool:
+    """Consume a complete current-run disposition after worker projection."""
+    if attempt > retry_budget:
+        return False
+    failure, _ = _validated_scene_failure(
+        payload,
+        scene_id=scene_id,
+        attempt=attempt,
+        run_id=run_id,
+    )
+    if (
+        failure is None
+        or failure.get("retryable") is not True
+        or failure.get("recordable") is not False
+    ):
+        return False
+    failure_key = (
+        failure["failure_class"],
+        failure["error_type"],
+        failure["reason"],
+    )
+    if failure_key == (
+        "fatal_run_failure",
+        "WorkerProcessFailure",
+        "worker_process_failure",
+    ):
+        return True
+    return bool(
+        failure_key
+        == (
+            "scene_runtime_failure",
+            "PlannerStageFailure",
+            "child_failure",
+        )
+        and failure["root_error_type"] in _TRANSIENT_RUNTIME_ERROR_TYPES
+    )
 
 
 def _get_retrieval_gpu_device() -> str | None:
@@ -1636,6 +1753,7 @@ def _generate_room(
     render_gpu_id: int | None = None,
     scene_expert_hooks: "SceneExpertHookRunner | None" = None,
     scene_expert_retry_attempt: int = 0,
+    stage_execution_attempts: dict[str, int] | None = None,
 ) -> RoomScene:
     """Generate a single room with furniture, wall/ceiling objects, and manipulands.
 
@@ -1678,6 +1796,19 @@ def _generate_room(
         RoomScene with furniture, wall/ceiling objects, and (optionally) manipulands.
     """
     room_start_time = time.time()
+    if stage_execution_attempts is None:
+        stage_execution_attempts = {}
+
+    def stage_cfg(agent_config_key: str, stage: str) -> dict:
+        """Give each real stage execution an isolated, monotonic attempt id."""
+        attempt = stage_execution_attempts.get(stage, 0) + 1
+        stage_execution_attempts[stage] = attempt
+        resolved = dict(cfg_dict)
+        agent_cfg = dict(cfg_dict[agent_config_key])
+        agent_cfg["stage_execution_attempt"] = attempt
+        resolved[agent_config_key] = agent_cfg
+        return resolved
+
     if scene_expert_retry_attempt < 0:
         raise ValueError("scene_expert_retry_attempt must be non-negative")
 
@@ -1791,7 +1922,7 @@ def _generate_room(
                 scene_expert_hooks.pre_stage("furniture", scene)
                 scene_expert_hooks.mark_stage_agent_invoked("furniture")
             furniture_agent = BaseExperiment.build_furniture_agent(
-                cfg_dict=cfg_dict,
+                cfg_dict=stage_cfg("furniture_agent", "furniture"),
                 compatible_agents=(
                     IndoorSceneGenerationExperiment.compatible_furniture_agents
                 ),
@@ -1805,7 +1936,9 @@ def _generate_room(
                         furniture_agent.add_furniture(
                             scene=scene,
                             review_existing=review_existing,
-                            scene_expert_retry_attempt=scene_expert_retry_attempt,
+                            scene_expert_retry_attempt=(
+                                stage_execution_attempts["furniture"] - 1
+                            ),
                         )
                     )
                 except Exception:
@@ -1980,7 +2113,7 @@ def _generate_room(
                 scene_expert_hooks.pre_stage("wall_mounted", scene)
                 scene_expert_hooks.mark_stage_agent_invoked("wall_mounted")
             wall_agent = BaseExperiment.build_wall_agent(
-                cfg_dict=cfg_dict,
+                cfg_dict=stage_cfg("wall_agent", "wall_mounted"),
                 compatible_agents=IndoorSceneGenerationExperiment.compatible_wall_agents,
                 logger=logger,
                 house_layout=house_layout,
@@ -2071,7 +2204,7 @@ def _generate_room(
                 scene_expert_hooks.pre_stage("ceiling_mounted", scene)
                 scene_expert_hooks.mark_stage_agent_invoked("ceiling_mounted")
             ceiling_agent = BaseExperiment.build_ceiling_agent(
-                cfg_dict=cfg_dict,
+                cfg_dict=stage_cfg("ceiling_agent", "ceiling_mounted"),
                 compatible_agents=(
                     IndoorSceneGenerationExperiment.compatible_ceiling_agents
                 ),
@@ -2164,7 +2297,7 @@ def _generate_room(
             scene_expert_hooks.pre_stage("manipuland", scene)
             scene_expert_hooks.mark_stage_agent_invoked("manipuland")
         manipuland_agent = BaseExperiment.build_manipuland_agent(
-            cfg_dict=cfg_dict,
+            cfg_dict=stage_cfg("manipuland_agent", "manipuland"),
             compatible_agents=(
                 IndoorSceneGenerationExperiment.compatible_manipuland_agents
             ),
@@ -2334,6 +2467,7 @@ def _run_sequential_room_generation(
                 console_logger.info(f"Generating room '{room_id}': {room_spec.prompt}")
                 retry_start_stage = start_stage
                 retry_count = 0
+                stage_execution_attempts: dict[str, int] = {}
                 while True:
                     try:
                         room_scene = _generate_room(
@@ -2349,6 +2483,7 @@ def _run_sequential_room_generation(
                             render_gpu_id=render_gpu_id,
                             scene_expert_hooks=scene_expert_hooks,
                             scene_expert_retry_attempt=retry_count,
+                            stage_execution_attempts=stage_execution_attempts,
                         )
                         break
                     except SceneExpertStageCommitError as error:
@@ -3691,8 +3826,12 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                         output_dir=self.output_dir,
                         scene_id=scene_id,
                     )
-                can_retry = attempt <= retry_budget and _is_retryable_scene_failure(
-                    error
+                can_retry = _is_retryable_scene_failure(
+                    status_payload,
+                    scene_id=scene_id,
+                    attempt=attempt,
+                    retry_budget=retry_budget,
+                    run_id=experiment_run_id,
                 )
                 if can_retry:
                     archive_path = _archive_failed_scene_attempt(

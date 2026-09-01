@@ -37,6 +37,10 @@ SCENE_COLUMNS = (
     "failure_stage",
     "failure_error_type",
     "failure_recordable",
+    "failure_reason",
+    "failure_retryable",
+    "failure_root_error_type",
+    "failure_stage_execution_attempt",
     "trace_status",
     "trace_time_sec",
     "trace_degraded",
@@ -672,6 +676,12 @@ def _scene_metrics(
         "failure_stage": str(failure.get("stage") or ""),
         "failure_error_type": str(failure.get("error_type") or ""),
         "failure_recordable": failure.get("recordable") is True,
+        "failure_reason": str(failure.get("reason") or ""),
+        "failure_retryable": failure.get("retryable") is True,
+        "failure_root_error_type": str(failure.get("root_error_type") or ""),
+        "failure_stage_execution_attempt": _as_int(
+            failure.get("stage_execution_attempt")
+        ),
         "trace_status": str(trace.get("status") or "missing"),
         "trace_time_sec": _as_float(trace.get("total_time_sec")),
         "trace_degraded": bool(trace.get("degraded", False)),

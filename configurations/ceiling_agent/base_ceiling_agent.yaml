@@ -261,6 +261,10 @@ openai:
     mesh_analysis: "none"
     asset_analysis: "none"
     asset_validation: "none"
+  max_output_tokens:
+    planner: 1536
+    designer: 24576
+    critic: 12288
   verbosity:
     planner: "low"
     designer: "low"
@@ -272,9 +276,10 @@ openai:
 # OpenAI API timeout configuration (seconds).
 api_timeout:
   connect: 10.0
-  read: 300
-  write: 300
-  pool: 300
+  read: 600
+  write: 600
+  pool: 600
+  max_retries: 0  # Scene-level typed retry owns transient recovery.
 
 # Loop detection configuration for function tools.
 loop_detection:

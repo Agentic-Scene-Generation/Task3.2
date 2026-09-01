@@ -21,10 +21,14 @@ import yaml
 from scenesmith.scenebenchmark_critic.object_taxonomy import (
     canonical_object_category,
     categories_are_equivalent,
+    semantic_category_match,
 )
 from scenesmith.scenebenchmark_critic.relation_registry import (
     STAGE_ORDER as CONTRACT_STAGE_ORDER,
     relation_spec,
+)
+from scenesmith.scenebenchmark_critic.stage_ownership import (
+    normalize_result_stage_ownership,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_containment import (
     ROOM_CONTAINMENT_FAILURE_CODE,
@@ -306,13 +310,14 @@ def _result_is_due(result: dict, stage: str) -> bool:
     if stage == "final":
         return True
     if stage not in CONTRACT_STAGE_ORDER:
-        return True
+        return False
+    result = normalize_result_stage_ownership(result)
     constraint = _result_intent_constraint(result)
     diagnostics = result.get("diagnostics")
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
     earliest = str(diagnostics.get("earliest_stage") or constraint.get("stage") or "")
     if not earliest or earliest not in CONTRACT_STAGE_ORDER:
-        return True
+        return False
     return earliest == stage
 
 
@@ -606,6 +611,7 @@ def _object_labels_match(required: str, present: str) -> bool:
     present_components = _object_label_component_categories(present)
     if any(
         categories_are_equivalent(required_category, present_category)
+        or semantic_category_match(required_category, present_category)["matched"]
         for required_category in required_components
         for present_category in present_components
     ):
