@@ -7,6 +7,7 @@ notice writes made by other processes and invalidate vector indexes safely.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -37,21 +38,40 @@ MANIFEST_SCHEMA_VERSION = "sceneexpert.memory_manifest.v2"
 class FastMemoryStore:
     """Persistent memory banks with atomic batches and cross-process refresh."""
 
-    def __init__(self, memory_dir: str) -> None:
+    def __init__(self, memory_dir: str, *, read_only: bool = False) -> None:
         self._dir = Path(memory_dir)
-        self._dir.mkdir(parents=True, exist_ok=True)
+        self._read_only = bool(read_only)
+        if self._read_only:
+            if not self._dir.is_dir():
+                raise FileNotFoundError(
+                    f"Read-only memory bank does not exist: {self._dir}"
+                )
+        else:
+            self._dir.mkdir(parents=True, exist_ok=True)
         self._success_path = self._dir / "success_cases.jsonl"
         self._failure_path = self._dir / "failure_cases.jsonl"
         self._skills_path = self._dir / "skills.jsonl"
         self._events_path = self._dir / "events.jsonl"
         self._manifest_path = self._dir / "manifest.json"
-        for path in (
+        record_paths = (
             self._success_path,
             self._failure_path,
             self._skills_path,
             self._events_path,
-        ):
-            path.touch(exist_ok=True)
+        )
+        if self._read_only:
+            missing = [str(path) for path in record_paths if not path.is_file()]
+            if missing:
+                raise FileNotFoundError(
+                    "Read-only memory bank is incomplete: " + ", ".join(missing)
+                )
+            if not self._manifest_path.is_file():
+                raise FileNotFoundError(
+                    f"Read-only memory manifest does not exist: {self._manifest_path}"
+                )
+        else:
+            for path in record_paths:
+                path.touch(exist_ok=True)
 
         self.success_cases: list[SuccessCase] = []
         self.failure_cases: list[FailureCase] = []
@@ -66,6 +86,10 @@ class FastMemoryStore:
             self._reload_from_disk_unlocked()
             counts = self._record_counts()
             if self._manifest.get("counts") != counts:
+                if self._read_only:
+                    raise ValueError(
+                        "Read-only memory manifest counts do not match record files"
+                    )
                 self._manifest["counts"] = counts
                 self._atomic_write_json(self._manifest_path, self._manifest)
             self._loaded_revision = int(self._manifest.get("revision", 0))
@@ -95,6 +119,65 @@ class FastMemoryStore:
     @property
     def manifest(self) -> dict[str, Any]:
         return dict(self._manifest)
+
+    @property
+    def read_only(self) -> bool:
+        return self._read_only
+
+    def snapshot_identity(self, *, refresh: bool = True) -> dict[str, Any]:
+        """Return a path-independent fingerprint of retrieval-affecting state."""
+        if refresh:
+            with self._file_lock():
+                self._manifest = self._read_or_create_manifest_unlocked()
+                self._reload_from_disk_unlocked()
+                self._loaded_revision = int(self._manifest.get("revision", 0))
+                self._loaded_disk_signature = self._disk_signature()
+        payload = {
+            "schema_version": "sceneexpert.memory_snapshot.v1",
+            "manifest_schema_version": str(self._manifest.get("schema_version") or ""),
+            "record_schema_version": str(
+                self._manifest.get("record_schema_version") or ""
+            ),
+            "bank_id": self.bank_id,
+            "revision": self.revision,
+            "bank_revisions": dict(self._manifest.get("bank_revisions") or {}),
+            "records": {
+                "success": sorted(
+                    (record.model_dump(mode="json") for record in self.success_cases),
+                    key=lambda record: str(record.get("case_id") or ""),
+                ),
+                "failure": sorted(
+                    (record.model_dump(mode="json") for record in self.failure_cases),
+                    key=lambda record: str(record.get("failure_id") or ""),
+                ),
+                "skill": sorted(
+                    (record.model_dump(mode="json") for record in self.skills),
+                    key=lambda record: (
+                        str(record.get("semantic_signature") or ""),
+                        str(record.get("skill_name") or ""),
+                    ),
+                ),
+            },
+        }
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return {
+            "schema_version": payload["schema_version"],
+            "bank_id": self.bank_id,
+            "revision": self.revision,
+            "bank_revisions": payload["bank_revisions"],
+            "record_counts": self._record_counts(),
+            "content_fingerprint": (
+                f"sceneexpert.memory_snapshot.v1:{fingerprint[:24]}"
+            ),
+            "memory_dir": str(self._dir.resolve()),
+            "read_only": self._read_only,
+        }
 
     @property
     def active_success_cases(self) -> list[SuccessCase]:
@@ -158,6 +241,11 @@ class FastMemoryStore:
     @contextmanager
     def _file_lock(self):
         """Advisory directory lock (process-safe on the Linux ACP runtime)."""
+        if self._read_only:
+            # A frozen evaluator never creates even a lock file in the bank.
+            # Start/end content fingerprints detect out-of-process drift.
+            yield
+            return
         lock_path = self._dir / ".memory.lock"
         with lock_path.open("a+") as lock_file:
             try:
@@ -217,8 +305,14 @@ class FastMemoryStore:
                 manifest["record_schema_version"] = MEMORY_SCHEMA_VERSION
                 changed = True
             if changed:
+                if self._read_only:
+                    raise ValueError(
+                        "Read-only memory manifest requires an in-place migration"
+                    )
                 self._atomic_write_json(self._manifest_path, manifest)
             return manifest
+        if self._read_only:
+            raise ValueError("Read-only memory bank has no valid manifest identity")
         manifest = self._new_manifest()
         self._atomic_write_json(self._manifest_path, manifest)
         return manifest
@@ -299,6 +393,7 @@ class FastMemoryStore:
 
     def append_event(self, event: dict[str, Any]) -> None:
         """Append auditable evidence without promoting it into active memory."""
+        self._ensure_writable("append_event")
         with self._file_lock():
             with self._events_path.open("a", encoding="utf-8", newline="\n") as file:
                 file.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
@@ -383,6 +478,7 @@ class FastMemoryStore:
         the run ID for provenance, and never treats the skill's source task as
         transfer evidence. Different tasks within one ACP run remain independent.
         """
+        self._ensure_writable("record_skill_outcomes")
         updated = 0
         quarantined: list[str] = []
         skipped_non_skill = 0
@@ -505,6 +601,7 @@ class FastMemoryStore:
 
     def apply_updates(self, ops: list[MemoryUpdateOp]) -> dict[str, Any]:
         """Apply one atomic, deduplicated mutation batch and increment revision once."""
+        self._ensure_writable("apply_updates")
         changed_banks: set[str] = set()
         added = 0
         updated = 0
@@ -971,6 +1068,12 @@ class FastMemoryStore:
                 output.append(text)
                 seen.add(key)
         return output
+
+    def _ensure_writable(self, operation: str) -> None:
+        if self._read_only:
+            raise RuntimeError(
+                f"Memory bank is frozen read-only; refused operation {operation}"
+            )
 
     @staticmethod
     def _now() -> str:

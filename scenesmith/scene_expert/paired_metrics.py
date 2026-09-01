@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import statistics
 
 from datetime import datetime, timezone
@@ -13,10 +14,11 @@ from typing import Any, Iterable
 
 from scenesmith.scene_expert.experiment_identity import stable_source_bundle_hash
 
-SCHEMA_VERSION = "sceneexpert.paired_metrics.v3"
+SCHEMA_VERSION = "sceneexpert.paired_metrics.v4"
 PAIR_COLUMNS = (
     "case_id",
     "prompt_match",
+    "shared_base_match",
     "baseline_status",
     "treatment_status",
     "baseline_generation_status",
@@ -40,6 +42,11 @@ PAIR_COLUMNS = (
     "baseline_sceneexpert_score",
     "treatment_sceneexpert_score",
     "sceneexpert_score_delta",
+    "baseline_hard_constraint_pass",
+    "treatment_hard_constraint_pass",
+    "baseline_relation_satisfaction",
+    "treatment_relation_satisfaction",
+    "relation_satisfaction_delta",
     "treatment_memory_retrieved",
     "treatment_memory_injected",
     "treatment_cross_task_verified",
@@ -80,6 +87,37 @@ def _delta(after: float | None, before: float | None) -> float | None:
     if after is None or before is None:
         return None
     return round(after - before, 6)
+
+
+def _paired_sign_statistics(
+    values: Iterable[float | None],
+    *,
+    lower_is_better: bool = False,
+) -> dict[str, Any]:
+    """Return an exact two-sided sign test without optional dependencies."""
+    clean = [float(value) for value in values if value not in {None, 0.0}]
+    if lower_is_better:
+        clean = [-value for value in clean]
+    wins = sum(value > 0 for value in clean)
+    losses = sum(value < 0 for value in clean)
+    observed = wins + losses
+    if not observed:
+        return {
+            "non_tied_pairs": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": None,
+            "two_sided_sign_test_p": None,
+        }
+    tail = sum(math.comb(observed, index) for index in range(min(wins, losses) + 1))
+    p_value = min(1.0, 2.0 * tail / (2**observed))
+    return {
+        "non_tied_pairs": observed,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(wins / observed, 6),
+        "two_sided_sign_test_p": round(p_value, 8),
+    }
 
 
 def _scene_index(
@@ -161,12 +199,13 @@ def compare_run_metrics(
     identity_checks: dict[str, bool] = {}
     semantic_identity_keys = {
         "experiment_names",
-        "experiment_signatures",
+        "control_signatures",
         "models",
     }
     for key in (
         "experiment_names",
         "experiment_signatures",
+        "control_signatures",
         "config_hashes",
         "models",
         "code_revisions",
@@ -205,7 +244,12 @@ def compare_run_metrics(
         after_value = treatment_provenance.get(key)
         matches = bool(before_value) and before_value == after_value
         identity_checks[f"code_provenance.{key}"] = matches
-    for key in ("memory_bank_ids", "memory_dirs"):
+    for key in (
+        "memory_bank_ids",
+        "memory_dirs",
+        "snapshot_fingerprints",
+        "snapshot_revisions",
+    ):
         before_values = sorted(
             str(value)
             for value in (baseline.get("memory_identity") or {}).get(key, [])
@@ -221,8 +265,49 @@ def compare_run_metrics(
         if not matches:
             warnings.append(f"identity_mismatch:memory_identity.{key}")
 
+    baseline_memory_identity = baseline.get("memory_identity") or {}
+    treatment_memory_identity = treatment.get("memory_identity") or {}
+    snapshots_frozen = bool(
+        baseline_memory_identity.get("frozen_all_unchanged") is True
+        and treatment_memory_identity.get("frozen_all_unchanged") is True
+        and baseline_memory_identity.get("snapshot_identity_stable") is True
+        and treatment_memory_identity.get("snapshot_identity_stable") is True
+    )
+    identity_checks["memory_identity.frozen_all_unchanged"] = snapshots_frozen
+    if not snapshots_frozen:
+        warnings.append("memory_snapshot_not_frozen")
+
+    baseline_contract = baseline.get("evaluation_contract") or {}
+    treatment_contract = treatment.get("evaluation_contract") or {}
+    pair_ids_match = bool(baseline_contract.get("pair_ids")) and (
+        baseline_contract.get("pair_ids") == treatment_contract.get("pair_ids")
+    )
+    dimension_matches = baseline_contract.get("controlled_dimensions") == [
+        "fast_memory_retrieval"
+    ] and treatment_contract.get("controlled_dimensions") == ["fast_memory_retrieval"]
+    arms_valid = baseline_contract.get("arms") == [
+        "memory_off"
+    ] and treatment_contract.get("arms") == ["memory_on"]
+    contracts_ready = bool(
+        baseline_contract.get("contract_ready") is True
+        and treatment_contract.get("contract_ready") is True
+    )
+    identity_checks["evaluation_contract.pair_id"] = pair_ids_match
+    identity_checks["evaluation_contract.controlled_dimension"] = dimension_matches
+    identity_checks["evaluation_contract.arms"] = arms_valid
+    identity_checks["evaluation_contract.ready"] = contracts_ready
+    for key, passed in (
+        ("pair_id", pair_ids_match),
+        ("controlled_dimension", dimension_matches),
+        ("arms", arms_valid),
+        ("ready", contracts_ready),
+    ):
+        if not passed:
+            warnings.append(f"evaluation_contract_mismatch:{key}")
+
     pairs: list[dict[str, Any]] = []
     prompt_mismatch = False
+    shared_base_mismatch = False
     for case_id in sorted(baseline_cases & treatment_cases):
         before = baseline_rows[case_id]
         after = treatment_rows[case_id]
@@ -232,6 +317,8 @@ def compare_run_metrics(
         after_critic = _number(after.get("critic_score"))
         before_wrapper = _number(before.get("sceneexpert_overall_score"))
         after_wrapper = _number(after.get("sceneexpert_overall_score"))
+        before_relation = _number(before.get("relation_satisfaction"))
+        after_relation = _number(after.get("relation_satisfaction"))
         time_delta = _delta(after_time, before_time)
         critic_delta = _delta(after_critic, before_critic)
         wrapper_delta = _delta(after_wrapper, before_wrapper)
@@ -249,10 +336,17 @@ def compare_run_metrics(
             outcome_transition = "both_incomplete"
         prompt_match = str(before.get("prompt") or "") == str(after.get("prompt") or "")
         prompt_mismatch = prompt_mismatch or not prompt_match
+        before_shared_base = str(before.get("shared_base_fingerprint") or "")
+        after_shared_base = str(after.get("shared_base_fingerprint") or "")
+        shared_base_match = bool(before_shared_base) and (
+            before_shared_base == after_shared_base
+        )
+        shared_base_mismatch = shared_base_mismatch or not shared_base_match
         pairs.append(
             {
                 "case_id": case_id,
                 "prompt_match": prompt_match,
+                "shared_base_match": shared_base_match,
                 "baseline_status": before_status,
                 "treatment_status": after_status,
                 "baseline_generation_status": str(
@@ -300,6 +394,14 @@ def compare_run_metrics(
                 "baseline_sceneexpert_score": before_wrapper,
                 "treatment_sceneexpert_score": after_wrapper,
                 "sceneexpert_score_delta": wrapper_delta,
+                "baseline_hard_constraint_pass": before.get("hard_constraint_pass"),
+                "treatment_hard_constraint_pass": after.get("hard_constraint_pass"),
+                "baseline_relation_satisfaction": before_relation,
+                "treatment_relation_satisfaction": after_relation,
+                "relation_satisfaction_delta": _delta(
+                    after_relation,
+                    before_relation,
+                ),
                 "treatment_memory_retrieved": bool(
                     after.get("memory_retrieved_stages")
                 ),
@@ -313,6 +415,11 @@ def compare_run_metrics(
         )
     if prompt_mismatch:
         warnings.append("prompt_mismatch")
+    identity_checks["shared_base.per_case_fingerprint"] = bool(pairs) and not (
+        shared_base_mismatch
+    )
+    if shared_base_mismatch:
+        warnings.append("shared_base_fingerprint_mismatch")
 
     baseline_ready = bool(baseline.get("quality_comparison_ready"))
     treatment_ready = bool(treatment.get("quality_comparison_ready"))
@@ -320,12 +427,60 @@ def compare_run_metrics(
         warnings.append("baseline_not_quality_ready")
     if not treatment_ready:
         warnings.append("treatment_not_quality_ready")
+
+    baseline_flags_valid = bool(baseline_rows) and all(
+        row.get("component_flags", {}).get("fast_memory_retrieval") is False
+        and row.get("component_flags", {}).get("memory_writer") is False
+        and row.get("component_flags", {}).get("slow_memory_capture") is True
+        for row in baseline_rows.values()
+    )
+    treatment_flags_valid = bool(treatment_rows) and all(
+        row.get("component_flags", {}).get("fast_memory_retrieval") is True
+        and row.get("component_flags", {}).get("memory_writer") is False
+        and row.get("component_flags", {}).get("slow_memory_capture") is True
+        for row in treatment_rows.values()
+    )
+    identity_checks["component_flags.baseline_memory_off_full"] = baseline_flags_valid
+    identity_checks["component_flags.treatment_memory_on_full"] = treatment_flags_valid
+    if not baseline_flags_valid:
+        warnings.append("baseline_component_contract_invalid")
+    if not treatment_flags_valid:
+        warnings.append("treatment_component_contract_invalid")
+    baseline_memory_isolated = all(
+        not row.get("memory_retrieved_stages")
+        and not row.get("memory_injection_verified_stages")
+        for row in baseline_rows.values()
+    )
+    treatment_delivery_observed = any(
+        row.get("memory_injection_verified_stages")
+        and row.get("memory_cross_task_verified_stages")
+        for row in treatment_rows.values()
+    )
+    identity_checks["memory_delivery.baseline_isolated"] = baseline_memory_isolated
+    identity_checks["memory_delivery.treatment_cross_task_injected"] = (
+        treatment_delivery_observed
+    )
+    if not baseline_memory_isolated:
+        warnings.append("baseline_memory_delivery_not_isolated")
+    if not treatment_delivery_observed:
+        warnings.append("treatment_memory_delivery_not_observed")
     required_identity_keys = {
-        "experiment_names",
-        "experiment_signatures",
+        "control_signatures",
         "models",
         "code_provenance.source_bundle_hash",
         "memory_identity.memory_bank_ids",
+        "memory_identity.snapshot_fingerprints",
+        "memory_identity.snapshot_revisions",
+        "memory_identity.frozen_all_unchanged",
+        "evaluation_contract.pair_id",
+        "evaluation_contract.controlled_dimension",
+        "evaluation_contract.arms",
+        "evaluation_contract.ready",
+        "shared_base.per_case_fingerprint",
+        "component_flags.baseline_memory_off_full",
+        "component_flags.treatment_memory_on_full",
+        "memory_delivery.baseline_isolated",
+        "memory_delivery.treatment_cross_task_injected",
     }
     outcome_comparison_ready = bool(
         pairs
@@ -404,6 +559,19 @@ def compare_run_metrics(
             "mean_sceneexpert_score_delta": _mean(
                 row["sceneexpert_score_delta"] for row in completed_pairs
             ),
+            "mean_relation_satisfaction_delta": _mean(
+                row["relation_satisfaction_delta"] for row in completed_pairs
+            ),
+            "hard_constraint_pass_wins": sum(
+                row["baseline_hard_constraint_pass"] is False
+                and row["treatment_hard_constraint_pass"] is True
+                for row in completed_pairs
+            ),
+            "hard_constraint_pass_losses": sum(
+                row["baseline_hard_constraint_pass"] is True
+                and row["treatment_hard_constraint_pass"] is False
+                for row in completed_pairs
+            ),
             "mean_required_coverage_delta": _mean(
                 row["required_coverage_delta"] for row in pairs
             ),
@@ -419,6 +587,16 @@ def compare_run_metrics(
             ),
             "cross_task_memory_verified_pairs": sum(
                 row["treatment_cross_task_verified"] for row in completed_pairs
+            ),
+            "speed_sign_test": _paired_sign_statistics(
+                (row["time_delta_sec"] for row in completed_pairs),
+                lower_is_better=True,
+            ),
+            "critic_score_sign_test": _paired_sign_statistics(
+                row["critic_score_delta"] for row in completed_pairs
+            ),
+            "relation_satisfaction_sign_test": _paired_sign_statistics(
+                row["relation_satisfaction_delta"] for row in completed_pairs
             ),
         },
         "pairs": pairs,

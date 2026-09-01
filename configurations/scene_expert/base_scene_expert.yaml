@@ -28,6 +28,15 @@ stage_policy:
   ceiling_mounted: "${oc.env:SCENEEXPERT_STAGE_POLICY_CEILING_MOUNTED,''}"
   manipuland: "${oc.env:SCENEEXPERT_STAGE_POLICY_MANIPULAND,''}"
 
+# Strict paired-evaluation contract. Leave these fields empty/false for normal
+# generation. The canonical Full Memory pair launcher sets all four fields and
+# the factory then opens the existing memory bank read-only.
+evaluation:
+  pair_id: "${oc.env:SCENEEXPERT_EVAL_PAIR_ID,''}"
+  controlled_dimension: "${oc.env:SCENEEXPERT_EVAL_DIMENSION,''}"
+  arm: "${oc.env:SCENEEXPERT_EVAL_ARM,''}"
+  require_frozen_memory: ${oc.env:SCENEEXPERT_EVAL_REQUIRE_FROZEN_MEMORY,false}
+
 # Independent component gates. ``null`` inherits the legacy mode preset; an
 # explicit true/false overrides it. This preserves existing experiment names
 # while allowing strict single-variable ablations.

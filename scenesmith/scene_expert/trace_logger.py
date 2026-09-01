@@ -36,6 +36,13 @@ console_logger = logging.getLogger(__name__)
 
 
 _DEFAULT_CODE_PROVENANCE_PATHS = (
+    "configurations/config.yaml",
+    "configurations/experiment/ablation_4c_qwen3_hybrid_memory.yaml",
+    "configurations/experiment/ablation_5_qwen3_full.yaml",
+    "configurations/scene_expert/base_scene_expert.yaml",
+    "scripts/run_parallel_critic_on.sh",
+    "scripts/run_sceneexpert_full_memory_pair.sh",
+    "scenesmith/scene_expert/paired_metrics.py",
     "scenesmith/experiments/indoor_scene_generation.py",
     "scenesmith/scene_expert/config_utils.py",
     "scenesmith/scene_expert/global_planner.py",
@@ -43,9 +50,14 @@ _DEFAULT_CODE_PROVENANCE_PATHS = (
     "scenesmith/scene_expert/hooks.py",
     "scenesmith/scene_expert/experiment_identity.py",
     "scenesmith/scene_expert/memory/activity.py",
+    "scenesmith/scene_expert/memory/hybrid_retriever.py",
+    "scenesmith/scene_expert/memory/index.py",
     "scenesmith/scene_expert/memory/injection.py",
     "scenesmith/scene_expert/memory/retriever.py",
     "scenesmith/scene_expert/memory/schemas.py",
+    "scenesmith/scene_expert/memory/skill_identity.py",
+    "scenesmith/scene_expert/memory/skill_policy.py",
+    "scenesmith/scene_expert/memory/store.py",
     "scenesmith/scene_expert/memory/writer.py",
     "scenesmith/scene_expert/run_metrics.py",
     "scenesmith/scene_expert/schemas.py",
@@ -62,6 +74,11 @@ _DEFAULT_CODE_PROVENANCE_PATHS = (
     "scenesmith/scenebenchmark_critic/asset_library_annotations.py",
     "scenesmith/scenebenchmark_critic/metrics/functional_dependency/builder.py",
     "scenesmith/scenebenchmark_critic/metrics/functional_dependency/relations.py",
+    # Local ACP launchers intentionally live under ignored tmp/. Their actual
+    # bytes still belong to reproducibility when present on the runtime host.
+    "tmp/acp/acp_qwen38_4c_generate.sh",
+    "tmp/acp/acp_qwen38_4c_reuse.sh",
+    "tmp/acp/acp_qwen38_full_reuse.sh",
 )
 
 
@@ -113,8 +130,19 @@ def collect_code_provenance(
     provenance["git_status_hash"] = hashlib.sha256(status.encode("utf-8")).hexdigest()
     provenance["dirty"] = bool(status) if revision else None
 
+    resolved_source_paths = list(source_paths)
+    entrypoint = str(os.environ.get("ACP_ENTRYPOINT") or "").strip()
+    if entrypoint:
+        try:
+            entrypoint_path = Path(entrypoint).resolve()
+            entrypoint_relative = entrypoint_path.relative_to(root).as_posix()
+            if entrypoint_relative not in resolved_source_paths:
+                resolved_source_paths.append(entrypoint_relative)
+        except (OSError, ValueError):
+            pass
+
     source_hashes: dict[str, str] = {}
-    for relative_path in source_paths:
+    for relative_path in resolved_source_paths:
         path = (root / relative_path).resolve()
         try:
             path.relative_to(root)
@@ -169,10 +197,13 @@ class TraceLogger:
         experiment_name: str = "",
         config_hash: str = "",
         experiment_signature: str = "",
+        control_signature: str = "",
         task_spec_status: dict | None = None,
         task_spec: dict | None = None,
         code_provenance: dict[str, object] | None = None,
         component_flags: dict[str, bool] | None = None,
+        memory_identity: dict[str, object] | None = None,
+        evaluation_contract: dict[str, object] | None = None,
     ) -> None:
         self._output_dir = Path(output_dir)
         self._traces_dir = self._output_dir / "traces"
@@ -197,8 +228,11 @@ class TraceLogger:
         self._experiment_name = experiment_name
         self._config_hash = config_hash
         self._experiment_signature = experiment_signature
+        self._control_signature = control_signature
         self._task_spec = dict(task_spec or {})
         self._code_provenance = dict(code_provenance or {})
+        self._memory_identity = dict(memory_identity or {})
+        self._evaluation_contract = dict(evaluation_contract or {})
         self._component_flags = {
             str(name): bool(enabled)
             for name, enabled in dict(component_flags or {}).items()
@@ -419,7 +453,10 @@ class TraceLogger:
             "experiment_name": self._experiment_name,
             "config_hash": self._config_hash,
             "experiment_signature": self._experiment_signature,
+            "control_signature": self._control_signature,
             "code_provenance": self._code_provenance,
+            "memory_identity": self._memory_identity,
+            "evaluation_contract": self._evaluation_contract,
             "prompt": self._prompt,
             "task_compiler": self._task_compiler,
             "intent_compiler": self._intent_compiler,
@@ -447,7 +484,10 @@ class TraceLogger:
             "experiment_name": self._experiment_name,
             "config_hash": self._config_hash,
             "experiment_signature": self._experiment_signature,
+            "control_signature": self._control_signature,
             "code_provenance": self._code_provenance,
+            "memory_identity": self._memory_identity,
+            "evaluation_contract": self._evaluation_contract,
             "prompt": self._prompt,
             "task_compiler": self._task_compiler,
             "intent_compiler": self._intent_compiler,
@@ -475,7 +515,10 @@ class TraceLogger:
                 "experiment_name": self._experiment_name,
                 "config_hash": self._config_hash,
                 "experiment_signature": self._experiment_signature,
+                "control_signature": self._control_signature,
                 "code_provenance": self._code_provenance,
+                "memory_identity": self._memory_identity,
+                "evaluation_contract": self._evaluation_contract,
                 "prompt": self._prompt,
                 "task_compiler": self._task_compiler,
                 "intent_compiler": self._intent_compiler,
@@ -618,6 +661,7 @@ class TraceLogger:
             "experiment_name": self._experiment_name,
             "config_hash": self._config_hash,
             "experiment_signature": self._experiment_signature,
+            "control_signature": self._control_signature,
             "prompt": self._prompt,
             "task_spec": dict(self._task_spec),
             "stages": stages,
@@ -627,4 +671,6 @@ class TraceLogger:
             "component_flags": dict(self._component_flags),
             "component_status": dict(self._component_status),
             "code_provenance": dict(self._code_provenance),
+            "memory_identity": dict(self._memory_identity),
+            "evaluation_contract": dict(self._evaluation_contract),
         }

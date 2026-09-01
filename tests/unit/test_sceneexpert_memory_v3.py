@@ -6,7 +6,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from scenesmith.scene_expert.experiment_identity import (
+    shared_base_scene_identity,
     stable_config_hash,
+    stable_control_signature,
     stable_experiment_signature,
     stable_source_bundle_hash,
 )
@@ -128,6 +130,60 @@ def test_source_bundle_hash_is_path_separator_and_order_stable() -> None:
     second = {"scenesmith\\b.py": "bbb", "scenesmith\\a.py": "aaa"}
 
     assert stable_source_bundle_hash(first) == stable_source_bundle_hash(second)
+
+
+def test_control_signature_ignores_only_declared_memory_treatment() -> None:
+    baseline = {
+        "scene_expert": {
+            "mode": "full",
+            "evaluation": {"arm": "memory_off", "pair_id": "pair-a"},
+            "components": {
+                "fast_memory_retrieval": {"enabled": False},
+                "memory_writer": {"enabled": False},
+            },
+        },
+        "furniture_agent": {"openai": {"model": "qwen-test"}},
+    }
+    treatment = json.loads(json.dumps(baseline))
+    treatment["scene_expert"]["evaluation"]["arm"] = "memory_on"
+    treatment["scene_expert"]["components"]["fast_memory_retrieval"] = {"enabled": True}
+
+    assert stable_experiment_signature(baseline) != stable_experiment_signature(
+        treatment
+    )
+    assert stable_control_signature(
+        baseline, controlled_dimension="fast_memory_retrieval"
+    ) == stable_control_signature(
+        treatment, controlled_dimension="fast_memory_retrieval"
+    )
+
+    treatment["scene_expert"]["components"]["memory_writer"] = {"enabled": True}
+    assert stable_control_signature(
+        baseline, controlled_dimension="fast_memory_retrieval"
+    ) != stable_control_signature(
+        treatment, controlled_dimension="fast_memory_retrieval"
+    )
+
+
+def test_shared_base_identity_is_path_independent_and_content_sensitive(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first" / "scene_003"
+    second = tmp_path / "second" / "scene_003"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    (first / "house_layout.json").write_text('{"rooms": 1}', encoding="utf-8")
+    (second / "house_layout.json").write_text('{"rooms": 1}', encoding="utf-8")
+
+    first_identity = shared_base_scene_identity(tmp_path / "first", scene_index=3)
+    second_identity = shared_base_scene_identity(tmp_path / "second", scene_index=3)
+    assert first_identity["fingerprint"] == second_identity["fingerprint"]
+
+    (second / "house_layout.json").write_text('{"rooms": 2}', encoding="utf-8")
+    assert (
+        first_identity["fingerprint"]
+        != shared_base_scene_identity(tmp_path / "second", scene_index=3)["fingerprint"]
+    )
 
 
 def test_canonical_bundle_does_not_repeat_memory_directives() -> None:

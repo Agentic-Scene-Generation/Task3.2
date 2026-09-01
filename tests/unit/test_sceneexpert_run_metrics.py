@@ -448,3 +448,71 @@ def test_malformed_jsonl_is_a_warning_not_a_metrics_failure(tmp_path) -> None:
         warning.startswith("malformed_jsonl:")
         for warning in metrics["data_quality_warnings"]
     )
+
+
+def test_frozen_evaluation_contract_is_materialized_in_run_metrics(tmp_path) -> None:
+    output_root = tmp_path / "memory_on"
+    batch = output_root / "critic_on" / "batch_001"
+    hydra = batch / "hydra"
+    batch.mkdir(parents=True)
+    with (batch / "batch_cases.csv").open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=("scene_index", "prompt", "case_id"))
+        writer.writeheader()
+        writer.writerow(
+            {"scene_index": 0, "prompt": "classroom", "case_id": "classroom-a"}
+        )
+    _write_json(
+        hydra / "scene_000" / "scene_status.json",
+        {"status": "completed", "prompt": "classroom"},
+    )
+    _write_json(
+        hydra / "traces" / "trace_000000.json",
+        {
+            "status": "completed",
+            "experiment_name": "ablation_5_qwen3_full",
+            "config_hash": "exact-memory-on",
+            "experiment_signature": "semantic-memory-on",
+            "control_signature": "same-non-treatment-semantics",
+            "model": "qwen-test",
+            "memory_identity": {
+                "bank_id": "bank-1",
+                "revision": 9,
+                "content_fingerprint": "sceneexpert.memory_snapshot.v1:abc",
+                "memory_dir": "/memory/frozen",
+                "read_only": True,
+            },
+            "evaluation_contract": {
+                "pair_id": "pair-1",
+                "controlled_dimension": "fast_memory_retrieval",
+                "arm": "memory_on",
+                "require_frozen_memory": True,
+                "shared_base_identity": {
+                    "fingerprint": "sceneexpert.shared_base_snapshot.v1:def"
+                },
+            },
+            "component_flags": {
+                "fast_memory_retrieval": True,
+                "memory_writer": False,
+                "slow_memory_capture": True,
+            },
+            "component_status": {
+                "memory_snapshot": {"unchanged": True, "success": True}
+            },
+            "final_report": {
+                "generation_status": "complete",
+                "requirement_status": "satisfied",
+                "quality_status": "passed",
+            },
+            "stages": [],
+        },
+    )
+
+    metrics = collect_run_metrics(output_root)
+
+    assert metrics["evaluation_contract"]["contract_ready"] is True
+    assert metrics["evaluation_contract"]["arms"] == ["memory_on"]
+    assert metrics["memory_identity"]["frozen_all_unchanged"] is True
+    assert metrics["memory_identity"]["snapshot_identity_stable"] is True
+    assert metrics["experiment_identity"]["control_signatures"] == [
+        "same-non-treatment-semantics"
+    ]

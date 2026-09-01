@@ -24,7 +24,7 @@ from scenesmith.scene_expert.experiment_identity import stable_source_bundle_has
 
 console_logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "sceneexpert.run_metrics.v6"
+SCHEMA_VERSION = "sceneexpert.run_metrics.v7"
 SCENE_COLUMNS = (
     "run_id",
     "batch_id",
@@ -66,6 +66,12 @@ SCENE_COLUMNS = (
     "experiment_name",
     "config_hash",
     "experiment_signature",
+    "control_signature",
+    "evaluation_pair_id",
+    "evaluation_dimension",
+    "evaluation_arm",
+    "evaluation_require_frozen_memory",
+    "shared_base_fingerprint",
     "source_bundle_hash",
     "model",
     "code_revision",
@@ -98,6 +104,10 @@ SCENE_COLUMNS = (
     "memory_bank_ids",
     "memory_bank_revisions",
     "memory_dirs",
+    "memory_snapshot_fingerprint",
+    "memory_snapshot_revision",
+    "memory_snapshot_unchanged",
+    "memory_read_only",
     "memory_zero_result_reasons",
     "memory_zero_result_events",
     "memory_retrieval_time_sec",
@@ -765,6 +775,12 @@ def _scene_metrics(
     )
     stages = _stage_payloads(scene_dir, trace, warnings)
     final_report = trace.get("final_report") or {}
+    memory_identity = dict(trace.get("memory_identity") or {})
+    evaluation_contract = dict(trace.get("evaluation_contract") or {})
+    shared_base_identity = dict(evaluation_contract.get("shared_base_identity") or {})
+    memory_snapshot = dict(
+        (trace.get("component_status") or {}).get("memory_snapshot") or {}
+    )
     code_provenance = dict(trace.get("code_provenance") or {})
     source_bundle_hash = str(code_provenance.get("source_bundle_hash") or "")
     if not source_bundle_hash:
@@ -820,6 +836,16 @@ def _scene_metrics(
         "experiment_name": str(trace.get("experiment_name") or ""),
         "config_hash": str(trace.get("config_hash") or ""),
         "experiment_signature": str(trace.get("experiment_signature") or ""),
+        "control_signature": str(trace.get("control_signature") or ""),
+        "evaluation_pair_id": str(evaluation_contract.get("pair_id") or ""),
+        "evaluation_dimension": str(
+            evaluation_contract.get("controlled_dimension") or ""
+        ),
+        "evaluation_arm": str(evaluation_contract.get("arm") or ""),
+        "evaluation_require_frozen_memory": evaluation_contract.get(
+            "require_frozen_memory"
+        ),
+        "shared_base_fingerprint": str(shared_base_identity.get("fingerprint") or ""),
         "source_bundle_hash": source_bundle_hash,
         "model": str(trace.get("model") or ""),
         "code_revision": str(
@@ -829,10 +855,31 @@ def _scene_metrics(
         "code_provenance": code_provenance,
         "observed_stages": _unique(str(stage.get("stage") or "") for stage in stages),
         "component_flags": dict(trace.get("component_flags") or {}),
+        "memory_snapshot_fingerprint": str(
+            memory_identity.get("content_fingerprint") or ""
+        ),
+        "memory_snapshot_revision": _as_int(memory_identity.get("revision")),
+        "memory_snapshot_unchanged": memory_snapshot.get("unchanged"),
+        "memory_read_only": memory_identity.get("read_only"),
     }
     row.update(_component_execution_metrics(trace, stages))
     row.update(_critic_metrics(scene_dir, warnings))
     row.update(_memory_metrics(scene_dir, stages, row["prompt"], warnings))
+    if memory_identity.get("bank_id"):
+        row["memory_bank_ids"] = _unique(
+            [*row["memory_bank_ids"], str(memory_identity["bank_id"])]
+        )
+    if memory_identity.get("revision") is not None:
+        row["memory_bank_revisions"] = sorted(
+            {
+                *row["memory_bank_revisions"],
+                _as_int(memory_identity.get("revision")),
+            }
+        )
+    if memory_identity.get("memory_dir"):
+        row["memory_dirs"] = _unique(
+            [*row["memory_dirs"], str(memory_identity["memory_dir"])]
+        )
     row.update(_writer_metrics(scene_dir, trace, warnings))
     row.update(_repair_metrics(scene_dir, stages, warnings))
     row.update(_verification_metrics(stages))
@@ -931,6 +978,13 @@ def collect_run_metrics(
     revisions = _unique(row["code_revision"] for row in scene_rows)
     config_hashes = _unique(row["config_hash"] for row in scene_rows)
     experiment_signatures = _unique(row["experiment_signature"] for row in scene_rows)
+    control_signatures = _unique(row["control_signature"] for row in scene_rows)
+    evaluation_pair_ids = _unique(row["evaluation_pair_id"] for row in scene_rows)
+    evaluation_dimensions = _unique(row["evaluation_dimension"] for row in scene_rows)
+    evaluation_arms = _unique(row["evaluation_arm"] for row in scene_rows)
+    shared_base_fingerprints = _unique(
+        row["shared_base_fingerprint"] for row in scene_rows
+    )
     source_bundle_hashes = _unique(row["source_bundle_hash"] for row in scene_rows)
     experiment_names = _unique(row["experiment_name"] for row in scene_rows)
     models = _unique(row["model"] for row in scene_rows)
@@ -954,10 +1008,14 @@ def collect_run_metrics(
         )
     if len(experiment_signatures) > 1:
         warnings.append(f"mixed_experiment_signatures:{len(experiment_signatures)}")
+    if len(control_signatures) > 1:
+        warnings.append(f"mixed_control_signatures:{len(control_signatures)}")
     if not config_hashes:
         warnings.append("missing_config_hash")
     if not experiment_signatures:
         warnings.append("missing_experiment_signature")
+    if not control_signatures:
+        warnings.append("missing_control_signature")
     if not source_bundle_hashes:
         warnings.append("missing_source_bundle_hash")
     if not experiment_names:
@@ -976,6 +1034,55 @@ def collect_run_metrics(
             for revision in row["memory_bank_revisions"]
         }
     )
+    memory_snapshot_fingerprints = _unique(
+        row["memory_snapshot_fingerprint"] for row in scene_rows
+    )
+    memory_snapshot_revisions = sorted(
+        {
+            int(row["memory_snapshot_revision"])
+            for row in scene_rows
+            if row["memory_snapshot_fingerprint"]
+        }
+    )
+    evaluation_active = bool(
+        evaluation_pair_ids or evaluation_dimensions or evaluation_arms
+    )
+    memory_snapshot_all_unchanged = bool(
+        scene_rows
+        and all(row["memory_snapshot_unchanged"] is True for row in scene_rows)
+    )
+    memory_snapshot_identity_stable = bool(
+        len(memory_snapshot_fingerprints) == 1 and len(memory_snapshot_revisions) == 1
+    )
+    shared_base_all_present = bool(
+        scene_rows and all(row["shared_base_fingerprint"] for row in scene_rows)
+    )
+    memory_read_only_all = bool(
+        scene_rows and all(row["memory_read_only"] is True for row in scene_rows)
+    )
+    frozen_required_all = bool(
+        scene_rows
+        and all(row["evaluation_require_frozen_memory"] is True for row in scene_rows)
+    )
+    if evaluation_active:
+        if not memory_snapshot_fingerprints:
+            warnings.append("evaluation_missing_memory_snapshot_fingerprint")
+        if not memory_snapshot_all_unchanged:
+            warnings.append("evaluation_memory_snapshot_changed_or_unverified")
+        if not memory_snapshot_identity_stable:
+            warnings.append("evaluation_memory_snapshot_mixed_across_scenes")
+        if len(evaluation_pair_ids) != 1:
+            warnings.append("evaluation_pair_id_missing_or_mixed")
+        if len(evaluation_dimensions) != 1:
+            warnings.append("evaluation_dimension_missing_or_mixed")
+        if len(evaluation_arms) != 1:
+            warnings.append("evaluation_arm_missing_or_mixed")
+        if not shared_base_all_present:
+            warnings.append("evaluation_shared_base_fingerprint_missing")
+        if not memory_read_only_all:
+            warnings.append("evaluation_memory_bank_not_read_only")
+        if not frozen_required_all:
+            warnings.append("evaluation_frozen_contract_not_required")
     requirement_observed = [
         row
         for row in scene_rows
@@ -1205,6 +1312,7 @@ def collect_run_metrics(
             "config_hashes": config_hashes,
             "exact_config_hashes": config_hashes,
             "experiment_signatures": experiment_signatures,
+            "control_signatures": control_signatures,
             "source_bundle_hashes": source_bundle_hashes,
             "models": models,
             "code_revisions": revisions,
@@ -1226,6 +1334,31 @@ def collect_run_metrics(
             ),
             "memory_bank_revision_max": (
                 max(memory_bank_revisions) if memory_bank_revisions else None
+            ),
+            "snapshot_fingerprints": memory_snapshot_fingerprints,
+            "snapshot_revisions": memory_snapshot_revisions,
+            "frozen_all_unchanged": memory_snapshot_all_unchanged,
+            "snapshot_identity_stable": memory_snapshot_identity_stable,
+        },
+        "evaluation_contract": {
+            "active": evaluation_active,
+            "pair_ids": evaluation_pair_ids,
+            "controlled_dimensions": evaluation_dimensions,
+            "arms": evaluation_arms,
+            "shared_base_fingerprints": shared_base_fingerprints,
+            "shared_base_all_present": shared_base_all_present,
+            "memory_read_only_all": memory_read_only_all,
+            "frozen_required_all": frozen_required_all,
+            "contract_ready": bool(
+                evaluation_active
+                and len(evaluation_pair_ids) == 1
+                and len(evaluation_dimensions) == 1
+                and len(evaluation_arms) == 1
+                and shared_base_all_present
+                and memory_snapshot_all_unchanged
+                and memory_snapshot_identity_stable
+                and memory_read_only_all
+                and frozen_required_all
             ),
         },
         "summary": summary,

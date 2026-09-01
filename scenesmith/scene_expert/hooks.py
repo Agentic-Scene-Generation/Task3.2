@@ -35,7 +35,10 @@ from scenesmith.scene_expert.config_utils import (
 )
 from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
 from scenesmith.scene_expert.experiment_identity import (
+    MEMORY_RETRIEVAL_EVALUATION_DIMENSION,
+    shared_base_scene_identity as _shared_base_scene_identity,
     stable_config_hash as _stable_config_hash,
+    stable_control_signature as _stable_control_signature,
     stable_experiment_signature as _stable_experiment_signature,
 )
 from scenesmith.scene_expert.failure_evidence import main_hard_failure_report
@@ -830,6 +833,9 @@ class SceneExpertHookRunner:
         experiment_name: str = "",
         config_hash: str = "",
         experiment_signature: str = "",
+        control_signature: str = "",
+        memory_identity: dict[str, Any] | None = None,
+        evaluation_contract: dict[str, Any] | None = None,
         start_stage: str = "floor_plan",
         configured_stop_stage: str = GENERATION_TERMINAL_STAGE,
         allow_long_term_memory_updates: bool | None = None,
@@ -866,6 +872,9 @@ class SceneExpertHookRunner:
         self._experiment_name = experiment_name
         self._config_hash = config_hash
         self._experiment_signature = experiment_signature
+        self._control_signature = control_signature
+        self._initial_memory_identity = dict(memory_identity or {})
+        self._evaluation_contract = dict(evaluation_contract or {})
         self._start_stage = start_stage
         self._configured_stop_stage = str(
             configured_stop_stage or GENERATION_TERMINAL_STAGE
@@ -1222,6 +1231,18 @@ class SceneExpertHookRunner:
         observations = list(getattr(self, "_pending_skill_observations", []))
         if self._memory_store is None or not observations:
             return None
+        if self._memory_store.read_only or not self._component_enabled("memory_writer"):
+            self._pending_skill_observations = []
+            return {
+                "success": True,
+                "skipped": True,
+                "reason": (
+                    "frozen_memory_bank"
+                    if self._memory_store.read_only
+                    else "memory_writer_disabled"
+                ),
+                "observation_count": len(observations),
+            }
         try:
             summary = self._memory_store.record_skill_outcomes(observations)
             self._memory_activity.record_skill_learning(summary=summary)
@@ -1400,6 +1421,7 @@ class SceneExpertHookRunner:
         """
         if (
             self._memory_store is None
+            or self._memory_store.read_only
             or verify_report is None
             or not self._component_enabled("stage_working_memory")
             or not self._component_enabled("verifier")
@@ -1455,6 +1477,51 @@ class SceneExpertHookRunner:
                 stage,
                 e,
             )
+
+    def _audit_memory_snapshot(self) -> dict[str, Any] | None:
+        """Record whether the evaluation bank changed during this scene."""
+        if (
+            self._memory_store is None
+            or not self._initial_memory_identity
+            or not self._evaluation_contract.get("require_frozen_memory")
+        ):
+            return None
+        try:
+            final_identity = self._memory_store.snapshot_identity(refresh=True)
+            unchanged = all(
+                final_identity.get(key) == self._initial_memory_identity.get(key)
+                for key in ("bank_id", "revision", "content_fingerprint")
+            )
+            result = {
+                "success": unchanged,
+                "unchanged": unchanged,
+                "initial": dict(self._initial_memory_identity),
+                "final": final_identity,
+            }
+            if self._trace_enabled():
+                self._trace_logger.record_component_status(
+                    "memory_snapshot",
+                    result,
+                )
+            if self._evaluation_contract.get("require_frozen_memory") and not unchanged:
+                console_logger.error(
+                    "[SceneExpert] Frozen Memory bank changed during evaluation: %s",
+                    self._memory_store.memory_dir,
+                )
+            return result
+        except Exception as error:
+            result = {
+                "success": False,
+                "unchanged": False,
+                "error": f"{type(error).__name__}: {error}",
+                "initial": dict(self._initial_memory_identity),
+            }
+            if self._trace_enabled():
+                self._trace_logger.record_component_status(
+                    "memory_snapshot",
+                    result,
+                )
+            return result
 
     def _stage_required_objects(self, stage: str) -> list[str]:
         if stage == "floor_plan":
@@ -2497,6 +2564,7 @@ class SceneExpertHookRunner:
                 "non-terminal pipeline run"
             )
 
+        self._audit_memory_snapshot()
         if self._trace_enabled():
             trace_dict = self._trace_logger.finalize(
                 full_report=full_report,
@@ -2639,6 +2707,7 @@ class SceneExpertHookRunner:
                     **memory_lifecycle,
                 },
             )
+        self._audit_memory_snapshot()
         trace_dict = self._trace_logger.finalize(
             full_report=full_report,
             exports=exports,
@@ -2653,6 +2722,7 @@ class SceneExpertHookRunner:
         if not self._trace_enabled():
             return
         try:
+            self._audit_memory_snapshot()
             path = self._trace_logger.save_partial(status="failed", error=error)
             self._capture_main_repair_activity()
             console_logger.info(f"[SceneExpert] Partial trace saved to {path}")
@@ -2917,6 +2987,22 @@ def build_hook_runner(
     behavior_cfg = se_cfg.get("behavior", {}) or {}
     component_flags = resolve_component_flags(cfg_dict)
 
+    evaluation_cfg = se_cfg.get("evaluation", {}) or {}
+    evaluation_pair_id = str(evaluation_cfg.get("pair_id") or "").strip()
+    evaluation_dimension = (
+        str(evaluation_cfg.get("controlled_dimension") or "").strip().casefold()
+    )
+    evaluation_arm = str(evaluation_cfg.get("arm") or "").strip().casefold()
+    require_frozen_memory = _cfg_bool(
+        evaluation_cfg.get("require_frozen_memory"), False
+    )
+    evaluation_requested = bool(
+        evaluation_pair_id
+        or evaluation_dimension
+        or evaluation_arm
+        or require_frozen_memory
+    )
+
     mode = se_cfg.get("mode", "disabled")
     if not se_cfg.get("enabled", False) or not any(component_flags.values()):
         _compile_intent_contract_if_enabled(
@@ -2940,6 +3026,30 @@ def build_hook_runner(
         )
         return None
 
+    if evaluation_requested:
+        if mode != "full":
+            raise ValueError("Paired Memory evaluation requires scene_expert.mode=full")
+        if not evaluation_pair_id:
+            raise ValueError("Paired Memory evaluation requires a non-empty pair_id")
+        if evaluation_dimension != MEMORY_RETRIEVAL_EVALUATION_DIMENSION:
+            raise ValueError(
+                "Paired Memory evaluation supports only controlled_dimension="
+                f"{MEMORY_RETRIEVAL_EVALUATION_DIMENSION!r}"
+            )
+        if evaluation_arm not in {"memory_off", "memory_on"}:
+            raise ValueError(
+                "Paired Memory evaluation arm must be 'memory_off' or 'memory_on'"
+            )
+        if not require_frozen_memory:
+            raise ValueError("Paired Memory evaluation requires a frozen Memory bank")
+        retrieval_expected = evaluation_arm == "memory_on"
+        if component_flags["fast_memory_retrieval"] != retrieval_expected:
+            raise ValueError(
+                "Evaluation arm and fast_memory_retrieval component disagree"
+            )
+        if component_flags["memory_writer"]:
+            raise ValueError("Paired Memory evaluation requires memory_writer=false")
+
     stage_policies = resolve_stage_policies(cfg_dict)
     console_logger.info(f"[SceneExpert] Building hook runner (mode={mode})")
 
@@ -2960,7 +3070,7 @@ def build_hook_runner(
         exclude_source_task_id = (
             "task_" + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
         )
-    use_memory_store = any(
+    use_memory_store = evaluation_requested or any(
         component_flags[name]
         for name in (
             "fast_memory_retrieval",
@@ -2996,7 +3106,10 @@ def build_hook_runner(
 
     if use_memory_store:
         ret_cfg = memory_cfg.get("retrieval", {})
-        memory_store = FastMemoryStore(memory_dir)
+        memory_store = FastMemoryStore(
+            memory_dir,
+            read_only=evaluation_requested and require_frozen_memory,
+        )
         os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] = str(memory_dir)
 
     if component_flags["fast_memory_retrieval"]:
@@ -3185,6 +3298,43 @@ def build_hook_runner(
     )
     config_hash = _stable_config_hash(cfg_dict)
     experiment_signature = _stable_experiment_signature(cfg_dict)
+    control_signature = (
+        _stable_control_signature(
+            cfg_dict,
+            controlled_dimension=evaluation_dimension,
+        )
+        if evaluation_requested
+        else experiment_signature
+    )
+    memory_identity = (
+        memory_store.snapshot_identity(refresh=True) if memory_store is not None else {}
+    )
+    pipeline_cfg = (cfg_dict.get("experiment", {}) or {}).get("pipeline", {}) or {}
+    resume_from_path = str(pipeline_cfg.get("resume_from_path") or "").strip()
+    shared_base_identity = (
+        _shared_base_scene_identity(resume_from_path, scene_index=scene_id)
+        if resume_from_path
+        else {}
+    )
+    evaluation_contract = (
+        {
+            "schema_version": "sceneexpert.memory_evaluation_contract.v1",
+            "pair_id": evaluation_pair_id,
+            "controlled_dimension": evaluation_dimension,
+            "arm": evaluation_arm,
+            "require_frozen_memory": require_frozen_memory,
+            "fast_memory_retrieval_enabled": component_flags["fast_memory_retrieval"],
+            "memory_writer_enabled": component_flags["memory_writer"],
+            "memory_read_only": bool(memory_store and memory_store.read_only),
+            "shared_base_identity": shared_base_identity,
+        }
+        if evaluation_requested
+        else {}
+    )
+    if evaluation_requested and not shared_base_identity.get("fingerprint"):
+        raise ValueError(
+            "Paired Memory evaluation requires a readable reused shared-base scene"
+        )
     trace_logger: TraceLogger | None = None
     if component_flags["trace"]:
         trace_logger = TraceLogger(
@@ -3194,6 +3344,7 @@ def build_hook_runner(
             experiment_name=cfg_dict.get("name", ""),
             config_hash=config_hash,
             experiment_signature=experiment_signature,
+            control_signature=control_signature,
             task_spec=task_spec.model_dump(mode="json", exclude_none=True),
             task_spec_status={
                 "source": (
@@ -3203,6 +3354,8 @@ def build_hook_runner(
             },
             code_provenance=collect_code_provenance(),
             component_flags=component_flags,
+            memory_identity=memory_identity,
+            evaluation_contract=evaluation_contract,
         )
 
     trajectory_collector: TrajectoryCollector | None = None
@@ -3247,6 +3400,9 @@ def build_hook_runner(
         experiment_name=cfg_dict.get("name", ""),
         config_hash=config_hash,
         experiment_signature=experiment_signature,
+        control_signature=control_signature,
+        memory_identity=memory_identity,
+        evaluation_contract=evaluation_contract,
         start_stage=start_stage,
         configured_stop_stage=stop_stage,
         allow_long_term_memory_updates=(stop_stage == GENERATION_TERMINAL_STAGE),
