@@ -2,8 +2,10 @@
 
 The LLM only proposes compact lessons. Deterministic code owns identity, task
 metadata, critic evidence, quality gates, provenance, and promotion into the
-active memory bank. A failed or empty LLM response is a no-write outcome; it
-can never manufacture a retrievable fallback record.
+active memory bank. A failed or empty LLM response can never manufacture a
+retrievable fallback record. Deterministic code may still persist a
+non-retrievable Skill candidate when an independently executed native stage has
+an authoritative pass and a grounded task contract.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ from scenesmith.scene_expert.memory.schemas import (
     SuccessCase,
     SuccessMemoryCandidate,
 )
+from scenesmith.scene_expert.memory.skill_bootstrap import bootstrap_grounded_skills
 from scenesmith.scene_expert.memory.skill_identity import build_skill_semantic_signature
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.schemas import FullVerifyReport
@@ -128,6 +131,9 @@ class MemoryWriter:
         temperature: float = 0.1,
         success_min_overall_score: float = SUCCESS_MEMORY_MIN_OVERALL_SCORE,
         skill_min_independent_support: int = 2,
+        skill_bootstrap_enabled: bool = True,
+        skill_bootstrap_max_candidates_per_scene: int = 5,
+        skill_bootstrap_min_procedure_steps: int = 2,
         debug_dir: str | Path | None = None,
         llm_client: SceneExpertStructuredLLMClient | None = None,
     ) -> None:
@@ -140,6 +146,27 @@ class MemoryWriter:
                 os.environ.get(
                     "SCENEEXPERT_SKILL_MIN_INDEPENDENT_SUPPORT",
                     skill_min_independent_support,
+                )
+            ),
+        )
+        self._skill_bootstrap_enabled = self._env_bool(
+            "SCENEEXPERT_SKILL_BOOTSTRAP_ENABLED", skill_bootstrap_enabled
+        )
+        self._skill_bootstrap_max_candidates_per_scene = max(
+            0,
+            int(
+                os.environ.get(
+                    "SCENEEXPERT_SKILL_BOOTSTRAP_MAX_CANDIDATES_PER_SCENE",
+                    skill_bootstrap_max_candidates_per_scene,
+                )
+            ),
+        )
+        self._skill_bootstrap_min_procedure_steps = max(
+            2,
+            int(
+                os.environ.get(
+                    "SCENEEXPERT_SKILL_BOOTSTRAP_MIN_PROCEDURE_STEPS",
+                    skill_bootstrap_min_procedure_steps,
                 )
             ),
         )
@@ -177,6 +204,11 @@ class MemoryWriter:
             "attempt_count": 0,
             "persisted_count": 0,
             "llm_skill_candidate_count": 0,
+            "bootstrap_skill_eligible_stage_count": 0,
+            "bootstrap_skill_candidate_count": 0,
+            "bootstrap_skill_persisted_candidate_count": 0,
+            "bootstrap_skill_rejected_count": 0,
+            "bootstrap_skill_decisions": [],
             "skill_persisted_candidate_count": 0,
             "skill_promoted_active_count": 0,
             "skill_rejected_count": 0,
@@ -219,6 +251,11 @@ class MemoryWriter:
         self.last_trace.update(
             {
                 "llm_skill_candidate_count": 0,
+                "bootstrap_skill_eligible_stage_count": 0,
+                "bootstrap_skill_candidate_count": 0,
+                "bootstrap_skill_persisted_candidate_count": 0,
+                "bootstrap_skill_rejected_count": 0,
+                "bootstrap_skill_decisions": [],
                 "skill_persisted_candidate_count": 0,
                 "skill_promoted_active_count": 0,
                 "skill_rejected_count": 0,
@@ -228,39 +265,24 @@ class MemoryWriter:
             }
         )
 
-        if not result.success or result.value is None:
-            self.last_trace.update(
-                {
-                    "structured_call_source": self.last_trace.get("source", ""),
-                    "source": "no_write",
-                    "write_status": "model_failure_no_write",
-                    "persisted_count": 0,
-                    "promoted_count": 0,
-                    "fallback_written": False,
-                }
-            )
-            self._save_debug_payload(
-                status="model_failure_no_write",
-                result_status=self.last_trace,
+        response = result.value if result.success and result.value is not None else None
+        llm_candidate_ops = (
+            self._response_to_ops(
+                response=response,
                 trace_summary=trace_summary,
                 full_report=full_report,
                 evidence_payload=evidence,
-                response=None,
-                result_ops=[],
             )
-            console_logger.warning(
-                "MemoryWriter structured output failed after %d attempts; "
-                "the active memory bank was not modified: %s",
-                len(result.attempts),
-                result.final_error or result.final_error_kind,
-            )
-            return []
-
-        candidate_ops = self._response_to_ops(
-            response=result.value,
+            if response is not None
+            else []
+        )
+        bootstrap_ops, bootstrap_decisions = self._bootstrap_skill_ops(
             trace_summary=trace_summary,
             full_report=full_report,
             evidence_payload=evidence,
+        )
+        candidate_ops = self._dedupe_candidate_ops(
+            [*llm_candidate_ops, *bootstrap_ops]
         )
         promoted_ops = self._gate_and_enrich_ops(
             candidate_ops,
@@ -283,11 +305,26 @@ class MemoryWriter:
                 rejection_reasons[reason_text] = (
                     int(rejection_reasons.get(reason_text, 0)) + 1
                 )
-        status = (
-            "promoted"
-            if active_promotion_ops
-            else "persisted_candidate" if mutating_ops else "no_valid_candidates"
+        structured_failure = response is None
+        if structured_failure and not mutating_ops:
+            status = "model_failure_no_write"
+        else:
+            status = (
+                "promoted"
+                if active_promotion_ops
+                else "persisted_candidate" if mutating_ops else "no_valid_candidates"
+            )
+        bootstrap_persisted = sum(
+            decision.get("decision") == "persisted_candidate"
+            and decision.get("source") == "deterministic"
+            for decision in skill_decisions
         )
+        bootstrap_rejected = sum(
+            decision.get("decision") == "rejected"
+            and decision.get("source") == "deterministic"
+            for decision in skill_decisions
+        )
+        structured_call_source = self.last_trace.get("source", "")
         self.last_trace.update(
             {
                 "write_status": status,
@@ -297,9 +334,32 @@ class MemoryWriter:
                 "candidate_counts": self._op_counts(candidate_ops),
                 "persisted_counts": self._op_counts(mutating_ops),
                 "promoted_counts": self._op_counts(active_promotion_ops),
-                "noop_reason": result.value.noop_reason,
+                "noop_reason": (
+                    response.noop_reason
+                    if response is not None
+                    else str(result.final_error or result.final_error_kind or "")
+                ),
                 "fallback_written": False,
-                "llm_skill_candidate_count": len(result.value.skills),
+                "llm_skill_candidate_count": (
+                    len(response.skills) if response is not None else 0
+                ),
+                "bootstrap_skill_eligible_stage_count": sum(
+                    1
+                    for stage in {
+                        str(decision.get("stage") or "")
+                        for decision in bootstrap_decisions
+                        if decision.get("decision") == "generated"
+                    }
+                    if stage
+                ),
+                "bootstrap_skill_candidate_count": sum(
+                    op.memory_type == "skill"
+                    and str(op.content.get("source") or "") == "deterministic"
+                    for op in candidate_ops
+                ),
+                "bootstrap_skill_persisted_candidate_count": bootstrap_persisted,
+                "bootstrap_skill_rejected_count": bootstrap_rejected,
+                "bootstrap_skill_decisions": bootstrap_decisions,
                 "skill_persisted_candidate_count": sum(
                     decision.get("decision") == "persisted_candidate"
                     for decision in skill_decisions
@@ -316,15 +376,35 @@ class MemoryWriter:
                 "skill_decisions": skill_decisions,
             }
         )
+        if structured_failure:
+            self.last_trace.update(
+                {
+                    "structured_call_source": structured_call_source,
+                    "source": (
+                        "deterministic_skill_bootstrap"
+                        if mutating_ops
+                        else "no_write"
+                    ),
+                    "degraded": True,
+                }
+            )
         self._save_debug_payload(
             status=status,
             result_status=self.last_trace,
             trace_summary=trace_summary,
             full_report=full_report,
             evidence_payload=evidence,
-            response=result.value,
+            response=response,
             result_ops=mutating_ops,
         )
+        if structured_failure:
+            console_logger.warning(
+                "MemoryWriter structured output failed after %d attempts; "
+                "persisted %d independently gated deterministic Skill candidate(s): %s",
+                len(result.attempts),
+                bootstrap_persisted,
+                result.final_error or result.final_error_kind,
+            )
         console_logger.info(
             "MemoryWriter: persisted %d/%d schema-valid candidates; fallback_written=false",
             len(mutating_ops),
@@ -356,6 +436,59 @@ class MemoryWriter:
             content = self._skill_content(candidate, context, full_report)
             ops.append(MemoryUpdateOp(op="ADD", memory_type="skill", content=content))
         return ops
+
+    def _bootstrap_skill_ops(
+        self,
+        *,
+        trace_summary: str,
+        full_report: FullVerifyReport,
+        evidence_payload: dict[str, Any],
+    ) -> tuple[list[MemoryUpdateOp], list[dict[str, Any]]]:
+        """Build candidate-only Skills for passing stages omitted by the LLM.
+
+        This is not a free-form fallback.  The pure bootstrapper requires proof
+        that the native stage agent ran, an exact-stage main-critic pass, and a
+        grounded task contract.  Store-level independent support is still
+        required before any resulting Skill becomes retrievable.
+        """
+        if not self._skill_bootstrap_enabled:
+            return [], [
+                {
+                    "stage": "*",
+                    "decision": "disabled",
+                    "reasons": ["skill_bootstrap_disabled"],
+                }
+            ]
+        result = bootstrap_grounded_skills(
+            evidence_payload,
+            max_candidates=self._skill_bootstrap_max_candidates_per_scene,
+            min_procedure_steps=self._skill_bootstrap_min_procedure_steps,
+        )
+        context = self._canonical_context(evidence_payload, trace_summary)
+        ops = [
+            MemoryUpdateOp(
+                op="ADD",
+                memory_type="skill",
+                content=self._skill_content(
+                    draft.candidate,
+                    context,
+                    full_report,
+                    source="deterministic",
+                    activation_reason=(
+                        "verified_stage_bootstrap_awaiting_independent_support"
+                    ),
+                    required_objects_override=list(draft.required_objects),
+                    relation_types_override=(
+                        []
+                        if list(draft.relation_types) == ["required_coverage"]
+                        else list(draft.relation_types)
+                    ),
+                    constraint_ids=set(draft.constraint_ids),
+                ),
+            )
+            for draft in result.drafts
+        ]
+        return ops, [dict(item) for item in result.decisions]
 
     def _success_content(
         self,
@@ -466,9 +599,46 @@ class MemoryWriter:
         candidate: SkillMemoryCandidate,
         context: dict[str, Any],
         full_report: FullVerifyReport,
+        *,
+        source: str = "llm",
+        activation_reason: str = "awaiting_independent_stage_support",
+        required_objects_override: list[str] | None = None,
+        relation_types_override: list[str] | None = None,
+        constraint_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         stage_evidence = self._stage_evidence(context, candidate.stage)
-        required_objects = self._required_objects(context["task_spec"], candidate.stage)
+        required_objects = (
+            self._clean_list(required_objects_override)
+            if required_objects_override is not None
+            else self._required_objects(context["task_spec"], candidate.stage)
+        )
+        spatial_relations = self._spatial_relations(
+            stage_evidence,
+            constraint_ids=constraint_ids,
+        )
+        if source == "deterministic":
+            spatial_relations = [
+                relation.model_copy(
+                    update={
+                        # Counts/groups are task instances, not reusable Skill
+                        # identity. Keep structural qualifiers and instruct the
+                        # Skill to consume the current task's cardinality.
+                        "cardinality": {
+                            key: value
+                            for key, value in relation.cardinality.items()
+                            if key in {"orientation", "edge_frame"}
+                        }
+                    }
+                )
+                for relation in spatial_relations
+            ]
+        relation_types = (
+            self._clean_list(relation_types_override)
+            if relation_types_override is not None
+            else self._unique(
+                relation.relation_type for relation in spatial_relations
+            )
+        )
         now = self._now()
         record = Skill(
             skill_name=candidate.skill_name,
@@ -478,7 +648,9 @@ class MemoryWriter:
             style=context["style"],
             required_objects=required_objects,
             functional_zones=context["functional_zones"],
-            scene_summary=f"Evidence-backed procedure from {context['trace_id']}.",
+            scene_summary=(
+                f"Evidence-backed {source} procedure from {context['trace_id']}."
+            ),
             preconditions=self._clean_list(candidate.preconditions),
             procedure=self._clean_list(candidate.procedure),
             failure_avoidance=self._clean_list(candidate.failure_avoidance),
@@ -490,7 +662,7 @@ class MemoryWriter:
             created_at=now,
             updated_at=now,
             status="candidate",
-            source="llm",
+            source=source,
             source_task_id=context["source_task_id"],
             source_run_id=context["source_run_id"],
             source_task_ids=[context["source_task_id"]],
@@ -499,11 +671,11 @@ class MemoryWriter:
             evidence_refs=self._evidence_refs(context, candidate.stage),
             critic_evidence=self._critic_evidence(stage_evidence),
             provenance=self._provenance(context, candidate.stage),
-            spatial_relations=self._spatial_relations(stage_evidence),
+            spatial_relations=spatial_relations,
             applicability=SkillApplicability(
                 room_types=[context["room_type"]] if context["room_type"] else [],
                 required_object_roles=required_objects,
-                required_relation_types=self._relation_types(stage_evidence),
+                required_relation_types=relation_types,
             ),
             skill_aliases=[candidate.skill_name],
             promotion_scope="stage",
@@ -512,7 +684,7 @@ class MemoryWriter:
             activation_min_independent_support=max(
                 2, int(getattr(self, "_skill_min_independent_support", 2))
             ),
-            activation_reason="awaiting_independent_stage_support",
+            activation_reason=activation_reason,
         )
         record = record.model_copy(
             update={"semantic_signature": build_skill_semantic_signature(record)}
@@ -635,6 +807,7 @@ class MemoryWriter:
                         {
                             "skill_name": str(op.content.get("skill_name") or ""),
                             "stage": str(op.content.get("stage") or ""),
+                            "source": str(op.content.get("source") or "unknown"),
                             "decision": "rejected",
                             "reasons": ["schema_invalid"],
                         }
@@ -647,21 +820,44 @@ class MemoryWriter:
                 deterministic_failure = self._deterministic_failure_in_evidence(
                     stage_evidence
                 )
+                execution_evidence = stage_evidence.get("execution_evidence") or {}
+                if not isinstance(execution_evidence, dict):
+                    execution_evidence = {}
+                stage_agent_invoked = bool(
+                    execution_evidence.get("stage_agent_invoked", False)
+                )
+                deterministic_bootstrap = bool(
+                    record.source == "deterministic"
+                    and record.activation_reason.startswith(
+                        "verified_stage_bootstrap"
+                    )
+                )
                 procedure_valid = len(self._clean_list(record.procedure)) >= 2
                 active_eligible = bool(
-                    full_report.pass_scene
+                    not deterministic_bootstrap
+                    and full_report.pass_scene
                     and full_report.overall_score >= success_threshold
                     and (not has_structured_evidence or stage_passed)
                     and procedure_valid
                     and not deterministic_failure
                 )
-                candidate_eligible = bool(
-                    has_structured_evidence
-                    and stage_report
-                    and (stage_passed or repair_verified)
-                    and procedure_valid
-                    and not deterministic_failure
-                )
+                if deterministic_bootstrap:
+                    candidate_eligible = bool(
+                        has_structured_evidence
+                        and stage_report
+                        and stage_passed
+                        and stage_agent_invoked
+                        and procedure_valid
+                        and not deterministic_failure
+                    )
+                else:
+                    candidate_eligible = bool(
+                        has_structured_evidence
+                        and stage_report
+                        and (stage_passed or repair_verified)
+                        and procedure_valid
+                        and not deterministic_failure
+                    )
                 if not active_eligible and not candidate_eligible:
                     reasons: list[str] = []
                     if not full_report.pass_scene:
@@ -674,6 +870,8 @@ class MemoryWriter:
                         reasons.append("stage_gate_failed")
                     if deterministic_failure:
                         reasons.append("deterministic_stage_failure")
+                    if deterministic_bootstrap and not stage_agent_invoked:
+                        reasons.append("stage_agent_not_proven_invoked")
                     if not procedure_valid:
                         reasons.append("procedure_too_short")
                     if not reasons:
@@ -683,6 +881,7 @@ class MemoryWriter:
                             "skill_name": record.skill_name,
                             "stage": record.stage,
                             "semantic_signature": record.semantic_signature,
+                            "source": record.source,
                             "decision": "rejected",
                             "reasons": reasons,
                         }
@@ -714,9 +913,13 @@ class MemoryWriter:
                             "success_rate": stage_quality,
                             "confidence": min(float(record.confidence), 0.75),
                             "activation_reason": (
-                                "verified_repair_awaiting_independent_support"
-                                if repair_verified and not stage_passed
-                                else "stage_pass_awaiting_independent_support"
+                                "verified_stage_bootstrap_awaiting_independent_support"
+                                if deterministic_bootstrap
+                                else (
+                                    "verified_repair_awaiting_independent_support"
+                                    if repair_verified and not stage_passed
+                                    else "stage_pass_awaiting_independent_support"
+                                )
                             ),
                         }
                     )
@@ -728,6 +931,7 @@ class MemoryWriter:
                         "skill_name": record.skill_name,
                         "stage": record.stage,
                         "semantic_signature": record.semantic_signature,
+                        "source": record.source,
                         "decision": decision,
                         "status": record.status,
                         "independent_support_count": record.independent_support_count,
@@ -738,6 +942,36 @@ class MemoryWriter:
                     }
                 )
         return filtered
+
+    @staticmethod
+    def _dedupe_candidate_ops(ops: list[MemoryUpdateOp]) -> list[MemoryUpdateOp]:
+        """Keep one same-scene Skill per deterministic semantic identity.
+
+        LLM operations are placed before bootstrap operations, so a grounded
+        model-authored procedure wins when both encode the same semantics.  A
+        deterministic draft still covers every omitted relation/coverage scope.
+        """
+        output: list[MemoryUpdateOp] = []
+        seen_skill_signatures: set[str] = set()
+        for op in ops:
+            if op.memory_type != "skill":
+                output.append(op)
+                continue
+            signature = str(op.content.get("semantic_signature") or "")
+            if not signature:
+                signature = hashlib.sha256(
+                    json.dumps(
+                        op.content,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    ).encode("utf-8")
+                ).hexdigest()
+            if signature in seen_skill_signatures:
+                continue
+            seen_skill_signatures.add(signature)
+            output.append(op)
+        return output
 
     @staticmethod
     def _op_counts(ops: list[MemoryUpdateOp]) -> dict[str, int]:
@@ -821,6 +1055,7 @@ class MemoryWriter:
         self,
         stage_evidence: dict[str, Any],
         focus_terms: list[str] | None = None,
+        constraint_ids: set[str] | None = None,
     ) -> list[SpatialRelationMemory]:
         """Extract only relations already grounded in the intent/critic trace."""
         context = dict(stage_evidence.get("relation_context") or {})
@@ -829,6 +1064,9 @@ class MemoryWriter:
         output: list[SpatialRelationMemory] = []
         for constraint in context.get("hard_constraints", []) or []:
             if not isinstance(constraint, dict):
+                continue
+            constraint_id = str(constraint.get("constraint_id") or "")
+            if constraint_ids is not None and constraint_id not in constraint_ids:
                 continue
             if focus_terms:
                 haystack = (
@@ -895,7 +1133,7 @@ class MemoryWriter:
                     target_role=self._selector_label(target),
                     cardinality=cardinality,
                     evidence_source=("critic" if report else "task_contract"),
-                    evidence_ref=str(constraint.get("constraint_id") or ""),
+                    evidence_ref=constraint_id,
                     geometry_verified=verified,
                     confidence=0.85 if verified else 0.6,
                 )
@@ -1203,6 +1441,13 @@ class MemoryWriter:
     def _compact_text(value: Any, max_chars: int) -> str:
         text = str(value or "")
         return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
+
+    @staticmethod
+    def _env_bool(name: str, default: bool) -> bool:
+        value = os.environ.get(name)
+        if value is None:
+            return bool(default)
+        return str(value).strip().casefold() not in {"0", "false", "no", "off", ""}
 
     @staticmethod
     def _now() -> str:

@@ -169,6 +169,13 @@ memory:
     # Stage-local Skill candidates remain non-retrievable until this many
     # distinct prompt/task identities provide compatible positive evidence.
     skill_min_independent_support: ${oc.env:SCENEEXPERT_SKILL_MIN_INDEPENDENT_SUPPORT,2}
+    # Deterministically cover verified passing stages when the MemoryWriter LLM
+    # omits a Skill. These records remain candidates until independently
+    # supported by another task; planner/retrieved-memory prose is never used
+    # as bootstrap evidence.
+    skill_bootstrap_enabled: ${oc.env:SCENEEXPERT_SKILL_BOOTSTRAP_ENABLED,true}
+    skill_bootstrap_max_candidates_per_scene: ${oc.env:SCENEEXPERT_SKILL_BOOTSTRAP_MAX_CANDIDATES_PER_SCENE,5}
+    skill_bootstrap_min_procedure_steps: ${oc.env:SCENEEXPERT_SKILL_BOOTSTRAP_MIN_PROCEDURE_STEPS,2}
   embedding:
     model_id: "${oc.env:SCENEEXPERT_MEMORY_EMBEDDING_MODEL_ID,BAAI/bge-m3}"
     # Actual local loading path. Keep BGE-M3 directly under models_dir/bge-m3.

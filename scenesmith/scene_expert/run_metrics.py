@@ -121,6 +121,10 @@ SCENE_COLUMNS = (
     "memory_writer_fallback_written",
     "memory_writer_degraded",
     "llm_skill_candidate_count",
+    "bootstrap_skill_eligible_stage_count",
+    "bootstrap_skill_candidate_count",
+    "bootstrap_skill_persisted_candidate_count",
+    "bootstrap_skill_rejected_count",
     "skill_persisted_candidate_count",
     "skill_promoted_active_count",
     "skill_rejected_count",
@@ -617,6 +621,18 @@ def _writer_metrics(
         "memory_writer_fallback_written": bool(status.get("fallback_written", False)),
         "memory_writer_degraded": bool(status.get("degraded", False)),
         "llm_skill_candidate_count": _as_int(status.get("llm_skill_candidate_count")),
+        "bootstrap_skill_eligible_stage_count": _as_int(
+            status.get("bootstrap_skill_eligible_stage_count")
+        ),
+        "bootstrap_skill_candidate_count": _as_int(
+            status.get("bootstrap_skill_candidate_count")
+        ),
+        "bootstrap_skill_persisted_candidate_count": _as_int(
+            status.get("bootstrap_skill_persisted_candidate_count")
+        ),
+        "bootstrap_skill_rejected_count": _as_int(
+            status.get("bootstrap_skill_rejected_count")
+        ),
         "skill_persisted_candidate_count": _as_int(
             status.get("skill_persisted_candidate_count")
         ),
@@ -1207,6 +1223,18 @@ def collect_run_metrics(
         "llm_skill_candidate_count": sum(
             row["llm_skill_candidate_count"] for row in scene_rows
         ),
+        "bootstrap_skill_eligible_stage_count": sum(
+            row["bootstrap_skill_eligible_stage_count"] for row in scene_rows
+        ),
+        "bootstrap_skill_candidate_count": sum(
+            row["bootstrap_skill_candidate_count"] for row in scene_rows
+        ),
+        "bootstrap_skill_persisted_candidate_count": sum(
+            row["bootstrap_skill_persisted_candidate_count"] for row in scene_rows
+        ),
+        "bootstrap_skill_rejected_count": sum(
+            row["bootstrap_skill_rejected_count"] for row in scene_rows
+        ),
         "skill_persisted_candidate_count": sum(
             row["skill_persisted_candidate_count"] for row in scene_rows
         ),
@@ -1423,6 +1451,10 @@ def _markdown(metrics: dict[str, Any]) -> str:
         "memory_writer_promoted_records",
         "memory_writer_persisted_records",
         "llm_skill_candidate_count",
+        "bootstrap_skill_eligible_stage_count",
+        "bootstrap_skill_candidate_count",
+        "bootstrap_skill_persisted_candidate_count",
+        "bootstrap_skill_rejected_count",
         "skill_persisted_candidate_count",
         "skill_promoted_active_count",
         "skill_rejected_count",

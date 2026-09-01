@@ -3157,6 +3157,24 @@ def build_hook_runner(
                 ),
                 2,
             ),
+            "skill_bootstrap_enabled": _cfg_bool(
+                (memory_cfg.get("writer", {}) or {}).get(
+                    "skill_bootstrap_enabled", True
+                ),
+                True,
+            ),
+            "skill_bootstrap_max_candidates_per_scene": _cfg_int(
+                (memory_cfg.get("writer", {}) or {}).get(
+                    "skill_bootstrap_max_candidates_per_scene", 5
+                ),
+                5,
+            ),
+            "skill_bootstrap_min_procedure_steps": _cfg_int(
+                (memory_cfg.get("writer", {}) or {}).get(
+                    "skill_bootstrap_min_procedure_steps", 2
+                ),
+                2,
+            ),
         }
         if component_flags["structured_llm"]:
             writer_role_cfg = (structured_llm_cfg.get("roles", {}) or {}).get(

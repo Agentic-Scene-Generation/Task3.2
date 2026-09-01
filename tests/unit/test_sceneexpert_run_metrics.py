@@ -81,6 +81,10 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
                     "promoted_count": 1,
                     "fallback_written": False,
                     "llm_skill_candidate_count": 1,
+                    "bootstrap_skill_eligible_stage_count": 1,
+                    "bootstrap_skill_candidate_count": 2,
+                    "bootstrap_skill_persisted_candidate_count": 2,
+                    "bootstrap_skill_rejected_count": 0,
                     "skill_persisted_candidate_count": 1,
                     "skill_promoted_active_count": 0,
                     "skill_rejected_count": 1,
@@ -326,6 +330,10 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
     assert metrics["summary"]["memory_writer_fallback_writes"] == 0
     assert metrics["summary"]["memory_writer_persisted_records"] == 1
     assert metrics["summary"]["llm_skill_candidate_count"] == 1
+    assert metrics["summary"]["bootstrap_skill_eligible_stage_count"] == 1
+    assert metrics["summary"]["bootstrap_skill_candidate_count"] == 2
+    assert metrics["summary"]["bootstrap_skill_persisted_candidate_count"] == 2
+    assert metrics["summary"]["bootstrap_skill_rejected_count"] == 0
     assert metrics["summary"]["skill_persisted_candidate_count"] == 1
     assert metrics["summary"]["skill_promoted_active_count"] == 0
     assert metrics["summary"]["skill_rejected_count"] == 1
