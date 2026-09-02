@@ -28,6 +28,11 @@ PAIR_ID="${PAIR_ID:-full_memory_pair_$(date +%Y%m%d_%H%M%S)}"
 # first/second-arm timing bias. Supported values: off_on, on_off.
 ARM_ORDER="${ARM_ORDER:-off_on}"
 
+# ``both`` preserves the original single-job workflow. The ACP wrappers use
+# the other actions so OFF and ON can run as separate jobs while sharing the
+# same pair contract and frozen bank. ``metrics`` performs no generation.
+PAIR_ACTION="${PAIR_ACTION:-both}"
+
 PYTHON_BIN="${PYTHON_BIN:-$PROJECT_ROOT/.venv/bin/python}"
 PAIR_METRICS_DIR="${PAIR_METRICS_DIR:-$PROJECT_ROOT/outputs/critic_probe/${PAIR_ID}_metrics}"
 
@@ -47,6 +52,10 @@ die() {
   die "PAIR_ID must be one directory name: $PAIR_ID"
 [[ "$ARM_ORDER" == "off_on" || "$ARM_ORDER" == "on_off" ]] || \
   die "ARM_ORDER must be off_on or on_off: $ARM_ORDER"
+case "$PAIR_ACTION" in
+  both|memory_off|memory_on|metrics) ;;
+  *) die "PAIR_ACTION must be both, memory_off, memory_on, or metrics: $PAIR_ACTION" ;;
+esac
 [[ -x "$PYTHON_BIN" ]] || die "PYTHON_BIN is not executable: $PYTHON_BIN"
 
 for required in \
@@ -63,10 +72,33 @@ BASELINE_RUN_ID="${PAIR_ID}_memory_off"
 TREATMENT_RUN_ID="${PAIR_ID}_memory_on"
 BASELINE_ROOT="$PROJECT_ROOT/outputs/critic_probe/$BASELINE_RUN_ID"
 TREATMENT_ROOT="$PROJECT_ROOT/outputs/critic_probe/$TREATMENT_RUN_ID"
-[[ ! -e "$BASELINE_ROOT" ]] || die "baseline output already exists: $BASELINE_ROOT"
-[[ ! -e "$TREATMENT_ROOT" ]] || die "treatment output already exists: $TREATMENT_ROOT"
-[[ ! -e "$PAIR_METRICS_DIR" ]] || \
-  die "paired metrics output already exists: $PAIR_METRICS_DIR"
+
+case "$PAIR_ACTION" in
+  both)
+    [[ ! -e "$BASELINE_ROOT" ]] || \
+      die "baseline output already exists: $BASELINE_ROOT"
+    [[ ! -e "$TREATMENT_ROOT" ]] || \
+      die "treatment output already exists: $TREATMENT_ROOT"
+    [[ ! -e "$PAIR_METRICS_DIR" ]] || \
+      die "paired metrics output already exists: $PAIR_METRICS_DIR"
+    ;;
+  memory_off)
+    [[ ! -e "$BASELINE_ROOT" ]] || \
+      die "baseline output already exists: $BASELINE_ROOT"
+    ;;
+  memory_on)
+    [[ ! -e "$TREATMENT_ROOT" ]] || \
+      die "treatment output already exists: $TREATMENT_ROOT"
+    ;;
+  metrics)
+    [[ -d "$BASELINE_ROOT" ]] || \
+      die "baseline output does not exist: $BASELINE_ROOT"
+    [[ -d "$TREATMENT_ROOT" ]] || \
+      die "treatment output does not exist: $TREATMENT_ROOT"
+    [[ ! -e "$PAIR_METRICS_DIR" ]] || \
+      die "paired metrics output already exists: $PAIR_METRICS_DIR"
+    ;;
+esac
 
 run_arm() {
   local arm="$1"
@@ -97,21 +129,41 @@ run_arm() {
     bash "$FULL_REUSE_LAUNCHER"
 }
 
-if [[ "$ARM_ORDER" == "off_on" ]]; then
-  run_arm memory_off false "$BASELINE_RUN_ID"
-  run_arm memory_on true "$TREATMENT_RUN_ID"
-else
-  run_arm memory_on true "$TREATMENT_RUN_ID"
-  run_arm memory_off false "$BASELINE_RUN_ID"
-fi
+generate_pair_metrics() {
+  "$PYTHON_BIN" -m scenesmith.scene_expert.paired_metrics \
+    --baseline "$BASELINE_ROOT" \
+    --treatment "$TREATMENT_ROOT" \
+    --output-dir "$PAIR_METRICS_DIR"
 
-"$PYTHON_BIN" -m scenesmith.scene_expert.paired_metrics \
-  --baseline "$BASELINE_ROOT" \
-  --treatment "$TREATMENT_ROOT" \
-  --output-dir "$PAIR_METRICS_DIR"
+  echo "========== FULL MEMORY PAIR COMPLETE =========="
+  echo "baseline_metrics=$BASELINE_ROOT/metrics/run_metrics.json"
+  echo "treatment_metrics=$TREATMENT_ROOT/metrics/run_metrics.json"
+  echo "paired_metrics=$PAIR_METRICS_DIR/paired_metrics.json"
+  echo "paired_report=$PAIR_METRICS_DIR/paired_metrics.md"
+}
 
-echo "========== FULL MEMORY PAIR COMPLETE =========="
-echo "baseline_metrics=$BASELINE_ROOT/metrics/run_metrics.json"
-echo "treatment_metrics=$TREATMENT_ROOT/metrics/run_metrics.json"
-echo "paired_metrics=$PAIR_METRICS_DIR/paired_metrics.json"
-echo "paired_report=$PAIR_METRICS_DIR/paired_metrics.md"
+case "$PAIR_ACTION" in
+  both)
+    if [[ "$ARM_ORDER" == "off_on" ]]; then
+      run_arm memory_off false "$BASELINE_RUN_ID"
+      run_arm memory_on true "$TREATMENT_RUN_ID"
+    else
+      run_arm memory_on true "$TREATMENT_RUN_ID"
+      run_arm memory_off false "$BASELINE_RUN_ID"
+    fi
+    generate_pair_metrics
+    ;;
+  memory_off)
+    run_arm memory_off false "$BASELINE_RUN_ID"
+    echo "OFF arm complete; run the ON ACP with the same pair configuration."
+    echo "baseline_metrics=$BASELINE_ROOT/metrics/run_metrics.json"
+    ;;
+  memory_on)
+    run_arm memory_on true "$TREATMENT_RUN_ID"
+    echo "ON arm complete; run PAIR_ACTION=metrics after the OFF arm is complete."
+    echo "treatment_metrics=$TREATMENT_ROOT/metrics/run_metrics.json"
+    ;;
+  metrics)
+    generate_pair_metrics
+    ;;
+esac
