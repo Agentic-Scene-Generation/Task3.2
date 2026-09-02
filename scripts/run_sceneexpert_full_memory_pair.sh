@@ -16,10 +16,12 @@ FULL_REUSE_LAUNCHER="${FULL_REUSE_LAUNCHER:-$PROJECT_ROOT/tmp/acp/acp_qwen38_ful
 SOURCE_RUN_ID="${SOURCE_RUN_ID:-}"
 REUSED_SHARED_BASE_ROOT="${REUSED_SHARED_BASE_ROOT:-}"
 
-# TODO(user): Use a populated memory bank prepared before this comparison. It
-# is opened read-only by SceneExpert in both arms; no record may be promoted or
-# receive utility updates during the pair.
+# TODO(user): Use the exact populated ``ablation_4c`` bank prepared before this
+# comparison. ``FROZEN_MEMORY_ROOT`` is its parent because Hydra appends the
+# experiment namespace to SCENEEXPERT_MEMORY_DIR. The exact bank is opened
+# read-only in both arms; no record may be promoted or receive utility updates.
 FROZEN_MEMORY_DIR="${FROZEN_MEMORY_DIR:-}"
+FROZEN_MEMORY_ROOT="${FROZEN_MEMORY_ROOT:-}"
 
 # TODO(user): Give every logical pair a unique, filesystem-safe ID.
 PAIR_ID="${PAIR_ID:-full_memory_pair_$(date +%Y%m%d_%H%M%S)}"
@@ -48,6 +50,15 @@ die() {
   die "set SOURCE_RUN_ID or REUSED_SHARED_BASE_ROOT"
 [[ -n "$FROZEN_MEMORY_DIR" && -d "$FROZEN_MEMORY_DIR" ]] || \
   die "FROZEN_MEMORY_DIR must be an existing memory bank"
+[[ "$(basename "$FROZEN_MEMORY_DIR")" == "ablation_4c" ]] || \
+  die "FROZEN_MEMORY_DIR must be the exact ablation_4c bank: $FROZEN_MEMORY_DIR"
+if [[ -z "$FROZEN_MEMORY_ROOT" ]]; then
+  FROZEN_MEMORY_ROOT="$(dirname "$FROZEN_MEMORY_DIR")"
+fi
+[[ -d "$FROZEN_MEMORY_ROOT" ]] || \
+  die "FROZEN_MEMORY_ROOT must be the parent of the frozen bank"
+[[ "$(readlink -f "$FROZEN_MEMORY_ROOT/ablation_4c")" == "$(readlink -f "$FROZEN_MEMORY_DIR")" ]] || \
+  die "FROZEN_MEMORY_ROOT/ablation_4c must resolve to FROZEN_MEMORY_DIR"
 [[ "$PAIR_ID" != */* && "$PAIR_ID" != "." && "$PAIR_ID" != ".." ]] || \
   die "PAIR_ID must be one directory name: $PAIR_ID"
 [[ "$ARM_ORDER" == "off_on" || "$ARM_ORDER" == "on_off" ]] || \
@@ -109,6 +120,7 @@ run_arm() {
   echo "pair_id=$PAIR_ID"
   echo "run_id=$run_id"
   echo "memory_bank=$FROZEN_MEMORY_DIR"
+  echo "memory_root=$FROZEN_MEMORY_ROOT"
   echo "fast_memory_retrieval=$retrieval_enabled"
   echo "memory_writer=false"
 
@@ -117,7 +129,7 @@ run_arm() {
     SOURCE_RUN_ID="$SOURCE_RUN_ID" \
     REUSED_SHARED_BASE_ROOT="$REUSED_SHARED_BASE_ROOT" \
     RUN_ID="$run_id" \
-    SCENEEXPERT_MEMORY_DIR="$FROZEN_MEMORY_DIR" \
+    SCENEEXPERT_MEMORY_DIR="$FROZEN_MEMORY_ROOT" \
     SCENEEXPERT_EXPERIMENT=ablation_5_qwen3_full \
     SCENEEXPERT_COMPONENT_FAST_MEMORY_RETRIEVAL_ENABLED="$retrieval_enabled" \
     SCENEEXPERT_COMPONENT_MEMORY_WRITER_ENABLED=false \

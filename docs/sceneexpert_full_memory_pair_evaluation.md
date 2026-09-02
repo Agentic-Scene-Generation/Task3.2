@@ -19,13 +19,20 @@ cd /mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2
 
 PAIR_ID=full_memory_sceneeval100_hard_v1 \
 SOURCE_RUN_ID=<生成_shared_base_的_run_id> \
-FROZEN_MEMORY_DIR=/mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2/outputs/scene_expert_memory/<bank_name> \
+FROZEN_MEMORY_ROOT=/mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2/outputs/scene_expert_memory/<frozen_snapshot_root> \
+FROZEN_MEMORY_DIR=/mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2/outputs/scene_expert_memory/<frozen_snapshot_root>/ablation_4c \
 CASE_SET=sceneeval100 \
 DIFFICULTY_SELECTION=hard \
 SCENE_SELECTION=all \
 ARM_ORDER=off_on \
 bash scripts/run_sceneexpert_full_memory_pair.sh
 ```
+
+`SCENEEXPERT_MEMORY_DIR` 是 Hydra 的 Memory 根目录；Full 模式会在其后自动
+追加 `ablation_4c`。因此 `FROZEN_MEMORY_ROOT` 必须是父目录，而
+`FROZEN_MEMORY_DIR` 必须是实际包含 `manifest.json` 与 JSONL 的
+`<root>/ablation_4c`。启动器会验证这两个目录的关系，避免重复追加或漏掉
+实验 namespace。
 
 启动器依次运行：
 
