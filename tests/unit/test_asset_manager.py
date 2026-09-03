@@ -801,6 +801,83 @@ class TestAssetManager(unittest.TestCase):
             [1.36, 0.53, 0.85],
         )
 
+    def test_direct_hssd_candidate_can_preserve_native_dimensions(self):
+        """The experiment switch must bypass local HSSD mesh fitting only."""
+        self.asset_manager.cfg.asset_manager.hssd.scale_to_requested_dimensions = (
+            False
+        )
+        request = AssetGenerationRequest(
+            object_descriptions=["Dining room sideboard"],
+            short_names=["sideboard"],
+            object_type=ObjectType.FURNITURE,
+            desired_dimensions=[[1.36, 0.53, 0.85]],
+        )
+        candidate = HssdRetrievalResult(
+            mesh_path=str(self.temp_dir / "sideboard.gltf"),
+            hssd_id="sideboard_mesh",
+            object_name="sideboard",
+            similarity_score=0.9,
+            size=(1.2, 0.47, 0.75),
+            category="sideboard",
+        )
+        config = self.asset_manager._create_asset_paths(
+            request.object_descriptions, request.short_names
+        )[0]
+        physics = MeshPhysicsAnalysis(
+            up_axis="+Y",
+            front_axis="+Z",
+            material="wood",
+            mass_kg=20.0,
+            mass_range_kg=[15.0, 25.0],
+            friction_coefficient=0.4,
+        )
+        bbox_min = np.array([-0.6, -0.235, 0.0])
+        bbox_max = np.array([0.6, 0.235, 0.75])
+        created = MagicMock(spec=SceneObject)
+
+        with (
+            patch.object(
+                self.asset_manager, "_analyze_mesh_physics", return_value=physics
+            ),
+            patch.object(
+                self.asset_manager,
+                "_override_hssd_asset_annotations",
+                return_value=physics,
+            ),
+            patch("scenesmith.agent_utils.asset_manager.canonicalize_mesh"),
+            patch.object(
+                self.asset_manager,
+                "_scale_and_measure_canonical_mesh",
+                return_value=(
+                    config.sdf_dir / "sideboard.gltf",
+                    bbox_min,
+                    bbox_max,
+                    1.0,
+                ),
+            ) as scale_mesh,
+            patch.object(
+                self.asset_manager, "_generate_collision_geometry", return_value=[]
+            ),
+            patch("scenesmith.agent_utils.asset_manager.generate_drake_sdf"),
+            patch.object(
+                self.asset_manager, "_create_scene_object", return_value=created
+            ) as create_scene_object,
+        ):
+            result = self.asset_manager._process_direct_hssd_candidate(
+                request=request,
+                index=0,
+                config=config,
+                candidate=candidate,
+            )
+
+        self.assertIs(result, created)
+        self.assertIsNone(scale_mesh.call_args.kwargs["desired_dimensions"])
+        kwargs = create_scene_object.call_args.kwargs
+        self.assertEqual(kwargs["scale_factor"], 1.0)
+        self.assertFalse(
+            kwargs["additional_metadata"]["requested_dimension_fit_applied"]
+        )
+
     def test_direct_hssd_rug_uses_planar_fit_and_static_covering_sdf(self):
         request = AssetGenerationRequest(
             object_descriptions=["Rectangular low-pile area rug"],

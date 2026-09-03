@@ -1471,6 +1471,7 @@ class BlenderRenderer(
         wall_surfaces: list[dict] | None = None,
         wall_surfaces_for_labels: list[dict] | None = None,
         room_bounds: tuple[float, float, float, float] | None = None,
+        room_local_footprint_vertices: list[list[float]] | None = None,
         ceiling_height: float | None = None,
         side_view_elevation_degrees: float | None = None,
         side_view_start_azimuth_degrees: float | None = None,
@@ -1518,6 +1519,8 @@ class BlenderRenderer(
                 Each dict contains wall_id, direction, length, height, transform,
                 and excluded_regions.
             room_bounds: Room XY bounds (min_x, min_y, max_x, max_y) for ceiling mode.
+            room_local_footprint_vertices: Ordered room-local XY floor boundary used
+                to filter coordinate markers, including concave cutouts.
             ceiling_height: Ceiling height in meters for ceiling mode.
 
         Returns:
@@ -1538,6 +1541,7 @@ class BlenderRenderer(
         self._wall_normals = wall_normals or {}
         self._show_support_surface = show_support_surface
         self._wall_surfaces_for_labels = wall_surfaces_for_labels
+        self._room_local_footprint_vertices = room_local_footprint_vertices
 
         # Process support surfaces if provided.
         if support_surfaces is not None and len(support_surfaces) > 0:
@@ -2011,6 +2015,7 @@ class BlenderRenderer(
                 wall_length=wall_length,
                 wall_height=wall_height,
                 wall_direction=wall_direction,
+                wall_transform=transform,
             )
 
             return  # Skip standard camera positioning for wall orthographic views.
@@ -2649,6 +2654,7 @@ class BlenderRenderer(
         self._show_support_surface = False
         self._scene_objects = None
         self._current_convex_hull = None
+        self._room_local_footprint_vertices = None
         self._current_surface_id = None
         self._overlay_mesh_objects = []
         self._surface_mesh_objects = []
@@ -2742,7 +2748,9 @@ class BlenderRenderer(
                     ]
                 )
             else:
-                continue
+                # Generic polygon wall: local +Y is outward, so the camera is
+                # placed on local -Y inside the room.
+                camera_pos = wall_center_world - rotation_matrix[:, 1] * camera_offset
 
             # Log positions for debugging.
             console_logger.info(
@@ -2849,6 +2857,27 @@ class BlenderRenderer(
         wall_origin = np.array(transform[:3])
         wall_dir = wall_direction.lower()
 
+        qw, qx, qy, qz = transform[3], transform[4], transform[5], transform[6]
+        rotation_matrix = np.array(
+            [
+                [
+                    1 - 2 * (qy**2 + qz**2),
+                    2 * (qx * qy - qw * qz),
+                    2 * (qx * qz + qw * qy),
+                ],
+                [
+                    2 * (qx * qy + qw * qz),
+                    1 - 2 * (qx**2 + qz**2),
+                    2 * (qy * qz - qw * qx),
+                ],
+                [
+                    2 * (qx * qz - qw * qy),
+                    2 * (qy * qz + qw * qx),
+                    1 - 2 * (qx**2 + qy**2),
+                ],
+            ]
+        )
+
         # Camera offset from wall center (inside room, looking at wall).
         # Use room_depth if available to avoid placing camera outside small rooms.
         room_depth = wall_surface.get("room_depth")
@@ -2897,14 +2926,9 @@ class BlenderRenderer(
             )
             look_dir = Vector((-1, 0, 0))
         else:
-            camera_pos = np.array(
-                [
-                    wall_center_world[0],
-                    wall_center_world[1] - camera_offset,
-                    wall_center_world[2],
-                ]
-            )
-            look_dir = Vector((0, 1, 0))
+            outward = rotation_matrix[:, 1]
+            camera_pos = wall_center_world - outward * camera_offset
+            look_dir = Vector(outward.tolist())
 
         # Debug logging.
         console_logger.info(
@@ -2935,8 +2959,7 @@ class BlenderRenderer(
             # Looking toward -X.
             camera_obj.rotation_euler = (math.pi / 2, 0, math.pi / 2)
         else:
-            # Fallback to north.
-            camera_obj.rotation_euler = (math.pi / 2, 0, math.pi)
+            look_at_target(camera_obj, Vector(wall_center_world.tolist()))
 
     def save_blend_file(self, params: RenderParams, output_path: Path) -> Path:
         """Save the scene as a .blend file.

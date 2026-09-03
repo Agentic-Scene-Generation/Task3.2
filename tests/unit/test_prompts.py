@@ -254,6 +254,7 @@ class TestPromptSystem(unittest.TestCase):
         stateful_prompt = prompt_manager.get_prompt(
             prompt_name=FurnitureAgentPrompts.STATEFUL_CRITIC_AGENT,
             scene_description="A modern living room",
+            asset_rescaling_enabled=True,
         )
         self.assertIsInstance(stateful_prompt, str)
         self.assertGreater(len(stateful_prompt), 100)
@@ -263,6 +264,7 @@ class TestPromptSystem(unittest.TestCase):
         rendered_prompt = prompt_manager.get_prompt(
             prompt_name=FurnitureAgentPrompts.STATEFUL_CRITIC_AGENT,
             scene_description="A modern living room with a sofa",
+            asset_rescaling_enabled=True,
         )
 
         self.assertIn("modern living room", rendered_prompt)
@@ -273,6 +275,7 @@ class TestPromptSystem(unittest.TestCase):
         prompt = prompt_registry.get_prompt(
             prompt_enum=FurnitureAgentPrompts.STATEFUL_CRITIC_AGENT,
             scene_description="Test living room",
+            asset_rescaling_enabled=True,
         )
 
         self.assertIsInstance(prompt, str)
@@ -283,6 +286,7 @@ class TestPromptSystem(unittest.TestCase):
             prompt_registry.validate_prompt_args(
                 prompt_enum=FurnitureAgentPrompts.STATEFUL_CRITIC_AGENT,
                 scene_description="test",
+                asset_rescaling_enabled=True,
             )
         )
 
@@ -299,6 +303,7 @@ class TestPromptSystem(unittest.TestCase):
             prompt_registry.validate_prompt_args(
                 prompt_enum=FurnitureAgentPrompts.STATEFUL_CRITIC_AGENT,
                 scene_description="test",
+                asset_rescaling_enabled=True,
                 extra="unexpected",  # Extra argument
             )
         )

@@ -23,6 +23,7 @@ from omegaconf import DictConfig
 from pydrake.all import RigidTransform, RollPitchYaw
 
 from scenesmith.agent_utils.asset_manager import AssetGenerationRequest
+from scenesmith.agent_utils.asset_scaling_policy import agent_rescale_tools_enabled
 from scenesmith.agent_utils.base_stateful_agent import (
     BaseStatefulAgent,
     HardStateEvaluation,
@@ -263,6 +264,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             tools=tools,
             prompt_enum=designer_prompt_enum,
             has_reference_image=self.context_image_path is not None,
+            asset_rescaling_enabled=agent_rescale_tools_enabled(self.cfg),
         )
 
     def _create_critic_tools(self) -> list[FunctionTool]:
@@ -313,6 +315,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             prompt_enum=critic_prompt_enum,
             output_type=FurnitureCritiqueWithScores,
             scene_description=original_task or scene.text_description,
+            asset_rescaling_enabled=agent_rescale_tools_enabled(self.cfg),
         )
 
     def _create_planner_agent(
@@ -586,9 +589,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 "; ".join(window_actions),
             )
 
-        seating_fixes = self._align_seating_with_hard_state_guard(
-            seating_orientation_targets(scene, config=self.cfg)
-        )
+        seating_fixes = self._align_seating_with_hard_state_guard()
         if seating_fixes:
             console_logger.info(
                 "Deterministic seating orientation guard before final critique: %s",
@@ -717,11 +718,17 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         """Get prompt kwargs for initial design instruction.
 
         Returns:
-            Dict with scene description and reference image flag.
+            Dict with scene description, room boundary, and reference image flag.
         """
+        room_geometry = self.scene.room_geometry
         return {
             "scene_description": self.scene.text_description,
             "has_reference_image": self.context_image_path is not None,
+            "room_length": room_geometry.length,
+            "room_width": room_geometry.width,
+            "room_local_footprint_vertices": (
+                room_geometry.room_local_footprint_vertices
+            ),
         }
 
     def _build_initial_design_input(self, instruction: str) -> str | list[dict]:
@@ -1145,9 +1152,13 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         if self.scene is None:
             return []
         critic_config = critic_config_from_any(self.cfg)
-        if not critic_config.enabled or not critic_config.metric_enabled(
-            "interaction_clearance"
-        ):
+        if not critic_config.enabled:
+            return []
+        if not critic_config.metric_enabled("interaction_clearance"):
+            return []
+        if not critic_config.auto_repair.should_repair("window_clearance"):
+            return []
+        if critic_config.auto_repair.max_repairs_per_call == 0:
             return []
         baseline = evaluate_room_scene(
             self.scene,
@@ -1166,10 +1177,11 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         current_baseline = baseline
         remaining_results = list(target_results)
         if service is not None:
+            target_limit = critic_config.auto_repair.max_repairs_per_call
             for target in sorted(
                 target_results,
                 key=lambda item: str(item.get("check_id") or ""),
-            ):
+            )[:target_limit]:
                 window_id = str(target.get("primary_object") or "")
                 check_id = str(target.get("check_id") or "")
                 if not window_id or not check_id:
@@ -1332,13 +1344,20 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         )
         return actions
 
-    def _align_seating_with_hard_state_guard(
-        self, allowed_targets_by_seat: dict[str, set[str]]
-    ) -> list[Any]:
+    def _align_seating_with_hard_state_guard(self) -> list[Any]:
         """Apply seating orientation only when it preserves all hard invariants."""
+        critic_config = critic_config_from_any(self.cfg)
+        if not critic_config.enabled or not critic_config.auto_repair.should_repair(
+            "seating_orientation"
+        ):
+            return align_seating_to_nearest_surface(self.scene, config=critic_config)
+        allowed_targets_by_seat = seating_orientation_targets(
+            self.scene, config=critic_config
+        )
         transaction = self._begin_hard_state_transaction()
         fixes = align_seating_to_nearest_surface(
             self.scene,
+            config=critic_config,
             allowed_targets_by_seat=allowed_targets_by_seat,
         )
         if fixes and not self._commit_hard_state_transaction(
@@ -1378,9 +1397,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         window_actions = (
             self._repair_substantial_window_clearance() if relation_fixes else []
         )
-        seating_fixes = self._align_seating_with_hard_state_guard(
-            seating_orientation_targets(self.scene, config=critic_config)
-        )
+        seating_fixes = self._align_seating_with_hard_state_guard()
         if not relation_fixes and not seating_fixes and not window_actions:
             return []
         if not self._commit_hard_state_transaction(
@@ -1702,9 +1719,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         window_actions = (
             self._repair_substantial_window_clearance() if relation_fixes else []
         )
-        seating_fixes = self._align_seating_with_hard_state_guard(
-            seating_orientation_targets(self.scene, config=critic_config)
-        )
+        seating_fixes = self._align_seating_with_hard_state_guard()
         if (
             relation_fixes or seating_fixes
         ) and not self._commit_hard_state_transaction(
@@ -1744,7 +1759,9 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         return removed
 
     def _converge_prompt_required_inventory(self, *, source: str) -> int:
-        """Remove prompt-counted duplicates independently of hard-check status."""
+        """Remove prompt-counted duplicates when deterministic repair is enabled."""
+        if not self._deterministic_repair_enabled():
+            return 0
         required_counts = self._repair_required_counts()
         removed = self._remove_excess_required_furniture(required_counts)
         if removed:

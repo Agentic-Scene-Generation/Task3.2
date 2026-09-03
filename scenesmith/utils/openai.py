@@ -3,9 +3,11 @@ import base64
 import contextvars
 import json
 import logging
+import os
 import re
 import sqlite3
 import threading
+import time
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -17,6 +19,8 @@ import numpy as np
 
 from openai import AsyncOpenAI, OpenAI
 from PIL import Image
+
+from scenesmith.agent_utils.thinking import openrouter_extra_body
 
 console_logger = logging.getLogger(__name__)
 
@@ -31,17 +35,17 @@ _reasoning_persistence_enabled = False
 _reasoning_persistence_provider = "disabled"
 
 
-def _resolve_persistence_provider(
+def resolve_reasoning_provider(
     provider: str,
     *,
     model_id: str | None,
     base_url: str | None,
 ) -> str:
-    """Resolve the response format used for passive reasoning persistence."""
+    """Resolve the provider contract used for reasoning requests/responses."""
     normalized = str(provider or "disabled").strip().lower()
     if normalized not in _VALID_PERSISTENCE_PROVIDERS:
         console_logger.warning(
-            "Unknown reasoning persistence provider %r; disabling persistence",
+            "Unknown reasoning provider %r; disabling provider-specific handling",
             provider,
         )
         return "disabled"
@@ -61,8 +65,8 @@ def _resolve_persistence_provider(
         return "openai"
 
     console_logger.warning(
-        "Could not unambiguously infer reasoning persistence provider "
-        "(model=%r, base_url=%r); disabling persistence",
+        "Could not unambiguously infer reasoning provider "
+        "(model=%r, base_url=%r); disabling provider-specific handling",
         model_id,
         base_url,
     )
@@ -87,7 +91,7 @@ def configure_reasoning_persistence(
     global _reasoning_persistence_enabled
     global _reasoning_persistence_provider
 
-    resolved = _resolve_persistence_provider(
+    resolved = resolve_reasoning_provider(
         provider,
         model_id=model_id,
         base_url=base_url,
@@ -110,6 +114,25 @@ def reasoning_persistence_enabled() -> bool:
 
 def reasoning_persistence_provider() -> str:
     return _reasoning_persistence_provider
+
+
+def should_use_reasoning_stream() -> bool:
+    """Check if streaming should be used to capture reasoning artifacts.
+
+    Controlled by SCENEEXPERT_REASONING_STREAM environment variable:
+    - "true": always use streaming
+    - "false": never use streaming
+    - "auto" or unset: auto-detect based on provider/model (default: false)
+
+    Currently only OpenRouter GPT-5.6 Luna Pro requires streaming to get reasoning.
+    """
+    env_value = os.environ.get("SCENEEXPERT_REASONING_STREAM", "false").strip().lower()
+    if env_value in ("true", "1", "yes", "on"):
+        return True
+    if env_value in ("false", "0", "no", "off"):
+        return False
+    # "auto" mode: could add model-specific detection here
+    return False
 
 
 @dataclass(frozen=True)
@@ -225,7 +248,10 @@ async def reasoning_persistence_context(
         return
 
     path = Path(db_path)
-    await asyncio.to_thread(_ensure_reasoning_schema, path, provider)
+    # These are tiny, bounded SQLite operations (1s busy timeout). Running them
+    # inline avoids an observed CPython/Blender runtime failure where
+    # ``asyncio.to_thread`` completes the worker call but never wakes the loop.
+    _ensure_reasoning_schema(path, provider)
     token = _reasoning_persistence_ctx.set(
         ReasoningPersistenceContext(session_id=session_id, db_path=path)
     )
@@ -378,20 +404,28 @@ def _extract_online_chat_records(
         if message is None:
             continue
         reasoning = _read_field(message, "reasoning")
+        reasoning_content = _read_field(message, "reasoning_content")
         reasoning_details = _read_field(message, "reasoning_details")
-        if not _has_meaningful_artifact(reasoning) and not _has_meaningful_artifact(
-            reasoning_details
+        if (
+            not _has_meaningful_artifact(reasoning)
+            and not _has_meaningful_artifact(reasoning_content)
+            and not _has_meaningful_artifact(reasoning_details)
         ):
             continue
 
         summary = (
             reasoning.strip()
             if isinstance(reasoning, str) and reasoning.strip()
-            else _extract_readable_text(reasoning_details)
+            else (
+                reasoning_content.strip()
+                if isinstance(reasoning_content, str) and reasoning_content.strip()
+                else _extract_readable_text(reasoning_details)
+            )
         )
         raw_json = _json_dumps(
             {
                 "reasoning": reasoning,
+                "reasoning_content": reasoning_content,
                 "reasoning_details": reasoning_details,
             }
         )
@@ -416,7 +450,11 @@ def _extract_online_chat_records(
                 source_type=(
                     f"{provider}_reasoning_details"
                     if reasoning_details is not None
-                    else f"{provider}_reasoning"
+                    else (
+                        f"{provider}_reasoning"
+                        if reasoning is not None
+                        else f"{provider}_reasoning_content"
+                    )
                 ),
                 model=model,
                 response_id=response_id,
@@ -586,7 +624,7 @@ async def _persist_response_async(
     session_id_override: str | None,
     capture_online: bool,
 ) -> None:
-    """Best-effort async response persistence without blocking the event loop."""
+    """Best-effort async response persistence with bounded SQLite writes."""
     try:
         ctx = _reasoning_persistence_ctx.get()
         if (
@@ -602,21 +640,268 @@ async def _persist_response_async(
         )
         session_id = session_id_override or ctx.session_id
         if qwen_records:
-            await asyncio.to_thread(
-                _write_qwen_records,
-                ctx.db_path,
-                session_id,
-                qwen_records,
-            )
+            _write_qwen_records(ctx.db_path, session_id, qwen_records)
         if online_records:
-            await asyncio.to_thread(
-                _write_online_records,
-                ctx.db_path,
-                session_id,
-                online_records,
-            )
+            _write_online_records(ctx.db_path, session_id, online_records)
     except Exception as exc:
         console_logger.warning("Reasoning persistence hook failed: %s", exc)
+
+
+class _ChatStreamAccumulator:
+    """Collect Chat Completions deltas without changing the client contract."""
+
+    def __init__(self) -> None:
+        self.reasoning_chunks: list[str] = []
+        self.reasoning_content_chunks: list[str] = []
+        self.reasoning_details: list[Any] = []
+        self.content_chunks: list[str] = []
+        self.tool_calls_buffer: dict[int, dict[str, Any]] = {}
+        self.finish_reason: str | None = None
+        self.native_finish_reason: str | None = None
+        self.usage: Any = None
+        self.response_id: str | None = None
+        self.model: str | None = None
+        self.role: str | None = None
+        self.created: int | None = None
+        self.system_fingerprint: str | None = None
+        self.service_tier: str | None = None
+
+    def consume(self, chunk: Any) -> None:
+        """Consume one OpenAI-compatible ChatCompletionChunk."""
+        if self.response_id is None:
+            self.response_id = _read_field(chunk, "id")
+        if self.model is None:
+            self.model = _read_field(chunk, "model")
+        if self.created is None:
+            created = _read_field(chunk, "created")
+            if created is not None:
+                self.created = int(created)
+        if self.system_fingerprint is None:
+            self.system_fingerprint = _read_field(chunk, "system_fingerprint")
+        if self.service_tier is None:
+            self.service_tier = _read_field(chunk, "service_tier")
+
+        choices = _read_field(chunk, "choices", []) or []
+        if choices:
+            choice = choices[0]
+            delta = _read_field(choice, "delta")
+            if delta is not None:
+                role = _read_field(delta, "role")
+                if role:
+                    self.role = str(role)
+
+                reasoning = _read_field(delta, "reasoning")
+                if isinstance(reasoning, str):
+                    self.reasoning_chunks.append(reasoning)
+                reasoning_content = _read_field(delta, "reasoning_content")
+                if isinstance(reasoning_content, str):
+                    self.reasoning_content_chunks.append(reasoning_content)
+                details = _read_field(delta, "reasoning_details")
+                if isinstance(details, list):
+                    self.reasoning_details.extend(_to_jsonable(details))
+                elif details is not None:
+                    self.reasoning_details.append(_to_jsonable(details))
+
+                content = _read_field(delta, "content")
+                if isinstance(content, str):
+                    self.content_chunks.append(content)
+
+                for tool_call in _read_field(delta, "tool_calls", []) or []:
+                    index = int(_read_field(tool_call, "index", 0) or 0)
+                    buffered = self.tool_calls_buffer.setdefault(
+                        index,
+                        {
+                            "id": "",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        },
+                    )
+                    tool_call_id = _read_field(tool_call, "id")
+                    if tool_call_id:
+                        buffered["id"] = str(tool_call_id)
+                    tool_call_type = _read_field(tool_call, "type")
+                    if tool_call_type:
+                        buffered["type"] = str(tool_call_type)
+                    function = _read_field(tool_call, "function")
+                    if function is not None:
+                        name = _read_field(function, "name")
+                        if name:
+                            buffered["function"]["name"] += str(name)
+                        arguments = _read_field(function, "arguments")
+                        if arguments:
+                            buffered["function"]["arguments"] += str(arguments)
+
+            finish_reason = _read_field(choice, "finish_reason")
+            if finish_reason:
+                self.finish_reason = str(finish_reason)
+            native_finish_reason = _read_field(choice, "native_finish_reason")
+            if native_finish_reason:
+                self.native_finish_reason = str(native_finish_reason)
+
+        usage = _read_field(chunk, "usage")
+        if usage is not None:
+            self.usage = usage
+
+    def build(self) -> Any:
+        """Return an actual OpenAI ChatCompletion for Agents SDK compatibility."""
+        from openai.types.chat import ChatCompletion
+
+        message: dict[str, Any] = {
+            "role": self.role or "assistant",
+            "content": "".join(self.content_chunks) or None,
+        }
+        reasoning = "".join(self.reasoning_chunks)
+        if reasoning:
+            message["reasoning"] = reasoning
+        reasoning_content = "".join(self.reasoning_content_chunks)
+        if reasoning_content:
+            message["reasoning_content"] = reasoning_content
+        if self.reasoning_details:
+            message["reasoning_details"] = self.reasoning_details
+        if self.tool_calls_buffer:
+            message["tool_calls"] = [
+                self.tool_calls_buffer[index]
+                for index in sorted(self.tool_calls_buffer)
+            ]
+
+        choice: dict[str, Any] = {
+            "index": 0,
+            "message": message,
+            "finish_reason": self.finish_reason,
+        }
+        if self.native_finish_reason is not None:
+            choice["native_finish_reason"] = self.native_finish_reason
+
+        response: dict[str, Any] = {
+            "id": self.response_id or "chatcmpl-stream-assembled",
+            "object": "chat.completion",
+            "created": self.created or int(time.time()),
+            "model": self.model or "unknown",
+            "choices": [choice],
+        }
+        if self.usage is not None:
+            response["usage"] = _to_jsonable(self.usage)
+        if self.system_fingerprint is not None:
+            response["system_fingerprint"] = self.system_fingerprint
+        if self.service_tier is not None:
+            response["service_tier"] = self.service_tier
+        return ChatCompletion.model_validate(response)
+
+
+def _assemble_stream_response(stream: Any) -> Any:
+    """Consume a sync stream and return a standard ChatCompletion."""
+    accumulator = _ChatStreamAccumulator()
+    for chunk in stream:
+        accumulator.consume(chunk)
+    return accumulator.build()
+
+
+async def _assemble_async_stream_response(stream: Any) -> Any:
+    """Consume an async stream and return a standard ChatCompletion."""
+    accumulator = _ChatStreamAccumulator()
+    async for chunk in stream:
+        accumulator.consume(chunk)
+    return accumulator.build()
+
+
+def _enable_reasoning_stream_options(kwargs: dict[str, Any]) -> None:
+    """Request usage in the final chunk while preserving caller options."""
+    stream_options = kwargs.get("stream_options")
+    if isinstance(stream_options, dict):
+        kwargs["stream_options"] = {**stream_options, "include_usage": True}
+    else:
+        kwargs["stream_options"] = {"include_usage": True}
+
+
+def _transient_stream_retry_delays() -> tuple[float, ...]:
+    """Return configured delays for retrying interrupted streamed responses.
+
+    The OpenAI SDK can retry failures that happen while opening a request, but
+    it cannot transparently replay a stream that is interrupted while its body
+    is being consumed.  Keep this opt-in so non-streaming and unrelated clients
+    retain their existing behavior.
+    """
+    raw = os.environ.get("SCENEEXPERT_OPENAI_TRANSIENT_RETRY_DELAYS", "").strip()
+    if not raw:
+        return ()
+
+    delays: list[float] = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            delay = float(item)
+        except ValueError:
+            console_logger.warning(
+                "Ignoring invalid OpenAI transient retry delay %r", item
+            )
+            continue
+        if delay < 0:
+            console_logger.warning(
+                "Ignoring negative OpenAI transient retry delay %r", item
+            )
+            continue
+        delays.append(delay)
+    return tuple(delays)
+
+
+def _is_transient_stream_error(error: BaseException) -> bool:
+    """Return whether replaying an interrupted model stream is safe to try."""
+    transient_names = {
+        "APIConnectionError",
+        "APITimeoutError",
+        "ConnectError",
+        "ConnectTimeout",
+        "ConnectionError",
+        "PoolTimeout",
+        "RateLimitError",
+        "ReadError",
+        "ReadTimeout",
+        "RemoteProtocolError",
+        "TimeoutError",
+        "WriteError",
+        "WriteTimeout",
+    }
+    current: BaseException | None = error
+    while current is not None:
+        if type(current).__name__ in transient_names:
+            return True
+        current = current.__cause__ or current.__context__
+
+    message = str(error).lower()
+    transient_markers = (
+        "incomplete chunked read",
+        "peer closed connection",
+        "connection reset",
+        "connection aborted",
+        "server disconnected",
+        "temporarily unavailable",
+        "timed out",
+        "timeout",
+        "rate limit",
+        "status code: 429",
+        "status_code=429",
+    )
+    return any(marker in message for marker in transient_markers)
+
+
+def _stream_retry_warning(
+    error: BaseException,
+    *,
+    attempt: int,
+    max_attempts: int,
+    delay: float,
+) -> None:
+    console_logger.warning(
+        "Transient OpenAI stream failure (%s: %s); retrying the same model "
+        "request in %.1fs (attempt %d/%d)",
+        type(error).__name__,
+        error,
+        delay,
+        attempt + 2,
+        max_attempts,
+    )
 
 
 class _SyncCompletionsWrapper:
@@ -632,7 +917,47 @@ class _SyncCompletionsWrapper:
         self._capture_online = capture_online
 
     def create(self, *args: Any, **kwargs: Any) -> Any:
-        response = self._completions.create(*args, **kwargs)
+        routed_extra_body = openrouter_extra_body(kwargs.get("extra_body"))
+        if routed_extra_body or "extra_body" in kwargs:
+            kwargs["extra_body"] = routed_extra_body
+        force_stream = (
+            should_use_reasoning_stream()
+            and kwargs.get("stream") is not True
+            and reasoning_persistence_enabled()
+            and reasoning_persistence_provider() == "openrouter"
+            and self._capture_online
+        )
+        if force_stream:
+            kwargs["stream"] = True
+            _enable_reasoning_stream_options(kwargs)
+            console_logger.debug(
+                "Forcing stream=True for reasoning extraction "
+                "(SCENEEXPERT_REASONING_STREAM=true)"
+            )
+            retry_delays = _transient_stream_retry_delays()
+            max_attempts = len(retry_delays) + 1
+            for attempt in range(max_attempts):
+                try:
+                    stream = self._completions.create(*args, **kwargs)
+                    response = _assemble_stream_response(stream)
+                    break
+                except Exception as exc:
+                    if (
+                        attempt >= len(retry_delays)
+                        or not _is_transient_stream_error(exc)
+                    ):
+                        raise
+                    delay = retry_delays[attempt]
+                    _stream_retry_warning(
+                        exc,
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        delay=delay,
+                    )
+                    time.sleep(delay)
+        else:
+            response = self._completions.create(*args, **kwargs)
+
         _persist_response_sync(
             response,
             api_kind="chat",
@@ -658,7 +983,46 @@ class _AsyncCompletionsWrapper:
         self._capture_online = capture_online
 
     async def create(self, *args: Any, **kwargs: Any) -> Any:
-        response = await self._completions.create(*args, **kwargs)
+        routed_extra_body = openrouter_extra_body(kwargs.get("extra_body"))
+        if routed_extra_body or "extra_body" in kwargs:
+            kwargs["extra_body"] = routed_extra_body
+        force_stream = (
+            should_use_reasoning_stream()
+            and kwargs.get("stream") is not True
+            and reasoning_persistence_enabled()
+            and reasoning_persistence_provider() == "openrouter"
+            and self._capture_online
+        )
+        if force_stream:
+            kwargs["stream"] = True
+            _enable_reasoning_stream_options(kwargs)
+            console_logger.debug(
+                "Forcing async stream=True for reasoning extraction "
+                "(SCENEEXPERT_REASONING_STREAM=true)"
+            )
+            retry_delays = _transient_stream_retry_delays()
+            max_attempts = len(retry_delays) + 1
+            for attempt in range(max_attempts):
+                try:
+                    stream = await self._completions.create(*args, **kwargs)
+                    response = await _assemble_async_stream_response(stream)
+                    break
+                except Exception as exc:
+                    if (
+                        attempt >= len(retry_delays)
+                        or not _is_transient_stream_error(exc)
+                    ):
+                        raise
+                    delay = retry_delays[attempt]
+                    _stream_retry_warning(
+                        exc,
+                        attempt=attempt,
+                        max_attempts=max_attempts,
+                        delay=delay,
+                    )
+                    await asyncio.sleep(delay)
+        else:
+            response = await self._completions.create(*args, **kwargs)
         await _persist_response_async(
             response,
             api_kind="chat",

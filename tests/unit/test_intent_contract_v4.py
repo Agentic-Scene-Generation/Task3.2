@@ -4567,6 +4567,32 @@ def test_intent_compiler_is_disabled_without_critic_request(
     assert result == ({}, {})
 
 
+def test_intent_compiler_config_uses_deterministic_contract_without_llm(
+    monkeypatch, tmp_path
+) -> None:
+    class UnexpectedCompiler:
+        def __init__(self, **_kwargs):
+            raise AssertionError("disabled intent compiler must not construct IntentCompiler")
+
+    monkeypatch.setattr(hooks, "IntentCompiler", UnexpectedCompiler)
+
+    contract, trace = hooks._compile_intent_contract_if_enabled(
+        prompt="A living room with a sofa facing a TV stand.",
+        scene_id=0,
+        output_dir=tmp_path,
+        cfg_dict={
+            "scenebenchmark_critic": {
+                "enabled": True,
+                "intent_compiler": {"enabled": False},
+            }
+        },
+    )
+
+    assert trace["status"] == "disabled"
+    assert trace["mode"] == "deterministic"
+    assert contract["prompt"] == "A living room with a sofa facing a TV stand."
+
+
 def test_intent_compiler_cache_uses_prompt_task_constraints_and_spec(
     monkeypatch, tmp_path
 ) -> None:

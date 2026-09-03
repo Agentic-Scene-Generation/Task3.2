@@ -252,6 +252,7 @@ early_finish_min_score: 7
 openai:
   model: ${llm.model_id}
   service_tier: ${openai.service_tier}
+  reasoning_provider: ${openai.reasoning_provider}
   vision_detail: "low"
   reasoning_effort:
     planner: "none"

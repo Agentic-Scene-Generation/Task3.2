@@ -2,12 +2,35 @@
 
 from __future__ import annotations
 
-from typing import Any
-
+import os
 import re
+
+from typing import Any
 
 
 NO_THINK_VALUES = ("", "none", "minimal", "off", "false", "0", "no_think", "nothink")
+ONLINE_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
+
+
+def openrouter_extra_body(extra_body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Merge optional OpenRouter provider routing into a request body.
+
+    ``SCENEEXPERT_OPENROUTER_PROVIDER_ONLY`` is a comma-separated list of
+    OpenRouter provider slugs.  Keeping this opt-in avoids leaking OpenRouter's
+    ``provider`` extension into local/OpenAI-compatible endpoints.
+    """
+    configured = os.environ.get("SCENEEXPERT_OPENROUTER_PROVIDER_ONLY", "")
+    only = [value.strip() for value in configured.split(",") if value.strip()]
+    if not only:
+        return extra_body if extra_body is not None else {}
+
+    merged = dict(extra_body or {})
+    existing = merged.get("provider")
+    routing = dict(existing) if isinstance(existing, dict) else {}
+    routing.setdefault("only", only)
+    routing.setdefault("allow_fallbacks", True)
+    merged["provider"] = routing
+    return merged
 
 
 def is_qwen38_model(model: Any) -> bool:
@@ -71,4 +94,16 @@ def responses_api_reasoning_effort(reasoning_effort: Any) -> str:
     value = str(reasoning_effort or "").strip().lower()
     if value in ("", "none", "off", "false", "0", "no_think", "nothink"):
         return "minimal"
+    return value
+
+
+def chat_api_reasoning_effort(reasoning_effort: Any) -> str | None:
+    """Normalize configured effort for online Chat Completions providers."""
+    value = str(reasoning_effort or "").strip().lower()
+    if not value:
+        return None
+    if value in ("off", "false", "0", "no_think", "nothink"):
+        return "none"
+    if value not in ONLINE_REASONING_EFFORTS:
+        raise ValueError(f"Unsupported Chat reasoning effort: {reasoning_effort!r}")
     return value

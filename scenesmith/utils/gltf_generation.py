@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Literal
 
 import numpy as np
+import trimesh
 
 from pygltflib import (
     ARRAY_BUFFER,
@@ -830,4 +831,54 @@ def create_floor_gltf(
         center_x=center_x,
         center_y=center_y,
         center_z=center_z,
+    )
+
+
+def create_polygon_floor_gltf(
+    vertices: list[tuple[float, float]],
+    triangles: list[tuple[int, int, int]],
+    thickness: float,
+    material: Material,
+    output_path: Path,
+    texture_scale: float = 0.5,
+) -> None:
+    """Create a watertight polygon floor prism with world-aligned UVs."""
+    count = len(vertices)
+    vertices_zup = np.array(
+        [[x, y, 0.0] for x, y in vertices] + [[x, y, -thickness] for x, y in vertices],
+        dtype=float,
+    )
+    faces: list[tuple[int, int, int]] = []
+    faces.extend(triangles)
+    faces.extend((c + count, b + count, a + count) for a, b, c in triangles)
+    for index in range(count):
+        following = (index + 1) % count
+        faces.append((index, index + count, following + count))
+        faces.append((index, following + count, following))
+
+    mesh = trimesh.Trimesh(vertices=vertices_zup, faces=faces, process=False)
+    mesh.fix_normals()
+    # Keep shared boundary vertices so the exported prism is topologically
+    # watertight. Floor UVs remain world-aligned in XY; the thin side band uses
+    # the same projection to avoid introducing UV-seam topology splits.
+    uvs = np.asarray(mesh.vertices[:, :2] / texture_scale, dtype=np.float32)
+
+    textures = material.get_all_textures()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_abs = output_path.resolve()
+
+    def relative_uri(texture_path: Path) -> str:
+        return Path(
+            os.path.relpath(texture_path.resolve(), output_abs.parent)
+        ).as_posix()
+
+    create_gltf_from_mesh_data(
+        vertices=zup_to_yup_transform(mesh.vertices),
+        normals=zup_to_yup_transform(mesh.vertex_normals),
+        uvs=uvs,
+        indices=mesh.faces.reshape(-1),
+        color_uri=relative_uri(textures["color"]),
+        normal_uri=relative_uri(textures["normal"]),
+        roughness_uri=relative_uri(textures["roughness"]),
+        output_path=output_path,
     )

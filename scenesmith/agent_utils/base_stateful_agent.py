@@ -32,6 +32,7 @@ from agents import (
 )
 from agents.memory.session import Session
 from agents.models.openai_provider import OpenAIProvider
+from agents.model_settings import Reasoning
 from omegaconf import DictConfig
 from openai import Timeout
 
@@ -61,7 +62,9 @@ from scenesmith.agent_utils.scoring import (
 from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
 from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
 from scenesmith.agent_utils.thinking import (
+    chat_api_reasoning_effort,
     chat_template_kwargs_from_effort,
+    openrouter_extra_body,
     prepend_text_thinking_directive,
     thinking_directive_from_effort,
 )
@@ -78,6 +81,7 @@ from scenesmith.utils.openai import (
     ReasoningPersistenceAsyncOpenAIClient,
     encode_image_to_base64,
     reasoning_persistence_context,
+    resolve_reasoning_provider,
 )
 
 console_logger = logging.getLogger(__name__)
@@ -1149,8 +1153,11 @@ class BaseStatefulAgent(ABC):
             "APITimeoutError",
             "APIConnectionError",
             "ReadTimeout",
+            "ReadError",
             "ConnectTimeout",
             "ConnectError",
+            "RemoteProtocolError",
+            "RateLimitError",
             "TimeoutError",
         }
         current: BaseException | None = error
@@ -1159,7 +1166,17 @@ class BaseStatefulAgent(ABC):
                 return True
             current = current.__cause__ or current.__context__
         text = str(error).lower()
-        return "timed out" in text or "timeout" in text
+        return any(
+            marker in text
+            for marker in (
+                "timed out",
+                "timeout",
+                "incomplete chunked read",
+                "peer closed connection",
+                "connection reset",
+                "rate limit",
+            )
+        )
 
     def _critic_render_profile_name(self, update_checkpoint: bool) -> str:
         if update_checkpoint and self._critic_fast_path_enabled(
@@ -1738,8 +1755,29 @@ class BaseStatefulAgent(ABC):
         effort = None
         if settings_key and hasattr(self.cfg.openai, "reasoning_effort"):
             effort = getattr(self.cfg.openai.reasoning_effort, settings_key, None)
-        # Qwen3.6 uses enable_thinking; Qwen3.8 uses reasoning_effort.
-        kwargs["extra_body"] = chat_template_kwargs_from_effort(effort, model=model)
+        request_provider = self._reasoning_request_provider()
+        if request_provider == "qwen":
+            # Qwen3.6 uses enable_thinking; Qwen3.8 uses reasoning_effort.
+            kwargs["extra_body"] = chat_template_kwargs_from_effort(
+                effort, model=model
+            )
+        elif request_provider == "openrouter":
+            normalized_effort = chat_api_reasoning_effort(effort)
+            if normalized_effort is not None:
+                # The Agents SDK serializes this as the top-level
+                # ``reasoning_effort`` Chat Completions parameter.  OpenRouter
+                # additionally needs ``include_reasoning`` to return the
+                # reasoning field instead of only billing/counting its tokens.
+                kwargs["reasoning"] = Reasoning(effort=normalized_effort)
+                kwargs["extra_body"] = openrouter_extra_body(
+                    {"include_reasoning": True}
+                )
+        elif request_provider == "openai":
+            normalized_effort = chat_api_reasoning_effort(effort)
+            if normalized_effort is not None:
+                # The Agents SDK maps this to Chat Completions'
+                # reasoning_effort request field.
+                kwargs["reasoning"] = Reasoning(effort=normalized_effort)
 
         # Add tool_choice to force specific tool call first.
         if tool_choice:
@@ -1750,6 +1788,14 @@ class BaseStatefulAgent(ABC):
             kwargs["parallel_tool_calls"] = parallel_tool_calls
 
         return ModelSettings(**kwargs) if kwargs else None
+
+    def _reasoning_request_provider(self) -> str:
+        """Resolve the configured reasoning request contract for this process."""
+        return resolve_reasoning_provider(
+            getattr(self.cfg.openai, "reasoning_provider", "qwen"),
+            model_id=getattr(self.cfg.openai, "model", None),
+            base_url=os.environ.get("OPENAI_BASE_URL"),
+        )
 
     def _get_agent_instructions(
         self, prompt_enum: Any, settings_key: str, **kwargs: Any
@@ -1762,7 +1808,11 @@ class BaseStatefulAgent(ABC):
         if hasattr(self.cfg, "openai") and hasattr(self.cfg.openai, "reasoning_effort"):
             effort = getattr(self.cfg.openai.reasoning_effort, settings_key, None)
         model = getattr(self.cfg.openai, "model", None)
-        directive = thinking_directive_from_effort(effort, model=model)
+        directive = (
+            thinking_directive_from_effort(effort, model=model)
+            if self._reasoning_request_provider() == "qwen"
+            else ""
+        )
         return prepend_text_thinking_directive(instructions, directive)
 
     def _create_designer_agent(

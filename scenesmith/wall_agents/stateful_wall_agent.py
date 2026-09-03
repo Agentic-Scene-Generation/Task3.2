@@ -20,6 +20,7 @@ from agents.run import RunResult
 from agents.tracing import custom_span
 from omegaconf import DictConfig
 
+from scenesmith.agent_utils.asset_scaling_policy import agent_rescale_tools_enabled
 from scenesmith.agent_utils.base_stateful_agent import (
     BaseStatefulAgent,
     log_agent_usage,
@@ -226,6 +227,7 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
             room_description=room_description,
             wall_count=len(self.wall_surfaces),
             required_wall_objects=self.required_wall_object_constraints,
+            asset_rescaling_enabled=agent_rescale_tools_enabled(self.cfg),
         )
 
     def _create_critic_tools(self) -> list[FunctionTool]:
@@ -274,6 +276,7 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
             room_description=room_description,
             wall_count=len(self.wall_surfaces),
             required_wall_objects=self.required_wall_object_constraints,
+            asset_rescaling_enabled=agent_rescale_tools_enabled(self.cfg),
         )
 
     def _build_scenebenchmark_critic_context(self) -> str | None:

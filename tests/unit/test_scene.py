@@ -61,6 +61,22 @@ class TestScene(unittest.TestCase):
         self.assertEqual(scene.room_geometry.sdf_path, self.floor_plan_path)
         self.assertEqual(scene.objects, {})
         self.assertEqual(scene.text_description, "")
+        self.assertEqual(scene.metadata, {})
+
+    def test_scene_metadata_checkpoint_round_trip_preserves_polygon_contract(self):
+        contract = {"schema_version": "scenesmith.intent_contract.v5"}
+        self.scene.metadata["scenebenchmark_intent_contract"] = contract
+        self.scene.floor_plan_mode = "polygon"
+        self.scene.tool_schema_version = 2
+
+        state = self.scene.to_state_dict()
+        restored = RoomScene(room_geometry=None, scene_dir=self.test_data_dir)
+        restored.restore_from_state_dict(state)
+
+        self.assertEqual(restored.metadata, state["metadata"])
+        self.assertEqual(restored.scenebenchmark_intent_contract, contract)
+        self.assertEqual(restored.floor_plan_mode, "polygon")
+        self.assertEqual(restored.tool_schema_version, 2)
 
     def test_add_object(self):
         """Test adding an object to the scene."""

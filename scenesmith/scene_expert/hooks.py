@@ -66,6 +66,11 @@ from scenesmith.scene_expert.trace_logger import TraceLogger, collect_code_prove
 from scenesmith.scene_expert.verifier import FullVerifier, StageVerifier
 from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.intent_compiler import IntentCompiler
+from scenesmith.scenebenchmark_critic.intent_contract import build_intent_contract
+from scenesmith.scenebenchmark_critic.intent_schema import (
+    INTENT_COMPILER_SPEC_VERSION,
+    INTENT_CONTRACT_SCHEMA_VERSION,
+)
 from scenesmith.scenebenchmark_critic.object_taxonomy import (
     canonical_object_category,
     categories_are_equivalent,
@@ -286,11 +291,57 @@ def _compile_intent_contract_if_enabled(
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
+    compiler_cfg = critic_config.intent_compiler
+    if not bool(compiler_cfg.get("enabled", True)):
+        # Keep the critic contract and downstream benchmark evaluation active,
+        # but avoid constructing the LLM-backed compiler.  This is useful for
+        # OpenAI-compatible relays that do not accept its strict JSON schema.
+        contract = build_intent_contract(
+            normalized_prompt,
+            room_type=str(task_spec_payload.get("room_type") or ""),
+            task_spec=task_spec_payload,
+        )
+        trace = {
+            "status": "disabled",
+            "mode": "deterministic",
+            "spec_version": INTENT_COMPILER_SPEC_VERSION,
+            "prompt_sha256": prompt_hash,
+            "normalized_task_spec": task_spec_payload,
+            "constraints": contract.get("constraints", []),
+            "warnings": contract.get("warnings", []),
+            "retry_count": 0,
+            "attempts": [],
+            "failure_reason": "IntentCompiler disabled by configuration",
+        }
+        trace_path = (
+            output_dir
+            / f"scene_{scene_id:03d}"
+            / "scene_expert"
+            / "trace"
+            / "intent_compiler.json"
+        )
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        trace_path.write_text(
+            json.dumps(trace, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+            newline="\n",
+        )
+        cfg_dict["_scenebenchmark_intent_contract"] = contract
+        cfg_dict["_scenebenchmark_intent_trace"] = trace
+        cfg_dict["_scenebenchmark_intent_cache_key"] = {
+            "prompt_sha256": prompt_hash,
+            "task_spec_sha256": task_spec_hash,
+                "spec_version": INTENT_COMPILER_SPEC_VERSION,
+                "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+            "mode": "deterministic",
+        }
+        return contract, trace
     cache_key = {
         "prompt_sha256": prompt_hash,
         "task_spec_sha256": task_spec_hash,
         "spec_version": IntentCompiler.SPEC_VERSION,
         "schema_version": IntentCompiler.SCHEMA_VERSION,
+        "mode": "llm",
     }
     cached_contract = cfg_dict.get("_scenebenchmark_intent_contract")
     cached_trace = cfg_dict.get("_scenebenchmark_intent_trace")
@@ -301,7 +352,6 @@ def _compile_intent_contract_if_enabled(
         and cached_key == cache_key
     ):
         return cached_contract, cached_trace
-    compiler_cfg = critic_config.intent_compiler
     compiler = IntentCompiler(
         model=_intent_compiler_model(cfg_dict),
         api_base_url=os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
@@ -1505,6 +1555,11 @@ class SceneExpertHookRunner:
             with layout_path.open(encoding="utf-8") as stream:
                 layout = HouseLayout.from_dict(json.load(stream), house_dir=scene_dir)
             deterministic = validate_floor_plan_reservations(layout, manifest)
+            if deterministic.advisories:
+                console_logger.warning(
+                    "Floor-plan reservation advisories accepted: %s",
+                    json.dumps(deterministic.advisories, sort_keys=True),
+                )
             if not deterministic.passed:
                 issue_types = [
                     str(issue.get("issue_type") or "reservation_failure")
@@ -2798,12 +2853,17 @@ def build_hook_runner(
         api_key=api_key,
         llm_client=structured_llm_client,
     )
+    floor_plan_reservation_cfg = _deep_merge_dicts(
+        root_se_cfg.get("floor_plan_reservations", {}),
+        se_cfg.get("floor_plan_reservations", {}),
+    )
     relation_projector = StageRelationProjector(
         floor_plan_reservation_gate_enabled=bool(
-            _deep_merge_dicts(
-                root_se_cfg.get("floor_plan_reservations", {}),
-                se_cfg.get("floor_plan_reservations", {}),
-            ).get("enabled", False)
+            floor_plan_reservation_cfg.get("enabled", False)
+        ),
+        prompt=prompt,
+        explicit_geometry_policy=dict(
+            floor_plan_reservation_cfg.get("explicit_geometry_policy", {}) or {}
         ),
     )
     repair_controller = RepairController(memory_store=memory_store)

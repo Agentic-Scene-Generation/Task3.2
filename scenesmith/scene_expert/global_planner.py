@@ -20,6 +20,7 @@ from typing import Any
 
 from scenesmith.agent_utils.thinking import (
     chat_template_kwargs_from_effort,
+    openrouter_extra_body,
     prepend_text_thinking_directive,
     thinking_directive_from_effort,
 )
@@ -30,6 +31,7 @@ from scenesmith.scene_expert.schemas import (
     SceneTaskSpec,
     StageBrief,
 )
+from scenesmith.utils.openai_strict_schema import make_openai_strict_json_schema
 
 console_logger = logging.getLogger(__name__)
 
@@ -633,9 +635,17 @@ def _add_floor_plan_reservation_guidance(
                 "side of a matching window for every strict next-to reservation; "
                 "doors and other openings cannot share that capacity"
             )
-        if zone_area:
+        if zone_area and (
+            not manifest.explicit_geometry.detected
+            or manifest.explicit_geometry.functional_zone_area_policy != "advisory"
+        ):
             details.append(
                 f"at least {zone_area:g} m2 total usable area for later functional zones"
+            )
+        elif zone_area:
+            details.append(
+                "the exact user-specified footprint is immutable; use functional "
+                "zones as a downstream layout advisory rather than enlarging it"
             )
         details.append(
             "an adaptive implicit-window budget of 1 for rooms up to 25 m2, "
@@ -866,7 +876,7 @@ class GlobalPlanner:
             original_task=original_task,
         )
 
-        if self._structured_llm is not None:
+        if getattr(self, "_structured_llm", None) is not None:
             result = self._structured_llm.complete(
                 role="global_planner",
                 stage=stage,
@@ -990,11 +1000,13 @@ class GlobalPlanner:
                         "json_schema": {
                             "name": "stage_brief",
                             "strict": True,
-                            "schema": StageBrief.model_json_schema(),
+                            "schema": make_openai_strict_json_schema(
+                                StageBrief.model_json_schema()
+                            ),
                         },
                     },
-                    extra_body=chat_template_kwargs_from_effort(
-                        "none", model=self._model
+                    extra_body=openrouter_extra_body(
+                        chat_template_kwargs_from_effort("none", model=self._model)
                     ),
                 )
                 response_elapsed_sec = round(time.perf_counter() - started_at, 6)

@@ -1,10 +1,15 @@
 name: "designer_agent"
 version: "1.0"
 description: "Ceiling decoration designer agent for ceiling-mounted object placement"
-template_variables: ["room_description", "room_width", "room_depth", "ceiling_height"]
+template_variables: ["room_description", "room_width", "room_depth", "ceiling_height", "asset_rescaling_enabled"]
 prompt: |
   You are an expert interior decorator specializing in ceiling fixtures with visual
   understanding of the space and knowledge of real-world interior environments.
+
+  {% if not asset_rescaling_enabled %}
+  Runtime ceiling-object rescaling is disabled. Never request a rescale tool; replace
+  or regenerate assets whose native dimensions are unsuitable.
+  {% endif %}
 
   # Room Context
   {{ room_description }}
@@ -146,9 +151,14 @@ prompt: |
   - Include material and approximate size
   - Generate new asset with improved description
   - Keep descriptions simple (avoid overly ornate descriptions)
+  {% if asset_rescaling_enabled %}
   - **When fixing size issues**: If proportions are correct but size is wrong,
     use `rescale_ceiling_object` instead of regenerating. Regenerate only when the
     shape or proportions are incorrect.
+  {% else %}
+  - **When fixing size issues**: Remove the unsuitable asset and retrieve or regenerate
+    a size-appropriate replacement; runtime scaling is unavailable.
+  {% endif %}
 
   # Collision Resolution Policy
 

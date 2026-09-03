@@ -5,6 +5,8 @@ import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+from openai.types.chat import ChatCompletion
+
 import scenesmith.utils.openai as openai_utils
 
 from scenesmith.utils.openai import (
@@ -58,6 +60,42 @@ def _async_client(response):
     return client
 
 
+class _AsyncChunkStream:
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    def __aiter__(self):
+        return self._iterate()
+
+    async def _iterate(self):
+        for chunk in self._chunks:
+            yield chunk
+
+
+class _InterruptedAsyncChunkStream:
+    def __aiter__(self):
+        return self._iterate()
+
+    async def _iterate(self):
+        yield {
+            "id": "chatcmpl-interrupted",
+            "created": 123,
+            "model": "openai/gpt-5.6-luna-pro",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"reasoning": "partial"},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        remote_protocol_error = type("RemoteProtocolError", (Exception,), {})
+        raise remote_protocol_error(
+            "peer closed connection without sending complete message body "
+            "(incomplete chunked read)"
+        )
+
+
 def _table_count(db_path, table: str) -> int:
     with sqlite3.connect(db_path) as conn:
         return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
@@ -65,6 +103,50 @@ def _table_count(db_path, table: str) -> int:
 
 def teardown_function():
     configure_reasoning_persistence(enabled=False, provider="disabled")
+
+
+def test_async_reasoning_stream_retries_interrupted_body(monkeypatch):
+    monkeypatch.setenv("SCENEEXPERT_REASONING_STREAM", "true")
+    monkeypatch.setenv("SCENEEXPERT_OPENAI_TRANSIENT_RETRY_DELAYS", "0")
+    configure_reasoning_persistence(enabled=True, provider="openrouter")
+
+    completed_stream = _AsyncChunkStream(
+        [
+            {
+                "id": "chatcmpl-retried",
+                "created": 124,
+                "model": "openai/gpt-5.6-luna-pro",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "reasoning": "complete reasoning",
+                            "content": "done",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            }
+        ]
+    )
+    raw_client = Mock()
+    raw_client.chat.completions.create = AsyncMock(
+        side_effect=[_InterruptedAsyncChunkStream(), completed_stream]
+    )
+    raw_client.responses.create = AsyncMock()
+    client = ReasoningPersistenceAsyncOpenAIClient(client=raw_client)
+
+    response = asyncio.run(
+        client.chat.completions.create(
+            model="openai/gpt-5.6-luna-pro",
+            messages=[{"role": "user", "content": "make a room"}],
+        )
+    )
+
+    assert raw_client.chat.completions.create.await_count == 2
+    assert response.id == "chatcmpl-retried"
+    assert response.choices[0].message.content == "done"
+    assert response.choices[0].message.reasoning == "complete reasoning"
 
 
 def test_extract_qwen_reasoning_fields_and_inline_content_without_mutation():
@@ -212,6 +294,32 @@ def test_openrouter_details_can_persist_raw_json_with_null_summary(tmp_path):
         ).fetchone()
     assert summary is None
     assert json.loads(raw_json)["reasoning_details"][0]["data"] == "opaque"
+
+
+def test_openrouter_reasoning_content_alias_is_persisted(tmp_path):
+    configure_reasoning_persistence(enabled=True, provider="openrouter")
+    response = _chat_response(
+        reasoning_content="Readable alias summary",
+        model="openai/gpt-5.2",
+    )
+    raw_client = _sync_client(response)
+    client = ReasoningPersistenceOpenAIClient(client=raw_client)
+    db_path = tmp_path / "designer.db"
+
+    async def run():
+        async with reasoning_persistence_context("designer", db_path):
+            client.chat.completions.create(model="openai/gpt-5.2")
+
+    asyncio.run(run())
+
+    with sqlite3.connect(db_path) as conn:
+        source_type, summary, raw_json = conn.execute(
+            "SELECT source_type, summary, raw_json "
+            "FROM agent_reasoning_artifacts"
+        ).fetchone()
+    assert source_type == "openrouter_reasoning_content"
+    assert summary == "Readable alias summary"
+    assert json.loads(raw_json)["reasoning_content"] == "Readable alias summary"
 
 
 def test_openai_responses_reasoning_summary_is_persisted(tmp_path):
@@ -448,3 +556,95 @@ def test_auto_provider_prioritizes_endpoint_and_fails_closed_when_unknown():
         )
         == "disabled"
     )
+
+
+def test_async_openrouter_reasoning_stream_returns_standard_chat_completion(
+    monkeypatch,
+):
+    configure_reasoning_persistence(
+        enabled=True,
+        provider="openrouter",
+        model_id="openai/gpt-5.6-luna-pro",
+        base_url="https://openrouter.ai/api/v1",
+    )
+    monkeypatch.setenv("SCENEEXPERT_REASONING_STREAM", "true")
+    chunks = [
+        {
+            "id": "chatcmpl-stream-test",
+            "created": 123,
+            "model": "openai/gpt-5.6-luna-pro",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "reasoning": "private ",
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "create_room",
+                                    "arguments": "{\"width\":",
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        },
+        {
+            "id": "chatcmpl-stream-test",
+            "created": 123,
+            "model": "openai/gpt-5.6-luna-pro",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "reasoning": "reasoning",
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "function": {"arguments": "2.5}"},
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+                "completion_tokens_details": {"reasoning_tokens": 3},
+            },
+        },
+    ]
+    raw_client = Mock()
+    raw_client.chat.completions.create = AsyncMock(
+        return_value=_AsyncChunkStream(chunks)
+    )
+    raw_client.responses.create = AsyncMock()
+    client = ReasoningPersistenceAsyncOpenAIClient(client=raw_client)
+
+    response = asyncio.run(
+        client.chat.completions.create(
+            model="openai/gpt-5.6-luna-pro",
+            messages=[{"role": "user", "content": "make a room"}],
+        )
+    )
+
+    assert isinstance(response, ChatCompletion)
+    assert response.created == 123
+    assert response.choices[0].finish_reason == "tool_calls"
+    assert response.choices[0].message.reasoning == "private reasoning"
+    tool_call = response.choices[0].message.tool_calls[0]
+    assert tool_call.id == "call-1"
+    assert tool_call.function.name == "create_room"
+    assert tool_call.function.arguments == '{"width":2.5}'
+    assert response.usage.completion_tokens_details.reasoning_tokens == 3
+    request_kwargs = raw_client.chat.completions.create.call_args.kwargs
+    assert request_kwargs["stream"] is True
+    assert request_kwargs["stream_options"] == {"include_usage": True}

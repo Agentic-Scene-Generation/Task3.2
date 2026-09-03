@@ -220,7 +220,7 @@ def improve_furniture_relations(
     config: CriticConfig | Any | None = None,
     max_repairs: int = 8,
     max_translation_m: float = 3.0,
-    max_candidate_evaluations: int = 64,
+    max_candidate_evaluations: int | None = None,
     allowed_relation_types: Collection[str] | None = None,
     candidate_validator: Callable[[RoomScene], bool] | None = None,
 ) -> list[FurnitureRelationFix]:
@@ -235,21 +235,29 @@ def improve_furniture_relations(
     critic_config = (
         config if isinstance(config, CriticConfig) else critic_config_from_any(config)
     )
-    if not critic_config.enabled or not critic_config.metric_enabled(
-        "functional_dependency"
-    ):
+    if not critic_config.enabled:
         return []
-
-    try:
-        configured_budget = int(
-            critic_config.extra.get(
-                "relation_repair_max_candidate_evaluations",
-                max_candidate_evaluations,
-            )
-        )
-    except (TypeError, ValueError):
-        configured_budget = max_candidate_evaluations
-    candidate_budget = max(1, configured_budget)
+    if not critic_config.metric_enabled("functional_dependency"):
+        return []
+    if not critic_config.auto_repair.should_repair("furniture_relations"):
+        return []
+    configured_budget = critic_config.auto_repair.furniture_relation_budget
+    if configured_budget is None:
+        configured_budget = critic_config.auto_repair.max_candidate_evaluations
+    if configured_budget is None and "relation_repair_max_candidate_evaluations" in critic_config.extra:
+        console_logger.warning("relation_repair_max_candidate_evaluations is deprecated; use auto_repair.furniture_relation_budget")
+        try:
+            configured_budget = int(critic_config.extra["relation_repair_max_candidate_evaluations"])
+        except (TypeError, ValueError):
+            configured_budget = None
+    candidate_budget = 64 if configured_budget is None else configured_budget
+    if max_candidate_evaluations is not None:
+        candidate_budget = min(candidate_budget, max_candidate_evaluations)
+    if candidate_budget == 0:
+        return []
+    repair_limit = max_repairs
+    if critic_config.auto_repair.max_repairs_per_call is not None:
+        repair_limit = min(repair_limit, critic_config.auto_repair.max_repairs_per_call)
     relation_allowlist = (
         None
         if allowed_relation_types is None
@@ -269,7 +277,7 @@ def improve_furniture_relations(
 
     candidate_evaluations = 0
     fixes: list[FurnitureRelationFix] = []
-    for _ in range(max_repairs):
+    for _ in range(repair_limit):
         baseline_payload = evaluate_for_repair()
         baseline_score = _score_payload(baseline_payload)
         accepted = False

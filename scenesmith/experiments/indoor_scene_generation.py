@@ -445,6 +445,12 @@ def _is_retryable_scene_failure(error: str) -> bool:
         "request timed out",
         "connection reset",
         "connection refused",
+        "rate limit",
+        "rate-limited",
+        "status code: 429",
+        "status_code=429",
+        "temporarily unavailable",
+        "upstream overloaded",
     )
     return any(marker in normalized for marker in transient_markers)
 
@@ -869,18 +875,28 @@ async def _apply_and_rescore_final_furniture_state(
 
 def _apply_final_furniture_guards(*, scene: RoomScene, cfg_dict: dict) -> None:
     """Apply the idempotent guard sequence used around canonical re-scoring."""
-    align_seating_to_nearest_surface(
-        scene,
-        allowed_targets_by_seat=seating_orientation_targets(scene, config=cfg_dict),
-    )
+    _apply_seating_orientation_guard(scene=scene, config=cfg_dict)
     if critic_config_from_any(cfg_dict).enabled:
         improve_storage_front_access(scene, config=cfg_dict)
         improve_furniture_relations(scene, config=cfg_dict)
 
     # Candidate evaluation can move a wall seat while testing a relation repair.
-    align_seating_to_nearest_surface(
+    _apply_seating_orientation_guard(scene=scene, config=cfg_dict)
+
+
+def _apply_seating_orientation_guard(*, scene: RoomScene, config: Any) -> list[Any]:
+    """Gate before target construction, which itself evaluates critic contracts."""
+    critic_config = critic_config_from_any(config)
+    if not critic_config.enabled or not critic_config.auto_repair.should_repair(
+        "seating_orientation"
+    ):
+        return align_seating_to_nearest_surface(scene, config=critic_config)
+    return align_seating_to_nearest_surface(
         scene,
-        allowed_targets_by_seat=seating_orientation_targets(scene, config=cfg_dict),
+        config=critic_config,
+        allowed_targets_by_seat=seating_orientation_targets(
+            scene, config=critic_config
+        ),
     )
 
 
@@ -1420,6 +1436,10 @@ def _generate_room(
         room_id=room_id,
         text_description=room_prompt,
         action_log_path=room_dir / "action_log.json",
+        floor_plan_mode=cfg_dict["floor_plan_agent"]["mode"],
+        tool_schema_version=(
+            2 if cfg_dict["floor_plan_agent"]["mode"] == "polygon" else 1
+        ),
     )
     intent_contract = cfg_dict.get("_scenebenchmark_intent_contract")
     if isinstance(intent_contract, dict) and intent_contract:
@@ -1920,10 +1940,7 @@ def _generate_room(
 
     # Final post-processing can be reached from a checkpoint resume. Reapply the
     # seating orientation guard so the final scene cannot inherit a backward seat.
-    align_seating_to_nearest_surface(
-        scene,
-        allowed_targets_by_seat=seating_orientation_targets(scene, config=cfg_dict),
-    )
+    _apply_seating_orientation_guard(scene=scene, config=cfg_dict)
 
     # Final post-processing (projection + simulation).
     if projection_cfg["enabled"] and projection_cfg["final"]["enabled"]:
@@ -2141,7 +2158,13 @@ def _generate_floor_plan_worker(
         console_logger.info(f"Floor plan worker started for scene: {scene_dir}")
 
         # Create trace metadata for this floor plan generation.
-        trace_metadata = {"scene_dir": scene_dir, "prompt": prompt}
+        floor_plan_mode = cfg_dict["floor_plan_agent"]["mode"]
+        trace_metadata = {
+            "scene_dir": scene_dir,
+            "prompt": prompt,
+            "floor_plan_mode": floor_plan_mode,
+            "tool_schema_version": 2 if floor_plan_mode == "polygon" else 1,
+        }
         if experiment_run_id:
             trace_metadata["experiment_run_id"] = experiment_run_id
 
@@ -2174,6 +2197,28 @@ def _generate_floor_plan_worker(
                     manifest_path = scene_path / "floor_plan_reservation_manifest.json"
                     with manifest_path.open("w", encoding="utf-8") as stream:
                         json.dump(reservation_manifest, stream, indent=2)
+                    from scenesmith.floor_plan_agents.reservation_validator import (
+                        validate_floor_plan_reservations,
+                    )
+
+                    reservation_validation = validate_floor_plan_reservations(
+                        house_layout, reservation_manifest
+                    )
+                    validation_path = (
+                        scene_path / "floor_plan_reservation_validation.json"
+                    )
+                    with validation_path.open("w", encoding="utf-8") as stream:
+                        json.dump(
+                            {
+                                "passed": reservation_validation.passed,
+                                "future_capacity": reservation_validation.future_capacity,
+                                "opening_budget": reservation_validation.opening_budget,
+                                "issues": reservation_validation.issues,
+                                "advisories": reservation_validation.advisories,
+                            },
+                            stream,
+                            indent=2,
+                        )
                 console_logger.info(f"Saved house layout to {house_layout_path}")
 
 
@@ -2251,6 +2296,10 @@ def _generate_room_worker(
             "experiment_name": cfg_dict["name"],
             "room_dir": str(room_dir_path),
             "room_prompt": room_prompt,
+            "floor_plan_mode": cfg_dict["floor_plan_agent"]["mode"],
+            "tool_schema_version": (
+                2 if cfg_dict["floor_plan_agent"]["mode"] == "polygon" else 1
+            ),
         }
         if experiment_run_id:
             trace_metadata["experiment_run_id"] = experiment_run_id
@@ -2306,6 +2355,8 @@ def _reconstruct_room_scene(worker_result: dict, scene_dir: Path) -> RoomScene:
         room_id=worker_result["room_id"],
         text_description=worker_result.get("text_description", ""),
         action_log_path=scene_dir / "action_log.json",
+        floor_plan_mode=scene_state.get("floor_plan_mode", "room"),
+        tool_schema_version=scene_state.get("tool_schema_version", 1),
     )
 
     # Restore objects and other state.
@@ -2412,6 +2463,9 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
 
     compatible_floor_plan_agents = {
         "stateful_floor_plan_agent": StatefulFloorPlanAgent,
+        # Dataset-specific Hydra profile. It inherits the stateful agent
+        # configuration and only switches the geometry mode/constraints.
+        "polygon_promptgen_v3_4": StatefulFloorPlanAgent,
     }
     compatible_furniture_agents = {
         "stateful_furniture_agent": StatefulFurnitureAgent,
@@ -2896,6 +2950,10 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                     "experiment_name": cfg_dict["name"],
                     "scene_dir": str(scene_dir),
                     "prompt": prompt,
+                    "floor_plan_mode": cfg_dict["floor_plan_agent"]["mode"],
+                    "tool_schema_version": (
+                        2 if cfg_dict["floor_plan_agent"]["mode"] == "polygon" else 1
+                    ),
                 }
                 if experiment_run_id:
                     trace_metadata["experiment_run_id"] = experiment_run_id

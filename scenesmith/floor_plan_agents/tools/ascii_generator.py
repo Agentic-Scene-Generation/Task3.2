@@ -6,7 +6,7 @@ room names, and wall segment labels for door/window placement.
 
 import logging
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from scenesmith.agent_utils.house import OpeningType, PlacedRoom, Wall, WallDirection
 from scenesmith.floor_plan_agents.tools.door_window_mixin import (
@@ -47,6 +47,9 @@ class AsciiFloorPlan:
     legend: str
     """Legend explaining wall labels."""
 
+    boundary_wall_ids: dict[str, str] = field(default_factory=dict)
+    """Stable label-to-wall mapping for polygon walls."""
+
 
 def generate_ascii_floor_plan(placed_rooms: list[PlacedRoom]) -> AsciiFloorPlan:
     """Generate ASCII floor plan from placed rooms.
@@ -58,7 +61,12 @@ def generate_ascii_floor_plan(placed_rooms: list[PlacedRoom]) -> AsciiFloorPlan:
         AsciiFloorPlan with ASCII art, labels, and legend.
     """
     if not placed_rooms:
-        return AsciiFloorPlan(ascii_art="(No rooms)", boundary_labels={}, legend="")
+        return AsciiFloorPlan(
+            ascii_art="(No rooms)",
+            boundary_labels={},
+            legend="",
+            boundary_wall_ids={},
+        )
 
     # Compute bounding box of all rooms.
     min_x = min(r.position[0] for r in placed_rooms)
@@ -83,7 +91,7 @@ def generate_ascii_floor_plan(placed_rooms: list[PlacedRoom]) -> AsciiFloorPlan:
         _draw_room(grid=grid, room=room, min_x=min_x, min_y=min_y, padding=padding)
 
     # Assign labels to walls/boundaries.
-    boundary_labels = _assign_boundary_labels(placed_rooms)
+    boundary_labels, boundary_wall_ids = _assign_boundary_data(placed_rooms)
 
     # Place labels on grid.
     _place_labels(
@@ -93,6 +101,7 @@ def generate_ascii_floor_plan(placed_rooms: list[PlacedRoom]) -> AsciiFloorPlan:
         min_x=min_x,
         min_y=min_y,
         padding=padding,
+        boundary_wall_ids=boundary_wall_ids,
     )
 
     # Convert grid to string (flip Y axis - grid[0] is top, but Y=0 is bottom).
@@ -100,12 +109,20 @@ def generate_ascii_floor_plan(placed_rooms: list[PlacedRoom]) -> AsciiFloorPlan:
     ascii_art = "\n".join(lines)
 
     # Generate legend.
-    legend = _generate_legend(
-        boundary_labels=boundary_labels, placed_rooms=placed_rooms
-    )
+    if any(room.footprint_vertices is not None for room in placed_rooms):
+        legend = _generate_polygon_legend(
+            placed_rooms=placed_rooms, boundary_wall_ids=boundary_wall_ids
+        )
+    else:
+        legend = _generate_legend(
+            boundary_labels=boundary_labels, placed_rooms=placed_rooms
+        )
 
     return AsciiFloorPlan(
-        ascii_art=ascii_art, boundary_labels=boundary_labels, legend=legend
+        ascii_art=ascii_art,
+        boundary_labels=boundary_labels,
+        legend=legend,
+        boundary_wall_ids=boundary_wall_ids,
     )
 
 
@@ -125,6 +142,16 @@ def _draw_room(
         min_y: Minimum Y coordinate of all rooms.
         padding: Grid padding.
     """
+    if room.footprint_vertices is not None:
+        _draw_polygon_room(
+            grid=grid,
+            room=room,
+            min_x=min_x,
+            min_y=min_y,
+            padding=padding,
+        )
+        return
+
     # Convert room coordinates to grid coordinates.
     x0 = int((room.position[0] - min_x) * CHARS_PER_METER_X) + padding
     x1 = int((room.position[0] + room.width - min_x) * CHARS_PER_METER_X) + padding
@@ -175,6 +202,45 @@ def _draw_room(
                 grid[center_y][col] = char
 
 
+def _draw_polygon_room(
+    grid: list[list[str]],
+    room: PlacedRoom,
+    min_x: float,
+    min_y: float,
+    padding: int,
+) -> None:
+    """Rasterize the exact polygon boundary without filling its AABB concavities."""
+    assert room.footprint_vertices is not None
+
+    def to_grid(point: tuple[float, float]) -> tuple[int, int]:
+        return (
+            int(round((point[0] - min_x) * CHARS_PER_METER_X)) + padding,
+            int(round((point[1] - min_y) * CHARS_PER_METER_Y)) + padding,
+        )
+
+    for wall in room.walls:
+        start_x, start_y = to_grid(wall.start_point)
+        end_x, end_y = to_grid(wall.end_point)
+        steps = max(abs(end_x - start_x), abs(end_y - start_y), 1)
+        char = HORIZONTAL if abs(end_x - start_x) >= abs(end_y - start_y) else VERTICAL
+        for step in range(steps + 1):
+            ratio = step / steps
+            x = int(round(start_x + (end_x - start_x) * ratio))
+            y = int(round(start_y + (end_y - start_y) * ratio))
+            if 0 <= y < len(grid) and 0 <= x < len(grid[0]):
+                grid[y][x] = CORNER if step in (0, steps) else char
+
+    from shapely.geometry import Polygon
+
+    representative = Polygon(room.footprint_vertices).representative_point()
+    name_x, name_y = to_grid((representative.x, representative.y))
+    start_x = name_x - len(room.room_id) // 2
+    for index, char in enumerate(room.room_id):
+        x = start_x + index
+        if 0 <= name_y < len(grid) and 0 <= x < len(grid[0]):
+            grid[name_y][x] = char
+
+
 def _extract_other_room_from_open_id(opening_id: str, current_room: str) -> str | None:
     """Extract the other room ID from an OPEN opening's ID.
 
@@ -222,7 +288,25 @@ def _assign_boundary_labels(
         For interior walls: room_b is the adjacent room, direction is None.
         For exterior walls: room_b is None, direction is wall facing (e.g., "north").
     """
+    labels, _ = _assign_boundary_data(placed_rooms)
+    return labels
+
+
+def _assign_boundary_data(
+    placed_rooms: list[PlacedRoom],
+) -> tuple[dict[str, tuple[str, str | None, str | None]], dict[str, str]]:
+    """Assign labels and stable wall IDs in one deterministic traversal."""
     labels: dict[str, tuple[str, str | None, str | None]] = {}
+    wall_ids: dict[str, str] = {}
+
+    if any(room.footprint_vertices is not None for room in placed_rooms):
+        for room in placed_rooms:
+            for index, wall in enumerate(room.walls):
+                label = f"W{index:02d}"
+                labels[label] = (room.room_id, None, None)
+                wall_ids[label] = wall.wall_id
+        return labels, wall_ids
+
     label_ord = ord("A")
 
     # Collect all unique boundaries.
@@ -242,6 +326,7 @@ def _assign_boundary_labels(
                         processed_pairs.add(pair)
             else:
                 # Exterior wall - track room and direction.
+                assert wall.direction is not None
                 key = (room.room_id, wall.direction.value)
                 if key not in processed_pairs:
                     exterior_boundaries.append((room.room_id, wall.direction))
@@ -257,7 +342,7 @@ def _assign_boundary_labels(
         labels[chr(label_ord)] = (room_id, None, direction.value)
         label_ord += 1
 
-    return labels
+    return labels, wall_ids
 
 
 def _place_labels(
@@ -267,6 +352,7 @@ def _place_labels(
     min_x: float,
     min_y: float,
     padding: int,
+    boundary_wall_ids: dict[str, str] | None = None,
 ) -> None:
     """Place boundary labels on the grid.
 
@@ -289,8 +375,15 @@ def _place_labels(
         target_wall = None
         for wall in room.walls:
             if room_b is None:
-                # Exterior wall - match by direction.
-                if wall.is_exterior and wall.direction.value == direction:
+                if boundary_wall_ids and boundary_wall_ids.get(label) == wall.wall_id:
+                    target_wall = wall
+                    break
+                # Exterior rectangle wall - match by direction.
+                if (
+                    wall.is_exterior
+                    and wall.direction is not None
+                    and wall.direction.value == direction
+                ):
                     target_wall = wall
                     break
             else:
@@ -313,8 +406,47 @@ def _place_labels(
         grid_x = max(0, min(grid_x, len(grid[0]) - 1))
         grid_y = max(0, min(grid_y, len(grid) - 1))
 
-        # Place label.
-        grid[grid_y][grid_x] = label
+        # Place the entire label; polygon labels use W00/W01/... rather than one char.
+        label_start = grid_x - len(label) // 2
+        for index, char in enumerate(label):
+            x = label_start + index
+            if 0 <= x < len(grid[0]):
+                grid[grid_y][x] = char
+
+
+def _generate_polygon_legend(
+    placed_rooms: list[PlacedRoom], boundary_wall_ids: dict[str, str]
+) -> str:
+    """Generate a direction-free legend for a single polygon room."""
+    from shapely.geometry import Polygon
+
+    room = placed_rooms[0]
+    assert room.footprint_vertices is not None
+    lines = [
+        f"Polygon room: {room.room_id}",
+        f"AABB: {room.width:.1f}m × {room.depth:.1f}m; "
+        f"floor area: {Polygon(room.footprint_vertices).area:.1f}m²",
+        "Exterior walls:",
+    ]
+    walls_by_id = {wall.wall_id: wall for wall in room.walls}
+    for label, wall_id in boundary_wall_ids.items():
+        wall = walls_by_id[wall_id]
+        lines.append(f"  {label}: {wall_id} ({wall.length:.1f}m)")
+
+    for wall in room.walls:
+        label = next(
+            (key for key, value in boundary_wall_ids.items() if value == wall.wall_id),
+            wall.wall_id,
+        )
+        for opening in wall.openings:
+            position = _get_position_description(
+                opening.position_along_wall + opening.width / 2, wall.length
+            )
+            lines.append(
+                f"  - {opening.opening_type.value} {opening.opening_id} on {label}: "
+                f"{opening.width:.1f}m × {opening.height:.1f}m, {position}"
+            )
+    return "\n".join(lines)
 
 
 def _get_position_description(position_along_wall: float, wall_length: float) -> str:

@@ -6,12 +6,18 @@ template_variables:
   - suggested_items
   - prompt_constraints
   - style_notes
+  - asset_rescaling_enabled
 
 prompt: |
   You are an expert interior designer specializing in evaluating manipuland
   (small object) placements on surfaces. Your role is to provide constructive,
   actionable critique that improves realism, functionality, and aesthetic quality of
   object arrangements.
+
+  {% if not asset_rescaling_enabled %}
+  Runtime manipuland rescaling is disabled. Report scale problems, but recommend
+  replacement or regeneration rather than a rescale tool.
+  {% endif %}
 
   Begin with a concise checklist (3-7 bullets) summarizing your evaluation approach.
   Example format:
@@ -160,9 +166,14 @@ prompt: |
 
   **Recommended Fix:**
   When scale is wrong, first determine if the shape/proportions are correct:
+  {% if asset_rescaling_enabled %}
   - **If proportions correct but size wrong**: Recommend `rescale_manipuland` on [object_id]
     with scale_factor=[value] (e.g., 0.8 for 20% smaller, 1.2 for 20% larger). This is faster
     than regeneration and preserves the object's design.
+  {% else %}
+  - **If size is wrong**: Recommend replacing or regenerating the asset with explicit
+    size constraints. Never recommend runtime rescaling.
+  {% endif %}
   - **If shape/proportions wrong**: Recommend regeneration with explicit size constraints based
     on what you observe in the render and how it compares to other objects on the surface.
 

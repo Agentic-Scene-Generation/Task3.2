@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import math
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -115,7 +115,8 @@ def improve_storage_front_access(
     config: CriticConfig | Any | None = None,
     max_translation_m: float = 1.0,
     step_m: float = 0.2,
-    max_candidate_evaluations: int = 32,
+    max_candidate_evaluations: int | None = None,
+    max_repairs: int | None = None,
     repair_degraded: bool = False,
 ) -> list[FurnitureAccessibilityFix]:
     """Move storage-like furniture laterally when front access is insufficient.
@@ -123,7 +124,26 @@ def improve_storage_front_access(
     Degraded access remains accepted by default.  Coordinated relation repairs
     can opt in to improving it when moving an anchor creates a new bottleneck.
     """
-    critic_config = _spatial_config(config)
+    base_config = critic_config_from_any(config) if config is not None else CriticConfig()
+    if not base_config.enabled:
+        return []
+    if not base_config.auto_repair.should_repair("storage_accessibility"):
+        return []
+    critic_config = _spatial_config(base_config)
+    configured_budget = critic_config.auto_repair.storage_accessibility_budget
+    if configured_budget is None:
+        configured_budget = critic_config.auto_repair.max_candidate_evaluations
+    if configured_budget is None and "accessibility_max_candidate_evaluations" in critic_config.extra:
+        console_logger.warning("accessibility_max_candidate_evaluations is deprecated; use auto_repair.storage_accessibility_budget")
+        try:
+            configured_budget = int(critic_config.extra["accessibility_max_candidate_evaluations"])
+        except (TypeError, ValueError):
+            configured_budget = None
+    candidate_budget = 32 if configured_budget is None else configured_budget
+    if max_candidate_evaluations is not None:
+        candidate_budget = min(candidate_budget, max_candidate_evaluations)
+    if candidate_budget == 0:
+        return []
     baseline_payload = _evaluate(scene, critic_config)
     baseline_score = _score_scene(baseline_payload)
     failing_subjects = _failing_storage_subjects(
@@ -138,32 +158,29 @@ def improve_storage_front_access(
     working_scene = scene
     working_payload = baseline_payload
     working_score = baseline_score
-    try:
-        candidate_budget = max(
-            1,
-            int(
-                critic_config.extra.get(
-                    "accessibility_max_candidate_evaluations",
-                    max_candidate_evaluations,
-                )
-            ),
-        )
-    except (TypeError, ValueError):
-        candidate_budget = max(1, max_candidate_evaluations)
-
-    for subject_id in failing_subjects:
+    repair_limit = max_repairs
+    if repair_limit is None:
+        repair_limit = len(failing_subjects)
+    if critic_config.auto_repair.max_repairs_per_call is not None:
+        repair_limit = min(repair_limit, critic_config.auto_repair.max_repairs_per_call)
+    candidate_evaluations = 0
+    for subject_id in failing_subjects[:repair_limit]:
         subject = working_scene.objects.get(UniqueID(subject_id))
         if subject is None:
             continue
-        best = _best_candidate(
+        remaining_budget = candidate_budget - candidate_evaluations
+        if remaining_budget <= 0:
+            break
+        best, evaluated = _best_candidate(
             working_scene,
             subject,
             current_score=working_score,
             config=critic_config,
             max_translation_m=max_translation_m,
             step_m=step_m,
-            max_candidate_evaluations=candidate_budget,
+            max_candidate_evaluations=remaining_budget,
         )
+        candidate_evaluations += evaluated
         if best is None:
             continue
         old_xy = tuple(float(v) for v in subject.transform.translation()[:2])
@@ -205,21 +222,13 @@ def improve_storage_front_access(
 
 def _spatial_config(config: CriticConfig | Any | None) -> CriticConfig:
     base = critic_config_from_any(config) if config is not None else CriticConfig()
-    extra = dict(base.extra)
-    return CriticConfig(
-        enabled=True,
+    return replace(
+        base,
         metrics=("spatial_accessibility", "functional_dependency"),
         room_stage_hooks=("scene_after_furniture",),
         house_stage_hooks=(),
-        inject_into_llm_critic=base.inject_into_llm_critic,
-        agent_prompt_context_filter_enabled=base.agent_prompt_context_filter_enabled,
-        agent_prompt_context_debug_write=base.agent_prompt_context_debug_write,
         hard_gate=False,
-        max_issues_for_prompt=base.max_issues_for_prompt,
-        fail_gate_threshold=base.fail_gate_threshold,
-        degraded_gate_threshold=base.degraded_gate_threshold,
-        asset_annotation=dict(base.asset_annotation),
-        extra=extra,
+        extra=dict(base.extra),
     )
 
 
@@ -276,10 +285,10 @@ def _best_candidate(
     max_translation_m: float,
     step_m: float,
     max_candidate_evaluations: int = 32,
-) -> _CandidateScore | None:
+) -> tuple[_CandidateScore | None, int]:
     directions = _candidate_directions(scene, subject)
     if not directions:
-        return None
+        return None, 0
 
     best: _CandidateScore | None = None
     candidate_evaluations = 0
@@ -325,10 +334,10 @@ def _best_candidate(
     )
 
     if best is None:
-        return None
+        return None, candidate_evaluations
     if not _beats_current(best, current_score):
-        return None
-    return best
+        return None, candidate_evaluations
+    return best, candidate_evaluations
 
 
 def _candidate_is_better(

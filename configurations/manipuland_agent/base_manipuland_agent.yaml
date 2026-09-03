@@ -284,6 +284,7 @@ collision_geometry:
 openai:
   model: ${llm.model_id}
   service_tier: ${openai.service_tier}
+  reasoning_provider: ${openai.reasoning_provider}
   # Vision detail level for image processing
   vision_detail: "low"
   # How much computational effort to spend on reasoning for different tasks.
@@ -348,9 +349,15 @@ loop_detection:
 # Maximum number of critique-and-improve rounds before stopping
 max_critique_rounds: 1
 
-# Process only the most valuable support surfaces by default. The previous
-# per-furniture loop could spend hours on every bed/wardrobe/nightstand.
+# Process only the most valuable furniture targets by default. Each selected
+# target may expose more than one extracted support surface to its agent run.
+# The previous loop could spend hours on every bed/wardrobe/nightstand.
 max_target_furniture: 2
+
+# Deterministic semantic repairs (for example, monitor orientation and dining
+# place-setting alignment) are separate from physical post-processing.
+code_level_auto_repair:
+  enabled: true
 
 # Optional exact-ID allowlist for targeted checkpoint replays. Empty keeps the
 # normal analyzer-selected behavior.

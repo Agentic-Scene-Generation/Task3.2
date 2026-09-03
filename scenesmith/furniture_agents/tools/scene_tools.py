@@ -26,6 +26,9 @@ from scenesmith.furniture_agents.tools.snapping_helpers import (
     resolve_collision_if_penetrating,
     select_and_execute_snap_algorithm,
 )
+from scenesmith.floor_plan_agents.tools.polygon_geometry import (
+    room_geometry_covers_object,
+)
 from scenesmith.utils.geometry_utils import (
     closest_point_on_aabb,
     compute_optimal_facing_yaw,
@@ -642,8 +645,29 @@ class SceneTools:
             cfg=self.cfg,
         )
         if isinstance(snap_result, str):
+            if self.scene.room_geometry.footprint_vertices is not None:
+                obj.transform = RigidTransform(original_rotation, original_pos)
             return snap_result
         movement_vector, distance = snap_result
+
+        candidate_position = obj.transform.translation() + movement_vector
+        candidate_transform = RigidTransform(
+            R=obj.transform.rotation(), p=candidate_position
+        )
+        if not room_geometry_covers_object(
+            self.scene.room_geometry, obj, transform=candidate_transform
+        ):
+            obj.transform = RigidTransform(original_rotation, original_pos)
+            return self._create_snap_error(
+                object_id=object_id,
+                target_id=target_id,
+                error_type=FurnitureErrorType.POSITION_OUT_OF_BOUNDS,
+                message=(
+                    "Snap would move the complete furniture footprint outside the "
+                    "polygon floor; the original transform was restored."
+                ),
+                suggested_action="Move the object farther inside before snapping.",
+            )
 
         # Check if already touching (distance < 1mm threshold).
         if distance < ALREADY_TOUCHING_THRESHOLD_M:
@@ -682,8 +706,8 @@ class SceneTools:
 
         # Create new transform (rotation may have been updated above).
         # Use current position (after collision resolution and orientation).
-        new_position = obj.transform.translation() + movement_vector
-        new_transform = RigidTransform(R=obj.transform.rotation(), p=new_position)
+        new_position = candidate_position
+        new_transform = candidate_transform
 
         opening_conflict = opening_clearance_conflict_for_transform(
             scene=self.scene,

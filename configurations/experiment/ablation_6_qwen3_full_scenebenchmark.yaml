@@ -1,0 +1,71 @@
+# Ablation 6: Ablation 5 + SceneBenchmark Critic injection (evaluate-only).
+#
+# Keeps the complete Qwen3 + SceneExpert + LoRA configuration from ablation_5,
+# then enables SceneBenchmark feedback in the existing Critic Agent prompt.
+# Critic-driven deterministic geometry repairs are disabled so this experiment
+# isolates feedback injection from code-level layout repair. The companion ACP
+# launcher supplies root-level furniture safety and dialogue-budget overrides,
+# because agent config groups do not inherit nested experiment YAML fields.
+#
+# Usage:
+#   python main.py experiment=ablation_6_qwen3_full_scenebenchmark \
+#                  furniture_agent.openai.model="Qwen/Qwen3-SceneExpert-LoRA"
+
+defaults:
+  - base_experiment
+
+# Preserve the retrieved HSSD mesh's native canonical dimensions. Requested
+# dimensions still participate in retrieval candidate ranking.
+hssd_scale_to_requested_dimensions: false
+
+# Preserve native HSSD dimensions and prevent all placement agents from
+# exposing runtime asset-rescale tools. Independent of furniture safety.
+asset_scaling:
+  enabled: false
+  hssd_dimension_fit_enabled: false
+  agent_rescale_tools_enabled: false
+
+scene_expert:
+  enabled: true
+  mode: "full"
+  # Enforce the future-capacity contract before furniture/wall stages.
+  floor_plan_reservations:
+    enabled: true
+    explicit_geometry_policy:
+      enabled: true
+      functional_zone_area: advisory
+      verify_geometry_match: true
+  memory:
+    dir: "${paths.memory_dir}/ablation_6"
+    retrieval:
+      max_success_cases: 3
+      max_failure_cases: 3
+      max_skills: 2
+  stage_budget:
+    default:
+      max_designer_iterations: 2
+      max_repair_steps: 1
+    manipuland:
+      max_designer_iterations: 2
+      max_repair_steps: 2
+  verifier:
+    stage_pass_threshold: 0.6
+    full_pass_threshold: 0.7
+
+scenebenchmark_critic:
+  enabled: true
+  metrics:
+    - functional_dependency
+    - spatial_accessibility
+    - interaction_clearance
+    - visual_clearance
+  inject_into_llm_critic: true
+  agent_prompt_context_filter_enabled: true
+  agent_prompt_context_debug_write: false
+  # The b01d06e compatibility layer emits strict OpenAI schemas for the CCWU
+  # relay while retaining llama.cpp's loose-schema mode for local Qwen calls.
+  intent_compiler:
+    enabled: true
+  # Keep evaluation and feedback injection, but skip all five Critic-driven
+  # deterministic repair executors.
+  auto_repair: false

@@ -92,6 +92,37 @@ class TestSceneTaskIsolation(unittest.TestCase):
         self.assertEqual(call_count, 1)
         self.assertFalse((self.output_dir / "failed_attempts").exists())
 
+    def test_openrouter_upstream_rate_limit_is_retried(self) -> None:
+        call_count = 0
+
+        def fake_run(tasks, max_workers, return_values=False):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return {
+                    tasks[0][0]: (
+                        False,
+                        "openai/gpt-5.6-luna-pro is temporarily rate-limited "
+                        "upstream. Please retry shortly.",
+                    )
+                }
+            return {tasks[0][0]: (True, None)}
+
+        with patch(
+            "scenesmith.experiments.indoor_scene_generation."
+            "run_parallel_isolated",
+            side_effect=fake_run,
+        ):
+            self.experiment._run_isolated_scene_generation(
+                prompts_with_ids=[(0, "A polygon bathroom")],
+                cfg_dict=self.cfg_dict,
+                experiment_run_id="test-run",
+                num_workers=1,
+                capture_logs=False,
+            )
+
+        self.assertEqual(call_count, 2)
+
     def test_worker_bootstrap_exit_one_is_not_retried(self) -> None:
         call_count = 0
 

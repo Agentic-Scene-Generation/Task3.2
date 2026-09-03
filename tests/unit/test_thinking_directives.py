@@ -8,6 +8,7 @@ sys.modules.setdefault(
 )
 
 from scenesmith.agent_utils.thinking import (
+    chat_api_reasoning_effort,
     chat_template_kwargs_from_effort,
     is_qwen38_model,
     prepend_text_thinking_directive,
@@ -17,6 +18,13 @@ from scenesmith.agent_utils.vlm_service import VLMService
 
 
 class ThinkingDirectivesTest(unittest.TestCase):
+    def test_online_chat_reasoning_effort_normalization(self) -> None:
+        self.assertEqual("high", chat_api_reasoning_effort("HIGH"))
+        self.assertEqual("none", chat_api_reasoning_effort("off"))
+        self.assertIsNone(chat_api_reasoning_effort(None))
+        with self.assertRaises(ValueError):
+            chat_api_reasoning_effort("unsupported")
+
     def test_agent_instruction_directive_mapping(self) -> None:
         self.assertEqual("/no_think", thinking_directive_from_effort("none"))
         self.assertEqual("/no_think", thinking_directive_from_effort("minimal"))
