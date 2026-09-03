@@ -3084,6 +3084,7 @@ def build_hook_runner(
     )
     if not use_memory_store:
         os.environ.pop("SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR", None)
+        os.environ.pop("SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY", None)
 
     memory_store: FastMemoryStore | None = None
     retriever: Any | None = None
@@ -3111,6 +3112,10 @@ def build_hook_runner(
             read_only=evaluation_requested and require_frozen_memory,
         )
         os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] = str(memory_dir)
+        if memory_store.read_only:
+            os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY"] = "true"
+        else:
+            os.environ.pop("SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY", None)
 
     if component_flags["fast_memory_retrieval"]:
         if memory_store is None:

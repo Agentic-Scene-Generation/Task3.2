@@ -242,7 +242,7 @@ class RepairController:
             repair_verified=repair_verified,
         )
 
-        if self._memory_store and repair_verified:
+        if self._memory_store and not self._memory_store.read_only and repair_verified:
             self._memory_store.append_event(
                 {
                     "schema_version": "sceneexpert.repair_evidence.v1",

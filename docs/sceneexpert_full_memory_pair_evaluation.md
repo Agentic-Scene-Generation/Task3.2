@@ -9,7 +9,8 @@ prompt、相同 shared base 和相同冻结 Memory bank 下，仅启用 Fast Mem
 - shared base 已完整生成，并可由 `tmp/acp/acp_qwen38_full_reuse.sh` 复用；
 - Memory bank 已预先建立，且包含 `manifest.json`、三个长期记忆 JSONL 和
   `events.jsonl`；
-- 评测期间不得由其他任务修改该 Memory bank；
+- 评测期间不得由其他任务修改该 Memory bank；运行时场景级审计继续写入各自
+  输出目录，不再回写冻结库的 `events.jsonl`；
 - 两臂使用相同的模型服务参数、case 选择和 stage policy。
 
 ## 最简命令
@@ -60,3 +61,9 @@ hard constraint 和 relation satisfaction 的逐 case delta，以及速度、cri
 非零配对样本数和符号检验结果判断证据强度；建议使用不同 `PAIR_ID` 重复
 运行，以评估模型采样波动，并在重复实验之间交替使用 `ARM_ORDER=off_on`
 与 `ARM_ORDER=on_off`，降低固定执行顺序对耗时结果的偏置。
+
+冻结快照的实验身份由 `manifest.json`、`success_cases.jsonl`、
+`failure_cases.jsonl` 和 `skills.jsonl` 共同定义。这四个文件会直接决定检索
+候选与注入内容。`events.jsonl` 仅为不可检索的历史审计日志：启动器仍要求
+它存在，但兼容旧快照时不会把其旧哈希漂移误判为检索内容污染。更新后的
+评测运行不会再向冻结库追加新事件。

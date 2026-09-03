@@ -825,7 +825,11 @@ class SceneExpertMemoryTest(unittest.TestCase):
             root = Path(tmp)
             public_dir = root / "scene_expert_memory" / "ablation_test"
             old_env = os.environ.get("SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR")
+            old_read_only_env = os.environ.get(
+                "SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY"
+            )
             os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] = str(public_dir)
+            os.environ.pop("SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY", None)
             try:
                 memory = StageWorkingMemory(
                     root_dir=root / "scene_000" / "room_bedroom",
@@ -848,6 +852,12 @@ class SceneExpertMemoryTest(unittest.TestCase):
                     os.environ.pop("SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR", None)
                 else:
                     os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] = old_env
+                if old_read_only_env is None:
+                    os.environ.pop("SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY", None)
+                else:
+                    os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY"] = (
+                        old_read_only_env
+                    )
 
             self.assertTrue((public_dir / "events.jsonl").exists())
             self.assertFalse((public_dir / "failure_cases.jsonl").exists())

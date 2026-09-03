@@ -8,7 +8,13 @@ from tempfile import TemporaryDirectory
 from scenesmith.scene_expert.memory.retriever import MemoryRetriever
 from scenesmith.scene_expert.memory.schemas import MemoryUpdateOp, SuccessCase
 from scenesmith.scene_expert.memory.store import FastMemoryStore
-from scenesmith.scene_expert.schemas import SceneTaskSpec
+from scenesmith.scene_expert.repair_controller import RepairController
+from scenesmith.scene_expert.schemas import (
+    RepairResult,
+    SceneTaskSpec,
+    StageVerifyReport,
+    VerifyIssue,
+)
 
 
 def _success(
@@ -79,6 +85,43 @@ class FastMemoryStoreV2Test(unittest.TestCase):
                 frozen.apply_updates([])
 
             self.assertEqual(before, frozen.snapshot_identity())
+
+    def test_verified_repair_does_not_write_to_read_only_bank(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            FastMemoryStore(temp_dir)
+            frozen = FastMemoryStore(temp_dir, read_only=True)
+            before = (frozen.memory_dir / "events.jsonl").read_bytes()
+            controller = RepairController(frozen)
+
+            candidate = controller.record_failure_to_memory(
+                stage="furniture",
+                room_type="classroom",
+                repair_result=RepairResult(
+                    repair_type="local_repair",
+                    failure_type="collision",
+                    repair_action="Move the desk away from the chair.",
+                    repair_verified=True,
+                    new_scene_state="",
+                ),
+                verify_report=StageVerifyReport(
+                    stage="furniture",
+                    pass_stage=False,
+                    issues=[
+                        VerifyIssue(
+                            issue_type="collision",
+                            object_name="desk",
+                            description="The desk overlaps a chair.",
+                        )
+                    ],
+                ),
+                repair_verified=True,
+            )
+
+            self.assertIsNotNone(candidate)
+            self.assertEqual(
+                before,
+                (frozen.memory_dir / "events.jsonl").read_bytes(),
+            )
 
     def test_manifest_is_initialized_and_one_batch_increments_once(self) -> None:
         with TemporaryDirectory() as temp_dir:
