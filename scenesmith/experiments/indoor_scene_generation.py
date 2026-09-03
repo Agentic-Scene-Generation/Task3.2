@@ -166,7 +166,7 @@ def _commit_scene_expert_stage(
             stage,
             retryable=result.retryable,
             reason=(
-                f"non-degradable structural blocker(s): "
+                f"non-degradable blocker(s): "
                 f"{', '.join(result.non_degradable_blockers)}"
             ),
         )
@@ -188,12 +188,12 @@ def _commit_scene_expert_stage(
 def _raise_for_non_degradable_final_blockers(
     report: "FullVerifyReport",
 ) -> None:
-    """Do not downgrade known structural geometry failures at finalization."""
+    """Do not downgrade typed hard blockers at finalization."""
     blockers = tuple(sorted(set(report.non_degradable_blockers)))
     if blockers:
         raise SceneQualityFailureError(
             "final_scene",
-            "SceneExpert final verification found non-degradable structural "
+            "SceneExpert final verification found non-degradable "
             f"blocker(s): {', '.join(blockers)}",
         )
 
@@ -488,7 +488,7 @@ def _scene_failure_record(error: Exception, *, attempt: int) -> dict[str, Any]:
     stage = str(getattr(error, "stage", "") or "unknown")
     recordable = False
     provenance: dict[str, Any] = {}
-    reason = ""
+    reason = "unclassified_runtime_failure"
     operation = ""
     root_error_type = ""
     root_error_message = ""

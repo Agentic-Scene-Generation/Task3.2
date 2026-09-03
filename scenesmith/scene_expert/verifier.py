@@ -30,9 +30,11 @@ from scenesmith.scenebenchmark_critic.relation_registry import (
 from scenesmith.scenebenchmark_critic.stage_ownership import (
     normalize_result_stage_ownership,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.intent_contract import (
+    SUPPORT_READINESS_FAILURE_CODE,
+)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_containment import (
     ROOM_CONTAINMENT_FAILURE_CODE,
-    is_room_containment_failure,
 )
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
@@ -341,23 +343,36 @@ def _deterministic_core_failures(payload: dict | None, stage: str) -> list[dict]
     return failures
 
 
-def _non_degradable_structural_blockers(
+def non_degradable_blocker_codes(
+    issues: list[VerifyIssue],
+) -> tuple[str, ...]:
+    """Return typed deterministic failures that degraded mode cannot accept."""
+    blockers: set[str] = set()
+    for issue in issues:
+        if (
+            issue.scoring_tier != "core"
+            or issue.issue_type != "deterministic_relation_failure"
+        ):
+            continue
+        if issue.relation == ROOM_CONTAINMENT_FAILURE_CODE:
+            blockers.add(ROOM_CONTAINMENT_FAILURE_CODE)
+        if issue.diagnostics.get("support_readiness") is True:
+            blockers.add(SUPPORT_READINESS_FAILURE_CODE)
+    return tuple(sorted(blockers))
+
+
+def _non_degradable_blockers(
     stage_reports: list[StageVerifyReport], payload: dict | None
 ) -> list[str]:
-    """Retain typed structural blockers across resumed-stage finalization."""
-    blockers = {
-        ROOM_CONTAINMENT_FAILURE_CODE
+    """Retain typed blockers across resumed-stage finalization."""
+    blockers: set[str] = set()
+    final_issues = [
+        _issue_from_deterministic_result(result)
         for result in _deterministic_core_failures(payload, "final")
-        if is_room_containment_failure(result)
-    }
+    ]
+    blockers.update(non_degradable_blocker_codes(final_issues))
     for report in stage_reports:
-        for issue in report.issues:
-            if (
-                issue.relation == ROOM_CONTAINMENT_FAILURE_CODE
-                and issue.scoring_tier == "core"
-                and issue.issue_type == "deterministic_relation_failure"
-            ):
-                blockers.add(ROOM_CONTAINMENT_FAILURE_CODE)
+        blockers.update(non_degradable_blocker_codes(report.issues))
     return sorted(blockers)
 
 
@@ -1035,7 +1050,7 @@ class FullVerifier:
         final_failures = _deterministic_core_failures(
             deterministic_critic_payload, "final"
         )
-        non_degradable_blockers = _non_degradable_structural_blockers(
+        non_degradable_blockers = _non_degradable_blockers(
             stage_reports, deterministic_critic_payload
         )
         deterministic_pass = (

@@ -57,6 +57,7 @@ from scenesmith.scenebenchmark_critic.object_taxonomy import generation_owner
 
 
 _ENTRANCE_CATEGORIES = frozenset({"door", "entrance", "entry"})
+SUPPORT_READINESS_FAILURE_CODE = "support_readiness"
 _VIRTUAL_ROUTE_CATEGORIES = frozenset(
     {
         "access_route",
@@ -528,7 +529,7 @@ def _evaluate_support_readiness(
                 label=label,
                 primary=target_id,
                 related=[],
-                relation_type="support_readiness",
+                relation_type=SUPPORT_READINESS_FAILURE_CODE,
                 tier="core" if label != "unknown" else "auxiliary",
                 reason=reason,
                 diagnostics={

@@ -423,6 +423,41 @@ class TestSceneTaskIsolation(unittest.TestCase):
             )
         )
 
+    def test_unclassified_runtime_failure_has_valid_nonempty_reason(self) -> None:
+        failure = scene_generation._scene_failure_record(
+            RuntimeError("support surface extraction failed"), attempt=1
+        )
+        payload = {
+            "schema_version": "scenesmith.scene_status.v3",
+            "scene_id": 7,
+            "status": "failed",
+            "attempt": 1,
+            "run_id": "current-run",
+            "failure": failure,
+        }
+
+        validated, validation_error = scene_generation._validated_scene_failure(
+            payload,
+            scene_id=7,
+            attempt=1,
+            run_id="current-run",
+        )
+
+        self.assertEqual(validation_error, "")
+        self.assertIsNotNone(validated)
+        self.assertEqual(failure["reason"], "unclassified_runtime_failure")
+        self.assertEqual(failure["failure_class"], "scene_runtime_failure")
+        self.assertFalse(failure["recordable"])
+        self.assertFalse(
+            scene_generation._is_retryable_scene_failure(
+                payload,
+                scene_id=7,
+                attempt=1,
+                retry_budget=1,
+                run_id="current-run",
+            )
+        )
+
     def test_retry_gate_rejects_stale_or_mismatched_structured_status(self) -> None:
         failure = scene_generation._worker_failure_record(
             "APITimeoutError: request timed out",

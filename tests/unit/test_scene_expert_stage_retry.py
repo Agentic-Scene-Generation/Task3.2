@@ -261,9 +261,10 @@ def test_full_verifier_fails_fresh_final_deterministic_payload() -> None:
     assert not report.pass_scene
 
 
-def test_final_room_containment_blocker_survives_resumed_stage_filtering() -> None:
-    payload = {
-        "results": [
+@pytest.mark.parametrize(
+    ("result", "expected_blocker"),
+    [
+        (
             {
                 "check_id": "room_containment__cabinet_0",
                 "metric": "functional_dependency",
@@ -272,9 +273,31 @@ def test_final_room_containment_blocker_survives_resumed_stage_filtering() -> No
                 "scoring_tier": "core",
                 "primary_object": "cabinet_0",
                 "diagnostics": {"earliest_stage": "furniture"},
-            }
-        ]
-    }
+            },
+            "room_containment",
+        ),
+        (
+            {
+                "check_id": "intent__support_readiness__basket_0",
+                "metric": "functional_dependency",
+                "relation_type": "support_readiness",
+                "label": "fail",
+                "scoring_tier": "core",
+                "primary_object": "basket_0",
+                "intent_constraint": {"relation": "on_top_of"},
+                "diagnostics": {
+                    "support_readiness": True,
+                    "earliest_stage": "furniture",
+                },
+            },
+            "support_readiness",
+        ),
+    ],
+)
+def test_final_blocker_survives_resumed_stage_filtering(
+    result, expected_blocker
+) -> None:
+    payload = {"results": [result]}
 
     resumed_stage = StageVerifier().verify(
         stage="wall_mounted",
@@ -289,8 +312,8 @@ def test_final_room_containment_blocker_survives_resumed_stage_filtering() -> No
         stage_reports=[resumed_stage], deterministic_critic_payload=payload
     )
 
-    assert final_report.non_degradable_blockers == ["room_containment"]
-    with pytest.raises(RuntimeError, match="non-degradable structural blocker"):
+    assert final_report.non_degradable_blockers == [expected_blocker]
+    with pytest.raises(RuntimeError, match="non-degradable blocker"):
         scene_generation._raise_for_non_degradable_final_blockers(final_report)
 
 
@@ -552,7 +575,8 @@ def test_degraded_policy_advances_after_quality_repair_budget_is_exhausted(
     hooks.accept_degraded_stage.assert_called_once_with("furniture")
 
 
-def test_degraded_policy_does_not_advance_room_containment_blocker(tmp_path) -> None:
+@pytest.mark.parametrize("blocker", ["room_containment", "support_readiness"])
+def test_degraded_policy_does_not_advance_typed_blocker(tmp_path, blocker) -> None:
     hooks = Mock()
     hooks.post_stage.return_value = StageCommitResult(
         stage="furniture",
@@ -560,12 +584,12 @@ def test_degraded_policy_does_not_advance_room_containment_blocker(tmp_path) -> 
         retryable=False,
         reason="Repair budget exhausted",
         quality_failure=True,
-        non_degradable_blockers=("room_containment",),
+        non_degradable_blockers=(blocker,),
     )
 
     with pytest.raises(
         scene_generation.SceneExpertStageCommitError,
-        match="non-degradable structural blocker\(s\): room_containment",
+        match=rf"non-degradable blocker\(s\): {blocker}",
     ):
         scene_generation._commit_scene_expert_stage(
             hooks=hooks,
@@ -698,6 +722,56 @@ def test_non_deterministic_containment_named_issue_is_not_a_stage_blocker(
     )
 
     assert result.non_degradable_blockers == ()
+
+
+def test_support_readiness_is_a_non_degradable_stage_blocker(tmp_path) -> None:
+    failed_report = StageVerifyReport(
+        stage="furniture",
+        pass_stage=False,
+        issues=[
+            VerifyIssue(
+                issue_type="deterministic_relation_failure",
+                relation="on_top_of",
+                scoring_tier="core",
+                description="Basket has no verified support surface",
+                diagnostics={"support_readiness": True},
+            )
+        ],
+    )
+    runner = object.__new__(SceneExpertHookRunner)
+    runner._mode = "harness_only"
+    runner._component_flags = {"verifier": True, "repair": True}
+    runner._current_stage = "furniture"
+    runner._original_text_descriptions = {"furniture": "original prompt"}
+    runner._stage_verifier = Mock(verify=Mock(return_value=failed_report))
+    runner._task_spec = SimpleNamespace(room_type="bathroom")
+    runner._current_stage_brief = None
+    runner._harness = Mock(
+        decide_repair=Mock(
+            return_value=RepairDecision(
+                should_repair=False,
+                strategy="none",
+                reason="Repair budget exhausted",
+            )
+        )
+    )
+    runner._repair_controller = Mock()
+    runner._pending_stage_repairs = {}
+    runner._stage_reports = []
+    runner._completed_stages = []
+    runner._stage_start_time = time.time()
+    runner._current_memory_pack = SimpleNamespace()
+    runner._current_relation_context = None
+    runner._current_planner_trace = {}
+    runner._qwen_calls = 0
+    runner._commit_stage_memory = Mock()
+    runner._trace_logger = Mock()
+
+    result = runner.post_stage(
+        "furniture", SimpleNamespace(text_description="brief", objects={}), tmp_path
+    )
+
+    assert result.non_degradable_blockers == ("support_readiness",)
 
 
 @pytest.mark.parametrize(

@@ -63,7 +63,11 @@ from scenesmith.scene_expert.schemas import (
 from scenesmith.scene_expert.slow_memory.trajectory import TrajectoryCollector
 from scenesmith.scene_expert.task_compiler import TaskCompiler
 from scenesmith.scene_expert.trace_logger import TraceLogger, collect_code_provenance
-from scenesmith.scene_expert.verifier import FullVerifier, StageVerifier
+from scenesmith.scene_expert.verifier import (
+    FullVerifier,
+    StageVerifier,
+    non_degradable_blocker_codes,
+)
 from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.intent_compiler import IntentCompiler
 from scenesmith.scenebenchmark_critic.intent_contract import build_intent_contract
@@ -80,9 +84,6 @@ from scenesmith.scenebenchmark_critic.object_taxonomy import (
 )
 from scenesmith.scenebenchmark_critic.relation_registry import (
     STAGE_ORDER as CONTRACT_STAGE_ORDER,
-)
-from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_containment import (
-    ROOM_CONTAINMENT_FAILURE_CODE,
 )
 
 console_logger = logging.getLogger(__name__)
@@ -2096,14 +2097,8 @@ class SceneExpertHookRunner:
                 verify_report is not None and not passed and not verification_error
             ),
             non_degradable_blockers=(
-                (ROOM_CONTAINMENT_FAILURE_CODE,)
+                non_degradable_blocker_codes(verify_report.issues)
                 if verify_report is not None
-                and any(
-                    issue.relation == ROOM_CONTAINMENT_FAILURE_CODE
-                    and issue.scoring_tier == "core"
-                    and issue.issue_type == "deterministic_relation_failure"
-                    for issue in verify_report.issues
-                )
                 else ()
             ),
         )
