@@ -433,7 +433,7 @@ def test_recorded_failure_stays_out_of_quality_denominators(tmp_path) -> None:
 
     metrics = collect_run_metrics(output_root, process_exit_code=0)
 
-    assert metrics["schema_version"] == "sceneexpert.run_metrics.v5"
+    assert metrics["schema_version"] == "sceneexpert.run_metrics.v8"
     assert metrics["quality_comparison_ready"] is False
     assert metrics["summary"]["completed_scenes"] == 1
     assert metrics["summary"]["failed_scenes"] == 1
