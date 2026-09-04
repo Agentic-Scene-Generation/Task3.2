@@ -72,6 +72,7 @@ def test_runner_filters_scope_without_renumbering_batches(tmp_path: Path) -> Non
     assert "[critic_on/batch_046 slot=1]" in result.stdout
     assert "[critic_on/batch_092 slot=1]" in result.stdout
     assert "experiment.scene_failure_policy=record" in result.stdout
+    assert "SceneEval no-VLM geometry after run: true" in result.stdout
 
 
 def test_runner_rejects_invalid_scene_failure_policy(tmp_path: Path) -> None:

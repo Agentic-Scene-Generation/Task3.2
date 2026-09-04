@@ -345,6 +345,7 @@ MAX_CASES="${MAX_CASES:-0}"
 CASE_FILTER="${CASE_FILTER:-}"
 INCLUDE_HOLDOUT_CASES="${INCLUDE_HOLDOUT_CASES:-false}"
 DRY_RUN="${DRY_RUN:-false}"
+SCENEEVAL_AFTER_RUN="${SCENEEVAL_AFTER_RUN:-auto}"
 CRITIC_PROBE_RENDER_FINAL_VIEWS="${CRITIC_PROBE_RENDER_FINAL_VIEWS:-false}"
 CRITIC_PROBE_FINAL_VIEW_PARALLELISM="${CRITIC_PROBE_FINAL_VIEW_PARALLELISM:-1}"
 FINAL_VIEW_PYTHON_BIN="${FINAL_VIEW_PYTHON_BIN:-$PYTHON_BIN}"
@@ -543,6 +544,20 @@ if [[ "$CASE_SET" != sceneeval* && "$DIFFICULTY_SELECTION" != "all" ]]; then
     echo "ERROR: --difficulty is supported only with SceneEval case sets" >&2
     exit 2
 fi
+case "${SCENEEVAL_AFTER_RUN,,}" in
+    auto)
+        if [[ "$CASE_SET" == sceneeval* ]]; then
+            SCENEEVAL_AFTER_RUN=true
+        else
+            SCENEEVAL_AFTER_RUN=false
+        fi
+        ;;
+    true|false) ;;
+    *)
+        echo "ERROR: SCENEEVAL_AFTER_RUN must be auto, true, or false" >&2
+        exit 2
+        ;;
+esac
 
 if [ $((CRITIC_PROBE_PORT_BASE + 374)) -gt 65535 ]; then
     echo "ERROR: CRITIC_PROBE_PORT_BASE leaves no room for one 375-port service block: $CRITIC_PROBE_PORT_BASE" >&2
@@ -979,6 +994,7 @@ export FINAL_VIEW_PYTHON_BIN
 export PIPELINE_STOP_STAGE BRANCH_FROM_SHARED_BASE SHARED_BASE_STOP_STAGE
 export SHARED_BASE_ROOT GENERATE_SHARED_BASE MAX_CASES CASE_FILTER
 export INCLUDE_HOLDOUT_CASES DRY_RUN SCENE_SELECTION SCENE_SELECTION_EXPLICIT
+export SCENEEVAL_AFTER_RUN
 export REPLAY_FROM_PATH REPLAY_MODE RESUME_FURNITURE_RENDER_MODE
 export SCENEEXPERT_DISABLE_ARTICULATED="$DISABLE_ARTICULATED"
 export SCENEEXPERT_DISABLE_MATERIALS="$DISABLE_MATERIALS"
@@ -1109,6 +1125,7 @@ echo "thinking profile: floor_plan=${FLOOR_PLAN_DESIGNER_THINKING}/${FLOOR_PLAN_
 echo "shared base: $BRANCH_FROM_SHARED_BASE (generate=$GENERATE_SHARED_BASE)"
 echo "replay source: ${REPLAY_FROM_PATH:-none} (mode=$REPLAY_MODE)"
 echo "holdout cases: $INCLUDE_HOLDOUT_CASES"
+echo "SceneEval no-VLM geometry after run: $SCENEEVAL_AFTER_RUN"
 echo "scene selection: $SCENE_SELECTION"
 echo "==============================================="
 
@@ -1808,6 +1825,20 @@ if [ "$DRY_RUN" = "false" ]; then
         echo "ERROR: run metrics collection failed with exit code $metrics_exit_code; generation artifacts are unchanged" >&2
         if [ "$run_exit_code" -eq 0 ]; then
             run_exit_code="$metrics_exit_code"
+        fi
+    fi
+    if [ "$SCENEEVAL_AFTER_RUN" = "true" ]; then
+        echo "collecting SceneEval no-VLM geometry metrics: $OUTPUT_ROOT/sceneeval"
+        sceneeval_exit_code=0
+        if "$PYTHON_BIN" -m scenesmith.scene_expert.sceneeval_geometry \
+            --output-root "$OUTPUT_ROOT"; then
+            :
+        else
+            sceneeval_exit_code=$?
+            echo "ERROR: SceneEval geometry collection failed with exit code $sceneeval_exit_code; generation artifacts are unchanged" >&2
+            if [ "$run_exit_code" -eq 0 ]; then
+                run_exit_code="$sceneeval_exit_code"
+            fi
         fi
     fi
 fi
