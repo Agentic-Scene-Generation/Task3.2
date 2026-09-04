@@ -5339,7 +5339,9 @@ def test_intent_compiler_config_uses_deterministic_contract_without_llm(
 ) -> None:
     class UnexpectedCompiler:
         def __init__(self, **_kwargs):
-            raise AssertionError("disabled intent compiler must not construct IntentCompiler")
+            raise AssertionError(
+                "disabled intent compiler must not construct IntentCompiler"
+            )
 
     monkeypatch.setattr(hooks, "IntentCompiler", UnexpectedCompiler)
 

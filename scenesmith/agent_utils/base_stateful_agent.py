@@ -1885,9 +1885,7 @@ class BaseStatefulAgent(ABC):
         request_provider = self._reasoning_request_provider()
         if request_provider == "qwen":
             # Qwen3.6 uses enable_thinking; Qwen3.8 uses reasoning_effort.
-            kwargs["extra_body"] = chat_template_kwargs_from_effort(
-                effort, model=model
-            )
+            kwargs["extra_body"] = chat_template_kwargs_from_effort(effort, model=model)
         elif request_provider == "openrouter":
             normalized_effort = chat_api_reasoning_effort(effort)
             if normalized_effort is not None:

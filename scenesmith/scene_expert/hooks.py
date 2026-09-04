@@ -336,8 +336,8 @@ def _compile_intent_contract_if_enabled(
         cfg_dict["_scenebenchmark_intent_cache_key"] = {
             "prompt_sha256": prompt_hash,
             "task_spec_sha256": task_spec_hash,
-                "spec_version": INTENT_COMPILER_SPEC_VERSION,
-                "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+            "spec_version": INTENT_COMPILER_SPEC_VERSION,
+            "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
             "mode": "deterministic",
         }
         return contract, trace

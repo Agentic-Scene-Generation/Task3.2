@@ -1000,6 +1000,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         critic_config = SimpleNamespace(
             enabled=True,
             metric_enabled=lambda metric: metric == "functional_dependency",
+            auto_repair=SimpleNamespace(should_repair=lambda _module: True),
         )
         relation_fix = SimpleNamespace(
             object_id="desk_0", relation_type="room_center_alignment"
@@ -1030,6 +1031,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         seating_targets.assert_called_once_with(agent.scene, config=critic_config)
         align.assert_called_once_with(
             agent.scene,
+            config=critic_config,
             allowed_targets_by_seat=targets,
         )
         agent.rendering_manager.clear_cache.assert_called_once_with()
@@ -1085,6 +1087,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         critic_config = SimpleNamespace(
             enabled=True,
             metric_enabled=lambda metric: metric == "functional_dependency",
+            auto_repair=SimpleNamespace(should_repair=lambda _module: True),
         )
         relation_fix = SimpleNamespace(
             object_id="student_chair_0",
@@ -1122,6 +1125,7 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         seating_targets.assert_called_once_with(agent.scene, config=critic_config)
         align.assert_called_once_with(
             agent.scene,
+            config=critic_config,
             allowed_targets_by_seat=targets,
         )
         self.assertEqual(

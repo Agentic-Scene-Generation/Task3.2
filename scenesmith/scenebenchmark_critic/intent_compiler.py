@@ -2217,9 +2217,7 @@ class IntentCompiler:
                         schema=intent_compiler_wire_json_schema(),
                     ),
                     extra_body=openrouter_extra_body(
-                        chat_template_kwargs_from_effort(
-                            "none", model=self._model
-                        )
+                        chat_template_kwargs_from_effort("none", model=self._model)
                     ),
                 )
                 response_elapsed_sec = round(time.perf_counter() - started_at, 6)

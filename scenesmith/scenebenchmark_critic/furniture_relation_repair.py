@@ -244,10 +244,17 @@ def improve_furniture_relations(
     configured_budget = critic_config.auto_repair.furniture_relation_budget
     if configured_budget is None:
         configured_budget = critic_config.auto_repair.max_candidate_evaluations
-    if configured_budget is None and "relation_repair_max_candidate_evaluations" in critic_config.extra:
-        console_logger.warning("relation_repair_max_candidate_evaluations is deprecated; use auto_repair.furniture_relation_budget")
+    if (
+        configured_budget is None
+        and "relation_repair_max_candidate_evaluations" in critic_config.extra
+    ):
+        console_logger.warning(
+            "relation_repair_max_candidate_evaluations is deprecated; use auto_repair.furniture_relation_budget"
+        )
         try:
-            configured_budget = int(critic_config.extra["relation_repair_max_candidate_evaluations"])
+            configured_budget = int(
+                critic_config.extra["relation_repair_max_candidate_evaluations"]
+            )
         except (TypeError, ValueError):
             configured_budget = None
     candidate_budget = 64 if configured_budget is None else configured_budget
