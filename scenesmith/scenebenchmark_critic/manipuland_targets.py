@@ -44,6 +44,18 @@ _COUNT_WORDS = {
     "ten": 10,
 }
 
+_MEDIA_SUPPORT_NOUN = (
+    r"(?:tv|television)\s+stand|media\s+(?:console|cabinet)|entertainment\s+center"
+)
+_TELEVISION_NOUN = r"(?:television|tv)(?!\s+(?:stand|console|cabinet))"
+_EXPLICIT_TELEVISION_SUPPORT = re.compile(
+    rf"(?:\b{_TELEVISION_NOUN}\b[^.;!?]{{0,50}}"
+    rf"\b(?:on\s+top\s+of|on|atop)\s+(?:the\s+)?(?:{_MEDIA_SUPPORT_NOUN})\b)"
+    rf"|(?:\b(?:{_MEDIA_SUPPORT_NOUN})\b[^.;!?]{{0,50}}"
+    rf"\b(?:supports?|holds?)\s+(?:a\s+|an\s+|the\s+)?{_TELEVISION_NOUN}\b)",
+    re.IGNORECASE,
+)
+
 
 def _explicit_noun_count(text: str, noun: str) -> int | None:
     match = re.search(
@@ -107,10 +119,6 @@ def infer_prompt_manipuland_obligations(
             )
         )
 
-    has_tv_stand = bool(
-        re.search(r"\b(?:tv|television)\s+stand\b|\bmedia\s+console\b", text)
-    )
-    has_television = bool(re.search(r"\b(?:television|tv)\b", text))
     wall_mounted_television = bool(
         re.search(
             r"\b(?:television|tv)\b.{0,80}\b(?:wall[- ]mounted|mounted|hung|hanging)\b|"
@@ -118,7 +126,7 @@ def infer_prompt_manipuland_obligations(
             text,
         )
     )
-    if has_tv_stand and has_television and not wall_mounted_television:
+    if _EXPLICIT_TELEVISION_SUPPORT.search(text) and not wall_mounted_television:
         obligations.append(
             ManipulandTargetObligation(
                 category="tv_stand",

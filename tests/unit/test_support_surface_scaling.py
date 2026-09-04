@@ -187,6 +187,8 @@ class TestSupportSurfaceMeshScaling(unittest.TestCase):
 
         self.assertIsNotNone(surface_1.mesh, "Surface 1 should have mesh")
         self.assertIsNotNone(surface_2.mesh, "Surface 2 should have mesh")
+        self.assertTrue(surface_1.open_above)
+        self.assertEqual(surface_2.open_above, surface_1.open_above)
 
         # Furniture_1 scale=1.0, furniture_2 scale=0.7.
         # Mesh max coords should be proportionally different.

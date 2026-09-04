@@ -292,7 +292,6 @@ _FLOOR_STANDING_DEFAULTS = frozenset(
     }
 )
 _SURFACE_SUPPORT_RELATIONS = frozenset({"on_top_of"})
-_SUPPORT_SENSITIVE_CATEGORIES = frozenset({"plant"})
 _FLOOR_SUPPORT_RELATIONS = frozenset({"on_floor", "object_on_floor"})
 _WALL_MOUNT_RELATIONS = frozenset({"mounted_on_wall", "hung_on_wall"})
 _CEILING_MOUNT_RELATIONS = frozenset({"mounted_on_ceiling", "hung_from_ceiling"})
@@ -469,11 +468,9 @@ def generation_owner(
 ) -> str:
     """Return the stage that creates an object, independently of check timing.
 
-    Explicit mounting relations take precedence over category defaults. Surface
-    support only overrides a declared inventory for categories with a reliable
-    intrinsic policy. Open-vocabulary objects otherwise retain their typed
-    TaskCompiler inventory, so an unknown small object cannot be promoted to
-    furniture merely because its support already exists there.
+    Explicit mounting and support relations take precedence over category
+    defaults. Open-vocabulary objects otherwise retain their typed TaskCompiler
+    inventory.
     """
     normalized_category = canonical_object_category(category)
     normalized_relation = str(relation or "").strip().lower().replace("-", "_")
@@ -484,21 +481,11 @@ def generation_owner(
 
     if normalized_endpoint == "subject":
         if normalized_relation in _SURFACE_SUPPORT_RELATIONS:
-            # ``on_top_of`` describes both manipulands on furniture (a lamp on
-            # a desk) and structural furniture support (a television on a TV
-            # stand). The latter must remain at the furniture stage so the
-            # support-pose repair can place it in XYZ, not as a loose floor
-            # object deferred to the manipuland agent.
-            if normalized_category in (
-                MANIPULAND_CATEGORIES | _SUPPORT_SENSITIVE_CATEGORIES
-            ):
-                return "manipuland"
-            if (
-                declared_owner == "manipuland"
-                and normalized_category not in _KNOWN_CATEGORIES
-            ):
-                return "manipuland"
-            return "furniture"
+            # Furniture tools are floor-only SE(2): they cannot realize the Z
+            # coordinate required by a support relation. The manipuland stage
+            # owns every explicit surface-supported subject, independently of
+            # its default inventory category.
+            return "manipuland"
         if normalized_relation in _FLOOR_SUPPORT_RELATIONS:
             return "furniture"
         if normalized_relation in _WALL_MOUNT_RELATIONS:

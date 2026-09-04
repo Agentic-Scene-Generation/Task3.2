@@ -1930,6 +1930,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
                 ),
                 transform=transform @ RigidTransform(p=local_center),
                 mesh=None,
+                open_above=True,
             )
         ]
 

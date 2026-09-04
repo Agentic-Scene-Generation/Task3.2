@@ -938,11 +938,17 @@ def _support_surface_to_region(
     corners_world = np.array([surface.transform @ corner for corner in corners_local])
     corners_world = corners_world + offset
     z_world = float((surface.transform @ np.array([0.0, 0.0, 0.0]))[2] + offset[2])
+    clearance_above_m = max(
+        float(surface.bounding_box_max[2] - surface.bounding_box_min[2]), 0.0
+    )
+    if not math.isfinite(clearance_above_m):
+        clearance_above_m = 0.0
     return {
         "region_id": str(surface.surface_id),
         "support_kind": "top_surface",
         "height_world_z": z_world,
-        "clearance_above_m": None,
+        "clearance_above_m": clearance_above_m,
+        "open_above": getattr(surface, "open_above", False) is True,
         "access_type": "top",
         "area_m2": surface.area,
         "polygon_world_xy": corners_world[:, :2].tolist(),

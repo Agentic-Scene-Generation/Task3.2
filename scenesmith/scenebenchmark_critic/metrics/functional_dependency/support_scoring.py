@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,6 +34,7 @@ class SupportSurfaceCandidate:
     polygon_xy: tuple[tuple[float, float], ...]
     height_z: float
     clearance_m: float
+    open_above: bool
     source: str
 
 
@@ -43,6 +46,7 @@ class SupportEvidence:
     overlap_ratio: float
     height_delta_m: float
     clearance_m: float
+    open_above: bool
     subject_height_m: float
     score: float
 
@@ -120,7 +124,8 @@ def build_support_surface_candidates(
                 .lower(),
                 polygon_xy=tuple(polygon),
                 height_z=height,
-                clearance_m=max(_number(region.get("clearance_above_m")) or 0.0, 0.0),
+                clearance_m=_bounded_clearance(region.get("clearance_above_m")),
+                open_above=region.get("open_above") is True,
                 source="support_region",
             )
         )
@@ -142,6 +147,7 @@ def build_support_surface_candidates(
                     polygon_xy=tuple(target_poly),
                     height_z=target_top,
                     clearance_m=10.0,
+                    open_above=False,
                     source="bbox_profile",
                 )
             )
@@ -157,6 +163,7 @@ def build_support_surface_candidates(
                     polygon_xy=tuple(target_poly),
                     height_z=inferred_height,
                     clearance_m=10.0,
+                    open_above=False,
                     source="functional_hints",
                 )
             )
@@ -177,6 +184,7 @@ def support_assessment_diagnostics(
         "support_overlap_ratio": round(evidence.overlap_ratio, 4),
         "support_height_delta_m": round(evidence.height_delta_m, 4),
         "support_clearance_m": round(evidence.clearance_m, 4),
+        "support_open_above": evidence.open_above,
         "support_evidence_score": round(evidence.score, 4),
     }
 
@@ -244,7 +252,7 @@ def _classify_support_evidence(
 ) -> SupportAssessment:
     overlap = evidence.overlap_ratio
     dz = evidence.height_delta_m
-    fits_clearance = (
+    fits_clearance = evidence.open_above or (
         evidence.subject_height_m <= evidence.clearance_m + thresholds.clearance_slack_m
     )
     subject_profile = object_function_profile(subject)
@@ -295,7 +303,10 @@ def _classify_support_evidence(
         else:
             label, confidence = "fail", 0.86
 
-    clearance_note = "fits clearance" if fits_clearance else "exceeds clearance"
+    if evidence.open_above:
+        clearance_note = "surface is open above"
+    else:
+        clearance_note = "fits clearance" if fits_clearance else "exceeds clearance"
     reason = (
         f"unified support score selected {evidence.surface_kind} `{evidence.surface_id}` from {evidence.source}: "
         f"overlap {overlap:.2f}, height delta {dz:.2f}m, {clearance_note}, score {evidence.score:.2f}."
@@ -352,9 +363,12 @@ def _surface_evidence(
         _convex_overlap_area(subject_poly, list(candidate.polygon_xy)) / subject_area
     )
     dz = abs(subject_bottom - candidate.height_z)
-    clearance_penalty = max(
-        subject_height - candidate.clearance_m - thresholds.clearance_slack_m, 0.0
-    )
+    clearance_penalty = 0.0
+    if not candidate.open_above:
+        clearance_penalty = max(
+            subject_height - candidate.clearance_m - thresholds.clearance_slack_m,
+            0.0,
+        )
     height_penalty = min(dz, _surface_level_tolerance_candidate(candidate, thresholds))
     score = overlap - height_penalty * 1.5 - clearance_penalty * 0.75
     return SupportEvidence(
@@ -364,6 +378,7 @@ def _surface_evidence(
         overlap_ratio=overlap,
         height_delta_m=dz,
         clearance_m=candidate.clearance_m,
+        open_above=candidate.open_above,
         subject_height_m=subject_height,
         score=score,
     )
@@ -401,6 +416,13 @@ def _number(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _bounded_clearance(value: Any) -> float:
+    number = _number(value)
+    if number is None or not math.isfinite(number):
+        return 0.0
+    return max(number, 0.0)
 
 
 def _polygon_area_xy(points: list[tuple[float, float]]) -> float:

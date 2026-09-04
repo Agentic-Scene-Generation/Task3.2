@@ -209,6 +209,9 @@ class SupportSurface:
     exact_boundary_vertices: list[tuple[float, float]] | None = None
     """Exact concave boundary in surface-local XY for polygon floors."""
 
+    open_above: bool = False
+    """Whether extraction proved that no geometry bounds the space above."""
+
     @property
     def area(self) -> float:
         """Compute surface area from XY bounding box dimensions.
@@ -240,6 +243,7 @@ class SupportSurface:
             ],
             "transform": serialize_rigid_transform(self.transform),
             "exact_boundary_vertices": self.exact_boundary_vertices,
+            "open_above": self.open_above,
         }
 
         # Convert to JSON string with sorted keys for determinism.
@@ -662,6 +666,7 @@ class SceneObject:
                     if surf.exact_boundary_vertices is not None
                     else None
                 ),
+                "open_above": surf.open_above,
             }
             # Serialize mesh data if present.
             if surf.mesh is not None:
@@ -766,6 +771,7 @@ class SceneObject:
                     if surf_data.get("exact_boundary_vertices") is not None
                     else None
                 ),
+                open_above=bool(surf_data.get("open_above", False)),
             )
             support_surfaces.append(support_surface)
 
@@ -1876,6 +1882,7 @@ def extract_and_propagate_support_surfaces(
             transform=world_transform,
             mesh=scaled_mesh,  # Scaled mesh for convex hull computation.
             link_name=surface.link_name,  # Preserve link for FK transforms.
+            open_above=surface.open_above,
         )
         world_surfaces.append(world_surface)
 
@@ -1933,6 +1940,7 @@ def extract_and_propagate_support_surfaces(
                 transform=obj_world_transform,
                 mesh=obj_scaled_mesh,  # Scaled mesh for convex hull computation.
                 link_name=surface.link_name,  # Preserve link for FK transforms.
+                open_above=surface.open_above,
             )
             obj_surfaces.append(obj_surface)
 

@@ -107,24 +107,6 @@ _MEDIA_SUPPORT_PATTERN = re.compile(
     r"\b(?:tv stand|television stand|media console|media cabinet|entertainment center)\b",
     re.IGNORECASE,
 )
-_TELEVISION_PATTERN = re.compile(
-    r"\b(?:tv|television)\b(?!\s+(?:stand|console|cabinet))", re.IGNORECASE
-)
-_EXPLICIT_WALL_MOUNTED_TELEVISION_PATTERN = re.compile(
-    r"(?:\b(?:wall[- ]mounted|mounted|hung|hanging)\s+"
-    r"(?:flat[- ]screen\s+)?(?:tv|television)\b)"
-    r"|(?:\b(?:tv|television)\s+(?:is\s+)?(?:mounted|hung|hanging)\s+"
-    r"(?:on|against)\s+(?:the\s+)?(?:opposite\s+)?wall\b)"
-    r"|(?:\b(?:tv|television)\s+(?:is\s+)?(?:on|against)\s+"
-    r"(?:the\s+)?(?:opposite\s+)?wall\b)",
-    re.IGNORECASE,
-)
-_MEDIA_GROUP_ON_WALL_PATTERN = re.compile(
-    r"\b(?:tv stand|television stand|media console|media cabinet|entertainment center)"
-    r"\s+and\s+(?:a\s+|an\s+|the\s+)?(?:tv|television)\s+"
-    r"(?:is\s+)?(?:on|against)\s+(?:the\s+)?(?:opposite\s+)?wall\b",
-    re.IGNORECASE,
-)
 
 
 def original_prompt_for_scene(scene: Any) -> str:
@@ -3098,25 +3080,6 @@ def _room_ontology_constraints(
                 ),
             )
         )
-    if (
-        _MEDIA_SUPPORT_PATTERN.search(lowered)
-        and _TELEVISION_PATTERN.search(lowered)
-        and not _prompt_explicitly_wall_mounts_television(lowered)
-    ):
-        constraints.append(
-            _constraint(
-                "on_top_of",
-                {"category": "television", "count": 1, "quantifier": "all"},
-                {"category": "tv_stand", "count": 1, "quantifier": "all"},
-                source="model_inferred",
-                confidence=0.7,
-                evidence_span="possible freestanding television and media-support pairing",
-                inference_reason=(
-                    "The prompt names a television with a media support and does "
-                    "not explicitly require wall mounting."
-                ),
-            )
-        )
     return constraints
 
 
@@ -3168,17 +3131,6 @@ def _instructional_workstation_topology(
         and has_audience
         and (room_type == "classroom" or has_teaching_zone)
     )
-
-
-def _prompt_explicitly_wall_mounts_television(prompt: str) -> bool:
-    """Distinguish a mounted display from an entertainment group at a wall."""
-    if not _EXPLICIT_WALL_MOUNTED_TELEVISION_PATTERN.search(prompt):
-        return False
-    if _MEDIA_GROUP_ON_WALL_PATTERN.search(prompt) and not re.search(
-        r"\b(?:wall[- ]mounted|mounted|hung|hanging)\b", prompt, re.IGNORECASE
-    ):
-        return False
-    return True
 
 
 def _task_spec_constraints(task_spec: Any | None) -> list[dict[str, Any]]:

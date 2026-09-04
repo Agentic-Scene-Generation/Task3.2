@@ -4510,6 +4510,35 @@ def test_deterministic_contract_recognizes_floor_near_manipulands() -> None:
     assert stages == {"alarm_clock": "manipuland", "wastebasket": "furniture"}
 
 
+def test_deterministic_contract_does_not_infer_support_from_media_cooccurrence() -> (
+    None
+):
+    contract = build_intent_contract(
+        "A living room with a sofa facing a TV stand and television on the opposite wall."
+    )
+
+    assert not any(
+        row["relation"] == "on_top_of"
+        and row["subjects"].get("category") == "television"
+        for row in contract["constraints"]
+    )
+
+
+def test_deterministic_contract_preserves_explicit_television_support() -> None:
+    contract = validate_intent_contract(
+        build_intent_contract("A living room with a television on top of the TV stand.")
+    )
+
+    support = next(
+        row
+        for row in contract["constraints"]
+        if row["relation"] == "on_top_of"
+        and row["subjects"].get("category") == "television"
+    )
+    assert support["targets"]["category"] == "tv_stand"
+    assert support["stage"] == "manipuland"
+
+
 def test_room_center_with_table_side_seating_does_not_create_support() -> None:
     contract = build_intent_contract(
         "A table is placed in the middle of the room with two chairs on its long sides."
