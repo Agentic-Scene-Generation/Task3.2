@@ -9,13 +9,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
 import pytest
+from omegaconf import OmegaConf
+from openai import APITimeoutError
 
 from scenesmith.experiments import indoor_scene_generation as scene_generation
 from scenesmith.agent_utils import base_stateful_agent
 from scenesmith.agent_utils.base_stateful_agent import BaseStatefulAgent
 from scenesmith.agent_utils.room import AgentType
 from scenesmith.scene_expert.harness import Harness, RepairDecision
+from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.hooks import SceneExpertHookRunner, StageCommitResult
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
@@ -26,6 +30,9 @@ from scenesmith.scene_expert.schemas import (
 )
 from scenesmith.scene_expert.verifier import FullVerifier, StageVerifier
 from scenesmith.scenebenchmark_critic.config import CriticConfig
+from scenesmith.scenebenchmark_critic.stage_ownership import (
+    normalize_result_stage_ownership,
+)
 from scenesmith.scenebenchmark_critic.intent_contract import (
     apply_contract_execution_states,
 )
@@ -94,6 +101,30 @@ def test_wall_stage_verifier_ignores_auxiliary_visual_issue(tmp_path) -> None:
     )
 
     assert report.pass_stage
+
+
+def test_stage_verifier_inventory_accepts_specialized_category_parent(tmp_path) -> None:
+    report = StageVerifier().verify(
+        stage="furniture",
+        stage_output_dir=str(tmp_path),
+        task_spec=SceneTaskSpec(
+            room_type="living_room",
+            style="standard",
+            required_large_objects=["chair"],
+        ),
+        scene_state_info={
+            "object_records": [
+                {
+                    "name": "armchair_0",
+                    "aliases": ["armchair"],
+                    "description": "Upholstered lounge chair",
+                }
+            ]
+        },
+    )
+
+    assert report.pass_stage
+    assert not report.issues
 
 
 def _binding_failure_payload(*, earliest_stage: str) -> dict:
@@ -228,6 +259,68 @@ def test_full_verifier_fails_fresh_final_deterministic_payload() -> None:
 
     assert not report.deterministic_pass
     assert not report.pass_scene
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_blocker"),
+    [
+        (
+            {
+                "check_id": "room_containment__cabinet_0",
+                "metric": "functional_dependency",
+                "relation_type": "room_containment",
+                "label": "fail",
+                "scoring_tier": "core",
+                "primary_object": "cabinet_0",
+                "diagnostics": {"earliest_stage": "furniture"},
+            },
+            "room_containment",
+        ),
+        (
+            {
+                "check_id": "intent__support_readiness__basket_0",
+                "metric": "functional_dependency",
+                "relation_type": "support_readiness",
+                "label": "fail",
+                "scoring_tier": "core",
+                "primary_object": "basket_0",
+                "intent_constraint": {"relation": "on_top_of"},
+                "diagnostics": {
+                    "support_readiness": True,
+                    "earliest_stage": "furniture",
+                },
+            },
+            "support_readiness",
+        ),
+    ],
+)
+def test_final_blocker_survives_resumed_stage_filtering(
+    result, expected_blocker
+) -> None:
+    payload = {"results": [result]}
+
+    resumed_stage = StageVerifier().verify(
+        stage="wall_mounted",
+        stage_output_dir=".",
+        task_spec=SceneTaskSpec(room_type="living_room", style="standard"),
+        scene_state_info={"object_names": []},
+        deterministic_critic_payload=payload,
+    )
+    assert resumed_stage.pass_stage
+
+    final_report = FullVerifier().verify(
+        stage_reports=[resumed_stage], deterministic_critic_payload=payload
+    )
+
+    assert final_report.non_degradable_blockers == [expected_blocker]
+    with pytest.raises(RuntimeError, match="non-degradable blocker"):
+        scene_generation._raise_for_non_degradable_final_blockers(final_report)
+
+
+def test_finalization_keeps_ordinary_quality_failure_degradable() -> None:
+    scene_generation._raise_for_non_degradable_final_blockers(
+        FullVerifyReport(deterministic_pass=False)
+    )
 
 
 def test_hook_finalize_refreshes_final_deterministic_payload(tmp_path) -> None:
@@ -482,6 +575,33 @@ def test_degraded_policy_advances_after_quality_repair_budget_is_exhausted(
     hooks.accept_degraded_stage.assert_called_once_with("furniture")
 
 
+@pytest.mark.parametrize("blocker", ["room_containment", "support_readiness"])
+def test_degraded_policy_does_not_advance_typed_blocker(tmp_path, blocker) -> None:
+    hooks = Mock()
+    hooks.post_stage.return_value = StageCommitResult(
+        stage="furniture",
+        passed=False,
+        retryable=False,
+        reason="Repair budget exhausted",
+        quality_failure=True,
+        non_degradable_blockers=(blocker,),
+    )
+
+    with pytest.raises(
+        scene_generation.SceneExpertStageCommitError,
+        match=rf"non-degradable blocker\(s\): {blocker}",
+    ):
+        scene_generation._commit_scene_expert_stage(
+            hooks=hooks,
+            stage="furniture",
+            scene=Mock(),
+            room_dir=tmp_path,
+            allow_degraded_quality=True,
+        )
+
+    hooks.accept_degraded_stage.assert_not_called()
+
+
 def test_accept_degraded_stage_advances_harness_for_next_stage() -> None:
     runner = object.__new__(SceneExpertHookRunner)
     runner._current_stage = "wall_mounted"
@@ -551,6 +671,107 @@ def test_exhausted_quality_failure_is_retained_for_final_verification(
     )
     assert runner._stage_reports == [failed_report]
     assert runner._completed_stages == []
+
+
+def test_non_deterministic_containment_named_issue_is_not_a_stage_blocker(
+    tmp_path,
+) -> None:
+    failed_report = StageVerifyReport(
+        stage="furniture",
+        pass_stage=False,
+        issues=[
+            VerifyIssue(
+                issue_type="low_functionality",
+                relation="room_containment",
+                scoring_tier="core",
+                description="Visual review requires another repair attempt",
+            )
+        ],
+    )
+    runner = object.__new__(SceneExpertHookRunner)
+    runner._mode = "harness_only"
+    runner._component_flags = {"verifier": True, "repair": True}
+    runner._current_stage = "furniture"
+    runner._original_text_descriptions = {"furniture": "original prompt"}
+    runner._stage_verifier = Mock(verify=Mock(return_value=failed_report))
+    runner._task_spec = SimpleNamespace(room_type="office")
+    runner._current_stage_brief = None
+    runner._harness = Mock(
+        decide_repair=Mock(
+            return_value=RepairDecision(
+                should_repair=False,
+                strategy="none",
+                reason="Repair budget exhausted",
+            )
+        )
+    )
+    runner._repair_controller = Mock()
+    runner._pending_stage_repairs = {}
+    runner._stage_reports = []
+    runner._completed_stages = []
+    runner._stage_start_time = time.time()
+    runner._current_memory_pack = SimpleNamespace()
+    runner._current_relation_context = None
+    runner._current_planner_trace = {}
+    runner._qwen_calls = 0
+    runner._commit_stage_memory = Mock()
+    runner._trace_logger = Mock()
+
+    result = runner.post_stage(
+        "furniture", SimpleNamespace(text_description="brief", objects={}), tmp_path
+    )
+
+    assert result.non_degradable_blockers == ()
+
+
+def test_support_readiness_is_a_non_degradable_stage_blocker(tmp_path) -> None:
+    failed_report = StageVerifyReport(
+        stage="furniture",
+        pass_stage=False,
+        issues=[
+            VerifyIssue(
+                issue_type="deterministic_relation_failure",
+                relation="on_top_of",
+                scoring_tier="core",
+                description="Basket has no verified support surface",
+                diagnostics={"support_readiness": True},
+            )
+        ],
+    )
+    runner = object.__new__(SceneExpertHookRunner)
+    runner._mode = "harness_only"
+    runner._component_flags = {"verifier": True, "repair": True}
+    runner._current_stage = "furniture"
+    runner._original_text_descriptions = {"furniture": "original prompt"}
+    runner._stage_verifier = Mock(verify=Mock(return_value=failed_report))
+    runner._task_spec = SimpleNamespace(room_type="bathroom")
+    runner._current_stage_brief = None
+    runner._harness = Mock(
+        decide_repair=Mock(
+            return_value=RepairDecision(
+                should_repair=False,
+                strategy="none",
+                reason="Repair budget exhausted",
+            )
+        )
+    )
+    runner._repair_controller = Mock()
+    runner._pending_stage_repairs = {}
+    runner._stage_reports = []
+    runner._completed_stages = []
+    runner._stage_start_time = time.time()
+    runner._current_memory_pack = SimpleNamespace()
+    runner._current_relation_context = None
+    runner._current_planner_trace = {}
+    runner._qwen_calls = 0
+    runner._commit_stage_memory = Mock()
+    runner._trace_logger = Mock()
+
+    result = runner.post_stage(
+        "furniture", SimpleNamespace(text_description="brief", objects={}), tmp_path
+    )
+
+    assert result.non_degradable_blockers == ("support_readiness",)
 
 
 @pytest.mark.parametrize(
@@ -804,6 +1025,65 @@ class _ReviewPlannerAgent(BaseStatefulAgent):
         return None
 
 
+class _TransactionalScene:
+    def __init__(self) -> None:
+        self.state = {"objects": {"existing_0": {"category": "existing"}}}
+        self.restore_calls = 0
+
+    def to_state_dict(self) -> dict:
+        return json.loads(json.dumps(self.state))
+
+    def restore_from_state_dict(self, state: dict) -> None:
+        self.restore_calls += 1
+        self.state = json.loads(json.dumps(state))
+
+    def content_hash(self) -> str:
+        return json.dumps(self.state, sort_keys=True)
+
+
+def _designer_transaction_agent() -> _ReviewPlannerAgent:
+    agent = _ReviewPlannerAgent()
+    agent.cfg = SimpleNamespace(
+        agents=SimpleNamespace(designer_agent=SimpleNamespace(max_turns=2))
+    )
+    agent.scene = _TransactionalScene()
+    agent.furniture_safety_controller = SimpleNamespace(
+        enabled=True,
+        begin_designer_call=Mock(),
+        end_designer_call=Mock(side_effect=RuntimeError("cleanup failed")),
+    )
+    invalid_state = SimpleNamespace(
+        hard_valid=False,
+        hard_reasons=["missing required sofa: expected 1, found 0"],
+    )
+    agent._evaluate_current_furniture_hard_state = Mock(return_value=invalid_state)
+    agent._checkpoint_eligible_furniture_hard_state = Mock(
+        side_effect=lambda state: state
+    )
+    agent._try_deterministic_repair_for_hard_state = Mock(
+        side_effect=AssertionError("abort must not run deterministic repair")
+    )
+    agent._remember_furniture_hard_valid_scene_state = Mock()
+    agent._persist_furniture_hard_valid_checkpoint = Mock()
+    agent._end_furniture_design_transaction = Mock(
+        side_effect=AssertionError("abort must not commit the transaction")
+    )
+    agent.prompt_registry = Mock()
+    agent.prompt_registry.get_prompt.return_value = "Design the room."
+    agent._retrieve_working_memory_for_designer = Mock(return_value="")
+    agent._prepare_stage_context_for_llm = Mock(return_value="")
+    agent._reasoning_persistence_context_for_session = lambda _: nullcontext()
+    agent.designer_session = SimpleNamespace(session_id="designer-test")
+    agent.designer = SimpleNamespace()
+    agent.rendering_manager = SimpleNamespace(
+        last_render_dir=None,
+        clear_cache=Mock(),
+    )
+    agent._create_run_config = Mock(return_value=None)
+    agent._record_llm_call_debug = Mock()
+    return agent
+
+
 def test_review_existing_hides_initial_design_and_blocks_early_finish() -> None:
     agent = _ReviewPlannerAgent()
     agent._planner_skip_initial_design = True
@@ -853,6 +1133,51 @@ def test_design_change_counts_only_committed_scene_mutation(
     assert agent._planner_successful_designer_mutations == expected_mutations
 
 
+@pytest.mark.parametrize(
+    ("operation", "expected_call_kind"),
+    [("initial", "initial"), ("change", "change")],
+)
+def test_failed_designer_transaction_aborts_without_repair_or_masking_timeout(
+    monkeypatch, caplog, operation: str, expected_call_kind: str
+) -> None:
+    agent = _designer_transaction_agent()
+    before_state = agent.scene.to_state_dict()
+    before_hash = agent.scene.content_hash()
+    timeout = APITimeoutError(
+        request=httpx.Request("POST", "http://127.0.0.1:8002/v1/chat/completions")
+    )
+
+    async def mutate_then_timeout(**_kwargs):
+        agent.scene.state["objects"]["partial_0"] = {"category": "partial"}
+        raise timeout
+
+    monkeypatch.setattr(base_stateful_agent.Runner, "run", mutate_then_timeout)
+    caplog.set_level("ERROR", logger=base_stateful_agent.__name__)
+
+    with pytest.raises(APITimeoutError) as error:
+        if operation == "initial":
+            asyncio.run(agent._request_initial_design_impl())
+        else:
+            asyncio.run(agent._request_design_change_impl("repair the layout"))
+
+    assert error.value is timeout
+    assert agent.scene.to_state_dict() == before_state
+    assert agent.scene.content_hash() == before_hash
+    assert agent.scene.restore_calls == 1
+    agent.furniture_safety_controller.begin_designer_call.assert_called_once_with(
+        call_kind=expected_call_kind
+    )
+    agent.furniture_safety_controller.end_designer_call.assert_called_once_with()
+    agent._evaluate_current_furniture_hard_state.assert_called_once_with()
+    agent._try_deterministic_repair_for_hard_state.assert_not_called()
+    agent._remember_furniture_hard_valid_scene_state.assert_not_called()
+    agent._persist_furniture_hard_valid_checkpoint.assert_not_called()
+    agent._end_furniture_design_transaction.assert_not_called()
+    agent.rendering_manager.clear_cache.assert_called_once_with()
+    assert agent._record_llm_call_debug.call_args.kwargs["exception"] is timeout
+    assert "Failed to end the furniture safety controller call" in caplog.text
+
+
 def test_planner_terminal_child_failure_skips_no_mutation_recovery(monkeypatch) -> None:
     agent = _ReviewPlannerAgent()
     agent._planner_successful_designer_mutations = 0
@@ -872,15 +1197,392 @@ def test_planner_terminal_child_failure_skips_no_mutation_recovery(monkeypatch) 
     run = AsyncMock(return_value=SimpleNamespace(final_output="stopped"))
     monkeypatch.setattr(base_stateful_agent.Runner, "run", run)
 
-    with pytest.raises(
-        RuntimeError,
-        match="designer delegation request_initial_design failed with "
-        "APITimeoutError: request timed out",
-    ):
+    with pytest.raises(base_stateful_agent.PlannerStageFailure) as error:
         asyncio.run(
             agent._run_planner_workflow(
                 runner_input="start", max_turns=2, require_initial_design=True
             )
         )
 
+    assert error.value.reason == "child_failure"
+    assert error.value.stage == "furniture"
+    assert error.value.operation == "request_initial_design"
+    assert error.value.root_error_type == "APITimeoutError"
+    assert error.value.retryable is True
     assert run.await_count == 1
+
+
+def test_planner_no_mutation_recovery_reports_called_workflow(monkeypatch) -> None:
+    agent = _ReviewPlannerAgent()
+    agent._planner_successful_designer_mutations = 0
+    agent._planner_designer_workflow_calls = 1
+    agent._planner_last_designer_workflow_operation = "request_initial_design"
+    agent.planner = SimpleNamespace(instructions="planner")
+    agent.planner_session = SimpleNamespace(session_id="planner-test")
+    agent._reasoning_persistence_context_for_session = lambda _: nullcontext()
+    agent._create_run_config = lambda: None
+    agent._record_module_timing = lambda *args, **kwargs: None
+    agent._record_llm_call_debug = lambda **kwargs: None
+    run = AsyncMock(return_value=SimpleNamespace(final_output="stopped"))
+    monkeypatch.setattr(base_stateful_agent.Runner, "run", run)
+
+    with pytest.raises(
+        base_stateful_agent.PlannerWorkflowNoMutationError,
+    ) as error:
+        asyncio.run(
+            agent._run_planner_workflow(
+                runner_input="start", max_turns=2, require_initial_design=True
+            )
+        )
+
+    assert error.value.reason == "no_mutation"
+    assert error.value.stage_execution_attempt == 1
+    assert run.await_count == 2
+    recovery_input = run.await_args_list[1].kwargs["input"]
+    assert "produced no committed scene mutation" in recovery_input
+    assert "returned without calling a workflow tool" not in recovery_input
+
+
+def test_stage_execution_attempt_isolates_session_ids_but_keeps_db_paths(
+    monkeypatch, tmp_path
+) -> None:
+    created: list[tuple[str, Path]] = []
+
+    class FakeSession:
+        def __init__(self, *, session_id: str, db_path: Path) -> None:
+            self.session_id = session_id
+            self.db_path = db_path
+            created.append((session_id, db_path))
+
+    agent = _ReviewPlannerAgent()
+    agent.cfg = SimpleNamespace(session_memory=None)
+    agent.logger = SimpleNamespace(output_dir=tmp_path)
+    agent._stage_execution_attempt = 1
+    monkeypatch.setattr(base_stateful_agent, "SQLiteSession", FakeSession)
+
+    agent._create_sessions(session_prefix="ceiling_", stage_execution_attempt=1)
+    first_attempt = list(created)
+    created.clear()
+    agent._create_sessions(session_prefix="ceiling_", stage_execution_attempt=2)
+    second_attempt = list(created)
+
+    assert {session_id for session_id, _ in first_attempt} == {
+        "ceiling_designer_attempt_01",
+        "ceiling_critic_attempt_01",
+        "ceiling_planner_attempt_01",
+    }
+    assert {session_id for session_id, _ in second_attempt} == {
+        "ceiling_designer_attempt_02",
+        "ceiling_critic_attempt_02",
+        "ceiling_planner_attempt_02",
+    }
+    assert {path.name for _, path in first_attempt} == {
+        "ceiling_designer.db",
+        "ceiling_critic.db",
+        "ceiling_planner.db",
+    }
+    assert {path.name for _, path in second_attempt} == {
+        "ceiling_designer.db",
+        "ceiling_critic.db",
+        "ceiling_planner.db",
+    }
+
+
+@pytest.mark.parametrize("attempt", [0, -1, False, 1.5])
+def test_create_sessions_rejects_invalid_explicit_stage_execution_attempt(
+    monkeypatch, tmp_path, attempt: object
+) -> None:
+    agent = _ReviewPlannerAgent()
+    agent.cfg = SimpleNamespace(session_memory=None)
+    agent.logger = SimpleNamespace(output_dir=tmp_path)
+    agent._stage_execution_attempt = 1
+    monkeypatch.setattr(base_stateful_agent, "SQLiteSession", object)
+
+    with pytest.raises(ValueError, match="stage_execution_attempt"):
+        agent._create_sessions(
+            session_prefix="ceiling_", stage_execution_attempt=attempt
+        )
+
+
+@pytest.mark.parametrize("attempt", [0, -1, False, 1.5])
+def test_planner_stage_failure_requires_integral_positive_execution_attempt(
+    attempt: object,
+) -> None:
+    with pytest.raises(ValueError, match="stage_execution_attempt"):
+        base_stateful_agent.PlannerStageFailure(
+            reason="no_tool_call",
+            stage="furniture",
+            workflow_calls=0,
+            successful_mutations=0,
+            operation="request_initial_design",
+            stage_execution_attempt=attempt,
+        )
+
+
+@pytest.mark.parametrize("value", [False, True, 1.5, -1, 0])
+def test_stage_execution_attempt_requires_positive_integer(value: object) -> None:
+    agent = _ReviewPlannerAgent()
+    agent.cfg = SimpleNamespace(stage_execution_attempt=value)
+
+    with pytest.raises(ValueError, match="stage_execution_attempt"):
+        agent._configured_stage_execution_attempt()
+
+
+@pytest.mark.parametrize(
+    ("role", "budget"),
+    [("planner", 1536), ("designer", 24576), ("critic", 12288)],
+)
+def test_role_completion_budget_reaches_model_settings(role: str, budget: int) -> None:
+    agent = _ReviewPlannerAgent()
+    agent.cfg = SimpleNamespace(
+        openai=SimpleNamespace(
+            model="Qwen/test",
+            service_tier=None,
+            reasoning_effort=SimpleNamespace(
+                planner="none", designer="none", critic="none"
+            ),
+            max_output_tokens=SimpleNamespace(
+                planner=1536, designer=24576, critic=12288
+            ),
+        )
+    )
+
+    settings = agent._get_model_settings(settings_key=role)
+
+    assert settings.max_tokens == budget
+
+
+def test_critic_tool_choice_is_a_string_request_setting() -> None:
+    agent = _ReviewPlannerAgent()
+    agent.cfg = SimpleNamespace(
+        openai=SimpleNamespace(
+            model="Qwen/test",
+            service_tier=None,
+            reasoning_effort=SimpleNamespace(critic="none"),
+            max_output_tokens=SimpleNamespace(critic=12288),
+        )
+    )
+
+    settings = agent._get_model_settings(
+        settings_key="critic", tool_choice="observe_scene"
+    )
+
+    assert settings.tool_choice == "observe_scene"
+    assert settings.to_json_dict()["tool_choice"] == "observe_scene"
+
+
+def test_stage_ownership_preserves_explicit_owner_and_wall_check_semantics() -> None:
+    explicit = normalize_result_stage_ownership(
+        {"metric": "future_metric", "diagnostics": {"earliest_stage": "ceiling"}}
+    )
+    wall = normalize_result_stage_ownership(
+        {"metric": "visual_clearance", "check_id": "wall_visibility__mirror_0"}
+    )
+
+    assert explicit["diagnostics"]["earliest_stage"] == "ceiling_mounted"
+    assert explicit["diagnostics"]["owner_resolution"] == "producer"
+    assert wall["diagnostics"]["earliest_stage"] == "wall_mounted"
+    assert wall["diagnostics"]["owner_resolution"] == "check_semantics"
+
+
+def test_stage_ownership_fails_closed_for_malformed_and_ambiguous_physics() -> None:
+    malformed = normalize_result_stage_ownership(
+        {"metric": "future_metric", "diagnostics": "not-an-object"}
+    )
+    collision = normalize_result_stage_ownership(
+        {
+            "metric": "physics_collision",
+            "evidence": {
+                "physics_evidence": {
+                    "object_a_id": "legacy_a",
+                    "object_b_id": "legacy_b",
+                }
+            },
+        }
+    )
+
+    assert malformed["diagnostics"] == {
+        "owner_resolution": "final_only",
+        "owner_resolution_error": "malformed_diagnostics",
+    }
+    assert collision["diagnostics"]["owner_resolution"] == "final_only"
+    assert "earliest_stage" not in collision["diagnostics"]
+
+
+def test_llm_audit_leaves_unknown_duration_unavailable_and_marks_length() -> None:
+    result = SimpleNamespace(
+        raw_responses=[
+            SimpleNamespace(choices=[SimpleNamespace(finish_reason="length")])
+        ]
+    )
+
+    record = build_llm_call_debug_record(
+        stage="furniture",
+        agent_role="designer",
+        event="request_initial_design",
+        prompt="place furniture",
+        result=result,
+    )
+
+    assert record.elapsed_sec is None
+    assert record.length_exhausted is True
+    assert record.client_cancelled is None
+
+
+def _agent_with_role_completion_budgets(
+    **budgets: object,
+) -> _ReviewPlannerAgent:
+    agent = _ReviewPlannerAgent()
+    agent.cfg = SimpleNamespace(
+        openai=SimpleNamespace(max_output_tokens=SimpleNamespace(**budgets))
+    )
+    return agent
+
+
+@pytest.mark.parametrize("value", [1, 1536, 4096.0])
+def test_role_completion_budget_accepts_positive_integer_values(value: object) -> None:
+    agent = _agent_with_role_completion_budgets(
+        planner=1536, designer=24576, critic=value
+    )
+
+    assert agent._role_max_output_tokens("critic") == int(value)
+
+
+def test_role_completion_budget_requires_each_configured_role() -> None:
+    agent = _agent_with_role_completion_budgets(planner=1536, designer=24576)
+
+    with pytest.raises(
+        ValueError, match=r"openai\.max_output_tokens\.critic is required"
+    ):
+        agent._role_max_output_tokens("critic")
+
+
+@pytest.mark.parametrize("value", [True, 1.5, "not-a-number", 0, -1])
+def test_role_completion_budget_rejects_invalid_values(value: object) -> None:
+    agent = _agent_with_role_completion_budgets(
+        planner=1536, designer=24576, critic=value
+    )
+
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        agent._role_max_output_tokens("critic")
+
+
+@pytest.mark.parametrize("value", [0, 1, 2, 2.0])
+def test_provider_retry_budget_accepts_non_negative_integers(value: object) -> None:
+    agent = _ReviewPlannerAgent()
+    agent.cfg = SimpleNamespace(api_timeout=SimpleNamespace(max_retries=value))
+
+    assert agent._provider_max_retries() == int(value)
+
+
+@pytest.mark.parametrize("value", [True, 1.5, "invalid", -1])
+def test_provider_retry_budget_rejects_invalid_values(value: object) -> None:
+    agent = _ReviewPlannerAgent()
+    agent.cfg = SimpleNamespace(api_timeout=SimpleNamespace(max_retries=value))
+
+    with pytest.raises(ValueError, match="must be a non-negative integer"):
+        agent._provider_max_retries()
+
+
+def test_run_config_disables_hidden_provider_retries(monkeypatch) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8002/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    agent = _ReviewPlannerAgent()
+    agent.cfg = SimpleNamespace(
+        api_timeout=SimpleNamespace(max_retries=0),
+        session_memory=SimpleNamespace(
+            intra_turn_observation_stripping=SimpleNamespace(enabled=False)
+        ),
+    )
+
+    run_config = agent._create_run_config()
+    wrapped_client = run_config.model_provider._client
+
+    assert wrapped_client._client.max_retries == 0
+
+
+def test_model_settings_propagates_stage_agent_api_timeouts() -> None:
+    agent = _ReviewPlannerAgent()
+    agent.cfg = SimpleNamespace(
+        api_timeout=SimpleNamespace(connect=10.0, read=600, write=600, pool=600),
+        openai=SimpleNamespace(
+            model="Qwen/test",
+            service_tier=None,
+            reasoning_effort=SimpleNamespace(planner="none"),
+            max_output_tokens=SimpleNamespace(planner=1536),
+        ),
+    )
+
+    settings = agent._get_model_settings(settings_key="planner")
+    timeout = settings.extra_args["timeout"]
+
+    assert timeout.connect == 10.0
+    assert timeout.read == 600
+    assert timeout.write == 600
+    assert timeout.pool == 600
+
+
+@pytest.mark.parametrize(
+    "config_path",
+    [
+        "configurations/furniture_agent/base_furniture_agent.yaml",
+        "configurations/wall_agent/base_wall_agent.yaml",
+        "configurations/ceiling_agent/base_ceiling_agent.yaml",
+        "configurations/manipuland_agent/base_manipuland_agent.yaml",
+    ],
+)
+def test_stage_agent_llm_capacity_settings_are_consistent(config_path: str) -> None:
+    cfg = OmegaConf.load(Path(__file__).resolve().parents[2] / config_path)
+
+    assert OmegaConf.to_container(cfg.openai.max_output_tokens, resolve=True) == {
+        "planner": 1536,
+        "designer": 24576,
+        "critic": 12288,
+    }
+    assert OmegaConf.to_container(cfg.api_timeout, resolve=True) == {
+        "connect": 10.0,
+        "read": 600,
+        "write": 600,
+        "pool": 600,
+        "max_retries": 0,
+    }
+
+
+@pytest.mark.parametrize("stage", ["furniture", "wall_mounted", "ceiling_mounted"])
+def test_unknown_owner_is_final_only_for_every_nonfinal_stage(
+    stage: str, tmp_path
+) -> None:
+    payload = {
+        "results": [
+            {
+                "check_id": "new_metric__unowned",
+                "metric": "new_metric",
+                "scoring_tier": "core",
+                "label": "fail",
+                "reason": "unowned deterministic failure",
+                "diagnostics": {},
+            }
+        ]
+    }
+
+    report = StageVerifier().verify(
+        stage=stage,
+        stage_output_dir=str(tmp_path),
+        task_spec=SceneTaskSpec(room_type="bedroom", style="standard"),
+        scene_state_info={"object_names": []},
+        deterministic_critic_payload=payload,
+    )
+
+    assert report.pass_stage
+    assert not report.issues
+    assert (
+        not StageVerifier()
+        .verify(
+            stage="final",
+            stage_output_dir=str(tmp_path),
+            task_spec=SceneTaskSpec(room_type="bedroom", style="standard"),
+            scene_state_info={"object_names": []},
+            deterministic_critic_payload=payload,
+        )
+        .pass_stage
+    )

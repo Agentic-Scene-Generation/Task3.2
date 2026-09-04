@@ -15,13 +15,14 @@ import json
 import logging
 import statistics
 
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 console_logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "sceneexpert.run_metrics.v4"
+SCHEMA_VERSION = "sceneexpert.run_metrics.v5"
 SCENE_COLUMNS = (
     "run_id",
     "batch_id",
@@ -32,6 +33,14 @@ SCENE_COLUMNS = (
     "status",
     "error",
     "attempt",
+    "failure_class",
+    "failure_stage",
+    "failure_error_type",
+    "failure_recordable",
+    "failure_reason",
+    "failure_retryable",
+    "failure_root_error_type",
+    "failure_stage_execution_attempt",
     "trace_status",
     "trace_time_sec",
     "trace_degraded",
@@ -648,6 +657,11 @@ def _scene_metrics(
     final_report = trace.get("final_report") or {}
     code_provenance = dict(trace.get("code_provenance") or {})
     status = str(status_payload.get("status") or "missing")
+    failure = status_payload.get("failure")
+    failure = failure if isinstance(failure, dict) else {}
+    failure_class = str(failure.get("failure_class") or "")
+    if status == "failed" and not failure_class:
+        failure_class = "unclassified_legacy"
     row: dict[str, Any] = {
         "run_id": run_id,
         "batch_id": manifest_row["batch_id"],
@@ -658,6 +672,16 @@ def _scene_metrics(
         "status": status,
         "error": str(status_payload.get("error") or trace.get("error") or ""),
         "attempt": _as_int(status_payload.get("attempt")),
+        "failure_class": failure_class,
+        "failure_stage": str(failure.get("stage") or ""),
+        "failure_error_type": str(failure.get("error_type") or ""),
+        "failure_recordable": failure.get("recordable") is True,
+        "failure_reason": str(failure.get("reason") or ""),
+        "failure_retryable": failure.get("retryable") is True,
+        "failure_root_error_type": str(failure.get("root_error_type") or ""),
+        "failure_stage_execution_attempt": _as_int(
+            failure.get("stage_execution_attempt")
+        ),
         "trace_status": str(trace.get("status") or "missing"),
         "trace_time_sec": _as_float(trace.get("total_time_sec")),
         "trace_degraded": bool(trace.get("degraded", False)),
@@ -717,7 +741,7 @@ def collect_run_metrics(
         for row in completed
         if row["status"] == "completed_with_quality_issues" or row["trace_degraded"]
     ]
-    critic_observed = [row for row in scene_rows if row["critic_effective_checks"] > 0]
+    critic_observed = [row for row in completed if row["critic_effective_checks"] > 0]
     trace_observed = [row for row in scene_rows if row["trace_status"] != "missing"]
     retrieved = [row for row in scene_rows if row["memory_retrieved_stages"]]
     injected = [row for row in scene_rows if row["memory_injection_verified_stages"]]
@@ -823,12 +847,16 @@ def collect_run_metrics(
         "completed_scenes": len(completed),
         "degraded_scenes": len(degraded),
         "failed_scenes": len(failed),
+        "recorded_failed_scenes": sum(row["failure_recordable"] for row in failed),
+        "failure_class_counts": dict(
+            sorted(Counter(row["failure_class"] for row in failed).items())
+        ),
         "missing_or_nonterminal_scenes": len(missing),
         "completion_rate": _rate(len(completed), expected),
         "trace_coverage": _rate(len(trace_observed), expected),
         "mean_scene_time_sec": _mean(row["trace_time_sec"] for row in scene_rows),
         "median_scene_time_sec": _median(row["trace_time_sec"] for row in scene_rows),
-        "critic_coverage": _rate(len(critic_observed), expected),
+        "critic_coverage": _rate(len(critic_observed), len(completed)),
         "critic_mean_score": _mean(row["critic_score"] for row in critic_observed),
         "critic_median_score": _median(row["critic_score"] for row in critic_observed),
         "critic_zero_fail_rate": _rate(
@@ -836,11 +864,11 @@ def collect_run_metrics(
             len(critic_observed),
         ),
         "hard_constraint_pass_rate": _rate(
-            sum(row["hard_constraint_pass"] is True for row in scene_rows),
-            sum(row["hard_constraint_pass"] is not None for row in scene_rows),
+            sum(row["hard_constraint_pass"] is True for row in completed),
+            sum(row["hard_constraint_pass"] is not None for row in completed),
         ),
         "mean_relation_satisfaction": _mean(
-            row["relation_satisfaction"] for row in scene_rows
+            row["relation_satisfaction"] for row in completed
         ),
         "memory_retrieval_scene_coverage": _rate(len(retrieved), expected),
         "memory_injection_scene_coverage": _rate(len(injected), expected),
@@ -1034,7 +1062,10 @@ def _markdown(metrics: dict[str, Any]) -> str:
     for key in (
         "expected_scenes",
         "completed_scenes",
+        "degraded_scenes",
         "failed_scenes",
+        "recorded_failed_scenes",
+        "missing_or_nonterminal_scenes",
         "completion_rate",
         "mean_scene_time_sec",
         "critic_coverage",
@@ -1068,6 +1099,14 @@ def _markdown(metrics: dict[str, Any]) -> str:
         "optional_asset_recommendation_count",
     ):
         lines.append(f"| `{key}` | {summary.get(key)} |")
+    lines.extend(
+        [
+            "",
+            "## Scene failures",
+            "",
+            f"- Failure class counts: `{summary.get('failure_class_counts', {})}`",
+        ]
+    )
     identity = metrics.get("memory_identity") or {}
     lines.extend(
         [
@@ -1144,7 +1183,17 @@ def main(argv: list[str] | None = None) -> int:
         process_exit_code=args.process_exit_code,
     )
     paths = write_run_metrics(metrics)
-    console_logger.info("SceneExpert run metrics: %s", paths["run_json"])
+    summary = metrics["summary"]
+    console_logger.info(
+        "SceneExpert run metrics: %s (completed=%d degraded=%d failed=%d "
+        "missing=%d failure_classes=%s)",
+        paths["run_json"],
+        summary["completed_scenes"],
+        summary["degraded_scenes"],
+        summary["failed_scenes"],
+        summary["missing_or_nonterminal_scenes"],
+        summary["failure_class_counts"],
+    )
     return 0
 
 

@@ -100,6 +100,10 @@ class LLMCallDebugRecord(BaseModel):
     output_excerpt: str = ""
     finish_reasons: list[str] = Field(default_factory=list)
     token_usage: dict[str, int] = Field(default_factory=dict)
+    requested_max_tokens: int | None = None
+    stage_execution_attempt: int | None = None
+    client_cancelled: bool | None = None
+    length_exhausted: bool | None = None
     raw_response_excerpt: str = ""
     error: str = ""
     request_id: str = ""
@@ -109,7 +113,7 @@ class LLMCallDebugRecord(BaseModel):
     retry_strategy: str = ""
     thinking_mode: str = ""
     response_format: str = ""
-    elapsed_sec: float = 0.0
+    elapsed_sec: float | None = None
     timeout_sec: float = 0.0
     reasoning_chars: int = 0
     queue_wait_sec: float | None = None
@@ -407,11 +411,15 @@ def build_llm_call_debug_record(
     result: Any = None,
     raw_response: Any = None,
     error: str = "",
-    elapsed_sec: float = 0.0,
+    elapsed_sec: float | None = None,
     event_kind: Literal["llm", "system"] = "llm",
+    requested_max_tokens: int | None = None,
+    stage_execution_attempt: int | None = None,
+    client_cancelled: bool | None = None,
 ) -> LLMCallDebugRecord:
     prompt_text = _stringify_prompt(prompt)
     output_text = _stringify_prompt(output)
+    finish_reasons = _extract_finish_reasons(result or raw_response)
     return LLMCallDebugRecord(
         stage=stage,
         agent_role=agent_role,
@@ -425,15 +433,19 @@ def build_llm_call_debug_record(
         ),
         output_chars=len(output_text),
         output_excerpt=compact_text(output_text, 1800),
-        finish_reasons=_extract_finish_reasons(result or raw_response),
+        finish_reasons=finish_reasons,
         token_usage=_extract_token_usage(result or raw_response),
+        requested_max_tokens=requested_max_tokens,
+        stage_execution_attempt=stage_execution_attempt,
+        client_cancelled=client_cancelled,
+        length_exhausted=("length" in finish_reasons) or None,
         raw_response_excerpt=(
             compact_text(_stringify_prompt(raw_response), 2400)
             if raw_response is not None
             else ""
         ),
         error=error,
-        elapsed_sec=max(0.0, float(elapsed_sec or 0.0)),
+        elapsed_sec=(max(0.0, float(elapsed_sec)) if elapsed_sec is not None else None),
     )
 
 

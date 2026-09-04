@@ -4,8 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    constraint_evaluation_stage,
+    execution_owner,
+    is_structural_anchor,
+)
+
 
 _EXEMPT_CLASSES = frozenset({"expected_support", "soft_furnishing"})
+_STRUCTURAL_OBJECT_TYPES = frozenset({"floor", "room", "structural", "wall"})
+_STRUCTURAL_CATEGORIES = frozenset({"ceiling", "floor", "room", "wall"})
 
 
 def evaluate_physics_collision_evidence(
@@ -42,6 +50,7 @@ def evaluate_physics_collision_evidence(
         ]
 
     results: list[dict[str, Any]] = []
+    objects_by_id = _scene_objects_by_id(case_pack)
     seen: set[tuple[str, str, str]] = set()
     for row in rows:
         if not isinstance(row, dict):
@@ -59,6 +68,23 @@ def evaluate_physics_collision_evidence(
         seen.add(signature)
         if collision_class in _EXEMPT_CLASSES or depth <= tolerance:
             continue
+        endpoint_owners = {
+            object_id: _endpoint_execution_owner(objects_by_id.get(object_id))
+            for object_id in (first, second)
+        }
+        movable_owners = [owner for owner in endpoint_owners.values() if owner]
+        repair_owner = (
+            constraint_evaluation_stage(*movable_owners) if movable_owners else ""
+        )
+        diagnostics = {
+            "penetration_depth_m": depth,
+            "classification": collision_class,
+            "wall_side": wall_side,
+            "source_phase": evidence.get("source_phase") or "final_physics",
+            "endpoint_generation_owners": endpoint_owners,
+        }
+        if repair_owner:
+            diagnostics["earliest_stage"] = repair_owner
         results.append(
             {
                 "check_id": "physics_collision__" + "__".join(signature),
@@ -73,12 +99,7 @@ def evaluate_physics_collision_evidence(
                     f"Final physics reports {depth * 100:.2f}cm penetration between "
                     f"{first} and {second}."
                 ),
-                "diagnostics": {
-                    "penetration_depth_m": depth,
-                    "classification": collision_class,
-                    "wall_side": wall_side,
-                    "source_phase": evidence.get("source_phase") or "final_physics",
-                },
+                "diagnostics": diagnostics,
                 "evidence": {"physics_evidence": dict(row)},
             }
         )
@@ -129,3 +150,37 @@ def _positive_float(value: Any, default: float) -> float:
     except (TypeError, ValueError):
         return default
     return numeric if numeric >= 0.0 else default
+
+
+def _scene_objects_by_id(case_pack: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    geometry = case_pack.get("scene_geometry")
+    objects = geometry.get("objects") if isinstance(geometry, dict) else []
+    if not isinstance(objects, list):
+        return {}
+    return {
+        str(obj.get("id")): obj
+        for obj in objects
+        if isinstance(obj, dict) and str(obj.get("id") or "")
+    }
+
+
+def _endpoint_execution_owner(obj: dict[str, Any] | None) -> str:
+    """Return a movable endpoint's generation owner, excluding room geometry."""
+    if not isinstance(obj, dict):
+        return ""
+    hints = obj.get("metadata_hints")
+    hints = hints if isinstance(hints, dict) else {}
+    category = str(obj.get("category_norm") or obj.get("category") or "")
+    object_type = (
+        str(obj.get("object_type") or hints.get("scene_object_type") or "")
+        .strip()
+        .lower()
+    )
+    normalized_category = category.strip().lower()
+    if (
+        object_type in _STRUCTURAL_OBJECT_TYPES
+        or normalized_category in _STRUCTURAL_CATEGORIES
+        or is_structural_anchor(category)
+    ):
+        return ""
+    return execution_owner(category, existing_owner=object_type)

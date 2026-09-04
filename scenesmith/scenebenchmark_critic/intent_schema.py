@@ -11,9 +11,16 @@ import hashlib
 import json
 import re
 from copy import deepcopy
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from scenesmith.scenebenchmark_critic.object_taxonomy import (
     canonical_object_category,
@@ -83,9 +90,16 @@ def selector_categories_overlap(first: str, second: str) -> bool:
 _selector_categories_overlap = selector_categories_overlap
 
 
-LEGACY_INTENT_CONTRACT_SCHEMA_VERSIONS = frozenset({"scenesmith.intent_contract.v5"})
-INTENT_CONTRACT_SCHEMA_VERSION = "scenesmith.intent_contract.v6"
-INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v15"
+LEGACY_INTENT_CONTRACT_SCHEMA_VERSIONS = frozenset(
+    {"scenesmith.intent_contract.v5", "scenesmith.intent_contract.v6"}
+)
+INTENT_CONTRACT_SCHEMA_VERSION = "scenesmith.intent_contract.v7"
+INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v16"
+INTENT_COMPILER_SEMANTIC_IR_VERSION = "scenesmith.intent_compiler.semantic_ir.v1"
+
+_SEMANTIC_IR_ENTITY_REF = Annotated[
+    str, Field(pattern=r"^(inventory|anchor):[a-z0-9_]+$")
+]
 
 _WALL_QUALIFIED_DIRECTION_PATTERN = re.compile(
     r"(?P<subject>[^,.;!?]{1,100}?)\s+against\s+"
@@ -188,7 +202,12 @@ class CoverageRequirement(BaseModel):
         "architectural_feature",
         "unsupported_relation",
         "forbidden_inventory",
+        "unresolved",
+        "soft_scope",
     ]
+    disposition: Literal["compiled", "unsupported", "unresolved", "soft_scope"] = (
+        "compiled"
+    )
     normalized: str = Field(min_length=1)
     earliest_stage: str = "floor_plan"
     final_stage: str = "final"
@@ -215,6 +234,107 @@ class EdgeDistributionGroup(BaseModel):
         if any(item < 0 for item in counts):
             raise ValueError("counts_per_edge values must be non-negative")
         return sorted(counts, reverse=True)
+
+
+class CompilerSemanticIREdgeDistributionGroup(BaseModel):
+    """Strict wire-only edge group emitted by the semantic compiler."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    edge_class: Literal["long", "short"]
+    counts_per_edge: list[int] = Field(min_length=2, max_length=2)
+    spacing: Literal["equal_segments", "unconstrained"] = "equal_segments"
+
+
+class CompilerSemanticIRRequirement(BaseModel):
+    """Strict decoded shape before semantic admission projects runtime rows."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    requirement_id: str = Field(min_length=1, max_length=64)
+    kind: Literal[
+        "inventory",
+        "forbidden_inventory",
+        "relation",
+        "unsupported",
+        "unresolved",
+        "soft_scope",
+    ]
+    grounding: str = Field(pattern=r"^(prompt|interaction|aesthetic):[0-9]+$")
+    relation: str | None = None
+    subject_ref: _SEMANTIC_IR_ENTITY_REF | None = None
+    # This must stay required even though coverage-only rows use null. Local
+    # llama.cpp grammars can otherwise omit a nullable field entirely.
+    target_ref: _SEMANTIC_IR_ENTITY_REF | None
+    secondary_target_ref: _SEMANTIC_IR_ENTITY_REF | None = None
+    subject_count: int | None = Field(default=None, ge=1)
+    target_count: int | None = Field(default=None, ge=1)
+    subject_quantifier: Literal["all", "exactly", "at_least", "minimum"] | None = None
+    target_quantifier: Literal["all", "exactly", "at_least", "minimum"] | None = None
+    subject_role: str | None = Field(default=None, max_length=64)
+    target_role: str | None = Field(default=None, max_length=64)
+    subject_cohort: str | None = Field(default=None, max_length=64)
+    target_cohort: str | None = Field(default=None, max_length=64)
+    edge_frame: Literal["target_local_rectangle"] | None = None
+    groups: list[CompilerSemanticIREdgeDistributionGroup] | None = None
+    orientation: (
+        Literal[
+            "toward_target",
+            "away_from_target",
+            "parallel_to_edge",
+            "unconstrained",
+        ]
+        | None
+    ) = None
+    forbidden_category: str | None = Field(default=None, max_length=64)
+    reason: str | None = Field(default=None, max_length=256)
+    surface_mentions: list[Annotated[str, Field(max_length=128)]] | None = None
+
+    @field_validator("relation")
+    @classmethod
+    def _validate_relation(cls, value: str | None) -> str | None:
+        if value is not None and value not in set(RELATION_REGISTRY) - {
+            "required_count"
+        }:
+            raise ValueError("unknown semantic IR relation")
+        return value
+
+
+class CompilerSemanticIR(BaseModel):
+    """Provider-decoded wire envelope, validated before semantic admission."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    schema_version: Literal[INTENT_COMPILER_SEMANTIC_IR_VERSION]
+    requirements: list[CompilerSemanticIRRequirement]
+
+
+def validate_compiler_semantic_ir(payload: Any) -> None:
+    """Reject malformed provider JSON before it can affect a hard contract."""
+
+    try:
+        CompilerSemanticIR.model_validate(payload)
+    except ValidationError as exc:
+        errors = exc.errors(include_url=False)
+        if any(
+            tuple(error.get("loc") or ()) == ("schema_version",) for error in errors
+        ):
+            raise ValueError(
+                "semantic IR schema_version is missing or unsupported"
+            ) from exc
+        if any(
+            error.get("type") == "missing"
+            and tuple(error.get("loc") or ())[-1:] == ("target_ref",)
+            for error in errors
+        ):
+            raise ValueError("semantic IR requirement omitted target_ref") from exc
+        error = errors[0] if errors else {"loc": (), "msg": str(exc)}
+        location = ".".join(str(part) for part in error.get("loc") or ())
+        raise ValueError(
+            "semantic IR wire schema validation failed"
+            + (f" at {location}" if location else "")
+            + f": {error.get('msg') or exc}"
+        ) from exc
 
 
 class IntentRelation(BaseModel):
@@ -366,6 +486,7 @@ class IntentContract(BaseModel):
     room_type: str = ""
     constraints: list[IntentRelation] = Field(default_factory=list)
     coverage_requirements: list[CoverageRequirement] = Field(default_factory=list)
+    coverage_ledger: list[dict[str, Any]] = Field(default_factory=list)
     retry_count: int = Field(default=0, ge=0, le=1)
     warnings: list[str] = Field(default_factory=list)
 
@@ -499,12 +620,43 @@ class IntentContract(BaseModel):
         return self
 
 
-def validate_intent_contract(payload: dict[str, Any]) -> dict[str, Any]:
-    """Validate and normalize a wire payload, returning JSON-compatible data."""
+def validate_intent_contract(
+    payload: dict[str, Any], *, validate_prompt_semantics: bool = True
+) -> dict[str, Any]:
+    """Validate and normalize a wire payload, returning JSON-compatible data.
+
+    Live IntentCompiler admission has already received prompt semantics from
+    its LLM IR. It disables the legacy prompt-text validator so deterministic
+    validation remains structural rather than a second semantic parser.
+    """
 
     normalized_payload = migrate_intent_contract_payload(payload)
-    contract = IntentContract.model_validate(normalized_payload)
+    validation_payload = dict(normalized_payload)
+    original_evidence: list[Any] = []
+    if not validate_prompt_semantics:
+        validation_payload["prompt"] = ""
+        # Evidence remains report provenance, but it is natural-language input.
+        # Do not let legacy evidence regexes reinterpret an admitted SemanticIR
+        # relation while checking its structural schema.
+        validation_constraints: list[Any] = []
+        for row in normalized_payload.get("constraints") or []:
+            if not isinstance(row, dict):
+                validation_constraints.append(row)
+                original_evidence.append(None)
+                continue
+            normalized_row = dict(row)
+            original_evidence.append(normalized_row.get("evidence_span"))
+            if str(normalized_row.get("evidence_span") or "").strip():
+                normalized_row["evidence_span"] = "LLM SemanticIR grounding"
+            validation_constraints.append(normalized_row)
+        validation_payload["constraints"] = validation_constraints
+    contract = IntentContract.model_validate(validation_payload)
     result = contract.model_dump(mode="json", exclude_none=True)
+    if not validate_prompt_semantics:
+        result["prompt"] = str(normalized_payload.get("prompt") or "")
+        for index, evidence_span in enumerate(original_evidence):
+            if evidence_span is not None:
+                result["constraints"][index]["evidence_span"] = evidence_span
     constraints = result.get("constraints") or []
     seen: dict[str, int] = {}
     for constraint in constraints:
@@ -553,7 +705,7 @@ def validate_intent_contract(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def migrate_intent_contract_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """Upgrade a v5 payload while keeping optional coverage additive.
+    """Upgrade legacy payloads while keeping optional coverage additive.
 
     Checkpoints created before coverage auditing remain valid.  The migration
     deliberately does not infer requirements from an old payload because the
@@ -567,6 +719,15 @@ def migrate_intent_contract_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if version in LEGACY_INTENT_CONTRACT_SCHEMA_VERSIONS:
         result["schema_version"] = INTENT_CONTRACT_SCHEMA_VERSION
         result.setdefault("coverage_requirements", [])
+        result.setdefault("coverage_ledger", [])
+    for requirement in result.get("coverage_requirements") or []:
+        if not isinstance(requirement, dict) or requirement.get("disposition"):
+            continue
+        requirement["disposition"] = (
+            "unsupported"
+            if requirement.get("kind") == "unsupported_relation"
+            else "compiled"
+        )
     return result
 
 
@@ -641,73 +802,81 @@ def intent_contract_json_schema() -> dict[str, Any]:
 
 
 def intent_compiler_wire_json_schema() -> dict[str, Any]:
-    """Return the compact, provenance-free schema generated by the LLM.
+    """Return the LLM-only semantic IR schema used by live compilation.
 
-    Long evidence and inference strings are deterministic compiler metadata.
-    Keeping them out of constrained generation prevents a malformed string from
-    consuming the entire completion budget before the JSON object can close.
+    Endpoint categories never appear in this wire format. The model selects
+    catalog refs, then deterministic admission projects canonical categories.
     """
 
-    full_schema = intent_contract_json_schema()
-    selector_schema = deepcopy(full_schema["$defs"]["IntentSelector"])
-    for field in ("category", "role", "secondary_category", "secondary_role"):
-        selector_schema["properties"][field]["maxLength"] = 64
-
-    group_schema = deepcopy(full_schema["$defs"]["EdgeDistributionGroup"])
-    relation_schema = deepcopy(full_schema["$defs"]["IntentRelation"])
-    retained = {
-        "relation",
-        "subjects",
-        "targets",
-        "edge_frame",
-        "groups",
-        "orientation",
-    }
-    relation_schema["properties"] = {
-        key: value
-        for key, value in relation_schema["properties"].items()
-        if key in retained
-    }
-    relation_schema["properties"]["grounding"] = {
+    endpoint_ref = {
         "type": "string",
-        "pattern": r"^(prompt|interaction|aesthetic):[0-9]+$",
-        "maxLength": 32,
+        "pattern": r"^(inventory|anchor):[a-z0-9_]+$",
     }
-    relation_schema["required"] = ["relation", "subjects", "targets", "grounding"]
-    relation_schema["additionalProperties"] = False
-
-    allowed_relations = sorted(set(RELATION_REGISTRY) - {"required_count"})
-    relation_schema["properties"]["relation"] = {"enum": allowed_relations}
-    for condition in relation_schema.get("allOf") or []:
-        relation_enum = (
-            condition.get("if", {})
-            .get("properties", {})
-            .get("relation", {})
-            .get("enum")
-        )
-        if relation_enum is not None:
-            relation_enum[:] = [
-                name for name in relation_enum if name != "required_count"
-            ]
-    relation_schema["allOf"] = [
-        condition
-        for condition in relation_schema.get("allOf") or []
-        if condition.get("if", {}).get("properties", {}).get("relation", {}).get("enum")
-    ]
-
-    return {
-        "$defs": {
-            "EdgeDistributionGroup": group_schema,
-            "IntentSelector": selector_schema,
-            "IntentWireRelation": relation_schema,
-        },
+    requirement = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "constraints": {
+            "requirement_id": {"type": "string", "minLength": 1, "maxLength": 64},
+            "kind": {
+                "enum": [
+                    "inventory",
+                    "forbidden_inventory",
+                    "relation",
+                    "unsupported",
+                    "unresolved",
+                    "soft_scope",
+                ]
+            },
+            "grounding": {
+                "type": "string",
+                "pattern": r"^(prompt|interaction|aesthetic):[0-9]+$",
+            },
+            "relation": {"enum": sorted(set(RELATION_REGISTRY) - {"required_count"})},
+            "subject_ref": endpoint_ref,
+            "target_ref": {"anyOf": [endpoint_ref, {"type": "null"}]},
+            "secondary_target_ref": {"anyOf": [endpoint_ref, {"type": "null"}]},
+            "subject_count": {"type": "integer", "minimum": 1},
+            "target_count": {"type": "integer", "minimum": 1},
+            "subject_quantifier": {"enum": ["all", "exactly", "at_least", "minimum"]},
+            "target_quantifier": {"enum": ["all", "exactly", "at_least", "minimum"]},
+            "subject_role": {"type": "string", "maxLength": 64},
+            "target_role": {"type": "string", "maxLength": 64},
+            "subject_cohort": {"type": "string", "maxLength": 64},
+            "target_cohort": {"type": "string", "maxLength": 64},
+            "edge_frame": {"enum": ["target_local_rectangle", None]},
+            "groups": {
                 "type": "array",
-                "items": {"$ref": "#/$defs/IntentWireRelation"},
-            }
+                "items": {"$ref": "#/$defs/EdgeDistributionGroup"},
+            },
+            "orientation": {
+                "enum": [
+                    "toward_target",
+                    "away_from_target",
+                    "parallel_to_edge",
+                    "unconstrained",
+                    None,
+                ]
+            },
+            "forbidden_category": {"type": "string", "maxLength": 64},
+            "reason": {"type": "string", "maxLength": 256},
+            "surface_mentions": {
+                "type": "array",
+                "items": {"type": "string", "maxLength": 128},
+            },
         },
-        "required": ["constraints"],
+        # llama.cpp's JSON grammar does not reliably enforce conditional
+        # ``if/then`` requirements. Keep the endpoint field structurally
+        # present for every row, while allowing null for coverage-only rows;
+        # deterministic admission still requires a catalog ref for relations.
+        "required": ["requirement_id", "kind", "grounding", "target_ref"],
+    }
+    return {
+        "$defs": {"EdgeDistributionGroup": EdgeDistributionGroup.model_json_schema()},
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "schema_version": {"const": INTENT_COMPILER_SEMANTIC_IR_VERSION},
+            "requirements": {"type": "array", "items": requirement},
+        },
+        "required": ["schema_version", "requirements"],
     }

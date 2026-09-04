@@ -42,7 +42,10 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
     migrate_intent_contract_payload,
     validate_intent_contract,
 )
-from scenesmith.scenebenchmark_critic.object_taxonomy import OBJECT_CATEGORY_PHRASES
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    GENERIC_CATEGORY_PARENTS,
+    OBJECT_CATEGORY_PHRASES,
+)
 from scenesmith.scenebenchmark_critic.object_taxonomy import (
     canonical_object_category,
     generation_owner,
@@ -637,7 +640,10 @@ def attach_intent_contract_to_case_pack(
         )
     if cached.get("prompt_sha256") != prompt_hash:
         raise ValueError("intent contract prompt hash does not match original prompt")
-    cached = validate_intent_contract(cached)
+    # The cached contract was admitted from CompilerSemanticIR. Re-attachment
+    # rechecks its versioned structure and provenance without parsing prompt
+    # wording a second time.
+    cached = validate_intent_contract(cached, validate_prompt_semantics=False)
     setattr(scene, "scenebenchmark_intent_contract", cached)
     metadata = getattr(scene, "metadata", None)
     if isinstance(metadata, dict):
@@ -3975,34 +3981,6 @@ def _canonical_role_text(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value or "").strip().lower()).strip()
 
 
-_GENERIC_SELECTOR_PARENTS = {
-    "freestanding_bathtub": "bathtub",
-    "ceiling_light": "lamp",
-    "pendant_light": "lamp",
-    "string_light": "lamp",
-    "wall_light": "lamp",
-    "conference_table": "table",
-    "dining_table": "table",
-    "coffee_table": "table",
-    "side_table": "table",
-    "office_chair": "chair",
-    "guest_chair": "chair",
-    "dining_chair": "chair",
-    "student_chair": "chair",
-    "teacher_chair": "chair",
-    "armchair": "chair",
-    "stool": "chair",
-    "bench": "chair",
-    "student_desk": "desk",
-    "teacher_desk": "desk",
-    "reception_desk": "desk",
-    # HSSD retrieval commonly keeps the stable asset label ``cabinet`` for a
-    # prompt's more descriptive ``storage_cabinet`` request.  This fallback is
-    # deliberately one-way and runs only after exact selector matching, so a
-    # retrieved storage-cabinet asset still wins whenever it is available.
-    "storage_cabinet": "cabinet",
-}
-
 _GENERIC_SELECTOR_SUFFIX_PARENTS = frozenset(
     {
         "bed",
@@ -4027,7 +4005,7 @@ def _generic_selector_parent(category: str) -> str | None:
     preferred whenever it is available.
     """
     normalized = _normalize_selector_category(category)
-    parent = _GENERIC_SELECTOR_PARENTS.get(normalized)
+    parent = GENERIC_CATEGORY_PARENTS.get(normalized)
     if parent is not None:
         return parent
     for candidate in _GENERIC_SELECTOR_SUFFIX_PARENTS:

@@ -92,6 +92,28 @@ class SceneExpertRuntimeBoundaryTest(unittest.TestCase):
         self.assertIn("if run_shared_base_with_recovery; then", runner_source)
         self.assertNotIn("if ! run_shared_base_with_recovery; then", runner_source)
 
+    def test_parallel_runner_scopes_scene_failure_policy(self) -> None:
+        runner_source = self._source("scripts/run_parallel_critic_on.sh")
+
+        self.assertIn(
+            'SCENE_FAILURE_POLICY="${SCENE_FAILURE_POLICY:-record}"',
+            runner_source,
+        )
+        self.assertIn('scene_failure_policy="strict"', runner_source)
+        self.assertIn(
+            '"experiment.scene_failure_policy=${scene_failure_policy}"',
+            runner_source,
+        )
+
+    def test_parallel_runner_preserves_generation_exit_on_metrics_failure(
+        self,
+    ) -> None:
+        runner_source = self._source("scripts/run_parallel_critic_on.sh")
+
+        self.assertIn("metrics_exit_code=$?", runner_source)
+        self.assertIn('if [ "$run_exit_code" -eq 0 ]; then', runner_source)
+        self.assertIn('run_exit_code="$metrics_exit_code"', runner_source)
+
     def test_partial_pipeline_cannot_promote_long_term_memory(self) -> None:
         hooks_source = self._source("scenesmith/scene_expert/hooks.py")
 

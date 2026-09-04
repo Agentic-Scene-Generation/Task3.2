@@ -183,6 +183,7 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
     _write_json(
         scene1 / "scene_status.json",
         {
+            "schema_version": "scenesmith.scene_status.v2",
             "status": "failed",
             "attempt": 1,
             "prompt": "living room",
@@ -257,6 +258,8 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
     assert metrics["summary"]["expected_scenes"] == 2
     assert metrics["summary"]["completed_scenes"] == 1
     assert metrics["summary"]["failed_scenes"] == 1
+    assert metrics["summary"]["recorded_failed_scenes"] == 0
+    assert metrics["summary"]["failure_class_counts"] == {"unclassified_legacy": 1}
     assert metrics["summary"]["critic_mean_score"] == 1.0
     assert metrics["summary"]["hard_constraint_pass_rate"] == 1.0
     assert metrics["summary"]["mean_relation_satisfaction"] == 0.9
@@ -300,6 +303,80 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
     assert all(Path(path).is_file() for path in paths.values())
     rows = list(csv.DictReader(Path(paths["scene_csv"]).open("r", encoding="utf-8")))
     assert [row["status"] for row in rows] == ["completed", "failed"]
+    assert rows[1]["failure_class"] == "unclassified_legacy"
+
+
+def test_recorded_failure_stays_out_of_quality_denominators(tmp_path) -> None:
+    output_root = tmp_path / "run_recorded"
+    batch = output_root / "critic_on" / "batch_001"
+    hydra = batch / "hydra"
+    _write_manifest(batch / "batch_cases.csv")
+
+    scene0 = hydra / "scene_000"
+    _write_json(
+        scene0 / "scene_status.json",
+        {"status": "completed", "attempt": 1, "prompt": "bedroom"},
+    )
+    scene1 = hydra / "scene_001"
+    _write_json(
+        scene1 / "scene_status.json",
+        {
+            "schema_version": "scenesmith.scene_status.v3",
+            "scene_id": 1,
+            "status": "failed",
+            "attempt": 1,
+            "prompt": "living room",
+            "error": "bounded ceiling workflow produced no mutation",
+            "failure": {
+                "failure_class": "stage_unavailable",
+                "stage": "ceiling_mounted",
+                "error_type": "PlannerWorkflowNoMutationError",
+                "message": "bounded ceiling workflow produced no mutation",
+                "reason": "no_mutation",
+                "retryable": False,
+                "root_error_type": "",
+                "stage_execution_attempt": 1,
+                "attempt": 1,
+                "recordable": True,
+                "provenance": {"workflow_calls": 2},
+            },
+        },
+    )
+    for scene_dir, score in ((scene0, 0.75), (scene1, 1.0)):
+        _write_json(
+            scene_dir
+            / "room_main"
+            / "scenebenchmark_critic"
+            / "final_scene"
+            / "scenebenchmark_critic.json",
+            {
+                "summary": {
+                    "scene_summary": {
+                        "effective_checks": 4,
+                        "pass": 4,
+                        "degraded": 0,
+                        "fail": 0,
+                        "unknown": 0,
+                        "score": score,
+                    }
+                }
+            },
+        )
+
+    metrics = collect_run_metrics(output_root, process_exit_code=0)
+
+    assert metrics["schema_version"] == "sceneexpert.run_metrics.v5"
+    assert metrics["quality_comparison_ready"] is False
+    assert metrics["summary"]["completed_scenes"] == 1
+    assert metrics["summary"]["failed_scenes"] == 1
+    assert metrics["summary"]["recorded_failed_scenes"] == 1
+    assert metrics["summary"]["failure_class_counts"] == {"stage_unavailable": 1}
+    assert metrics["summary"]["critic_mean_score"] == 0.75
+    failed = next(row for row in metrics["scenes"] if row["status"] == "failed")
+    assert failed["failure_class"] == "stage_unavailable"
+    assert failed["failure_stage"] == "ceiling_mounted"
+    assert failed["failure_error_type"] == "PlannerWorkflowNoMutationError"
+    assert failed["failure_recordable"] is True
 
 
 def test_malformed_jsonl_is_a_warning_not_a_metrics_failure(tmp_path) -> None:

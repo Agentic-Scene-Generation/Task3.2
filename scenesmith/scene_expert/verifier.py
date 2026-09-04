@@ -21,10 +21,20 @@ import yaml
 from scenesmith.scenebenchmark_critic.object_taxonomy import (
     canonical_object_category,
     categories_are_equivalent,
+    semantic_category_match,
 )
 from scenesmith.scenebenchmark_critic.relation_registry import (
     STAGE_ORDER as CONTRACT_STAGE_ORDER,
     relation_spec,
+)
+from scenesmith.scenebenchmark_critic.stage_ownership import (
+    normalize_result_stage_ownership,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.intent_contract import (
+    SUPPORT_READINESS_FAILURE_CODE,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_containment import (
+    ROOM_CONTAINMENT_FAILURE_CODE,
 )
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
@@ -302,13 +312,14 @@ def _result_is_due(result: dict, stage: str) -> bool:
     if stage == "final":
         return True
     if stage not in CONTRACT_STAGE_ORDER:
-        return True
+        return False
+    result = normalize_result_stage_ownership(result)
     constraint = _result_intent_constraint(result)
     diagnostics = result.get("diagnostics")
     diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
     earliest = str(diagnostics.get("earliest_stage") or constraint.get("stage") or "")
     if not earliest or earliest not in CONTRACT_STAGE_ORDER:
-        return True
+        return False
     return earliest == stage
 
 
@@ -330,6 +341,39 @@ def _deterministic_core_failures(payload: dict | None, stage: str) -> list[dict]
             continue
         failures.append(result)
     return failures
+
+
+def non_degradable_blocker_codes(
+    issues: list[VerifyIssue],
+) -> tuple[str, ...]:
+    """Return typed deterministic failures that degraded mode cannot accept."""
+    blockers: set[str] = set()
+    for issue in issues:
+        if (
+            issue.scoring_tier != "core"
+            or issue.issue_type != "deterministic_relation_failure"
+        ):
+            continue
+        if issue.relation == ROOM_CONTAINMENT_FAILURE_CODE:
+            blockers.add(ROOM_CONTAINMENT_FAILURE_CODE)
+        if issue.diagnostics.get("support_readiness") is True:
+            blockers.add(SUPPORT_READINESS_FAILURE_CODE)
+    return tuple(sorted(blockers))
+
+
+def _non_degradable_blockers(
+    stage_reports: list[StageVerifyReport], payload: dict | None
+) -> list[str]:
+    """Retain typed blockers across resumed-stage finalization."""
+    blockers: set[str] = set()
+    final_issues = [
+        _issue_from_deterministic_result(result)
+        for result in _deterministic_core_failures(payload, "final")
+    ]
+    blockers.update(non_degradable_blocker_codes(final_issues))
+    for report in stage_reports:
+        blockers.update(non_degradable_blocker_codes(report.issues))
+    return sorted(blockers)
 
 
 def _deterministic_hard_check_report(
@@ -582,6 +626,7 @@ def _object_labels_match(required: str, present: str) -> bool:
     present_components = _object_label_component_categories(present)
     if any(
         categories_are_equivalent(required_category, present_category)
+        or semantic_category_match(required_category, present_category)["matched"]
         for required_category in required_components
         for present_category in present_components
     ):
@@ -1002,9 +1047,15 @@ class FullVerifier:
         has_plausibility = "plausibility" in all_scores
         pass_plausibility = not has_plausibility or plausibility >= self._pass_threshold
 
-        deterministic_pass = self._deterministic_stage_passes(
-            stage_reports
-        ) and not _deterministic_core_failures(deterministic_critic_payload, "final")
+        final_failures = _deterministic_core_failures(
+            deterministic_critic_payload, "final"
+        )
+        non_degradable_blockers = _non_degradable_blockers(
+            stage_reports, deterministic_critic_payload
+        )
+        deterministic_pass = (
+            self._deterministic_stage_passes(stage_reports) and not final_failures
+        )
         visual_scores_pass = overall >= self._pass_threshold and pass_plausibility
         report = FullVerifyReport(
             semantic_score=semantic,
@@ -1018,6 +1069,7 @@ class FullVerifier:
             support_relation_accuracy=interaction,  # proxy
             overall_score=overall,
             deterministic_pass=deterministic_pass,
+            non_degradable_blockers=non_degradable_blockers,
             pass_scene=(
                 deterministic_pass and visual_scores_pass
                 if self._visual_score_hard_gate

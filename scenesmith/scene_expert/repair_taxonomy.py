@@ -12,6 +12,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_containment import (
+    ROOM_CONTAINMENT_FAILURE_CODE,
+)
+
 
 class FailureCategory(str, Enum):
     MISSING_REQUIRED_OBJECT = "missing_required_object"
@@ -20,6 +24,7 @@ class FailureCategory(str, Enum):
     WINDOW_OR_WALL_ACCESS = "window_or_wall_access"
     SUPPORT_INVALID = "support_invalid"
     OUT_OF_BOUNDS = "out_of_bounds"
+    ROOM_CONTAINMENT = ROOM_CONTAINMENT_FAILURE_CODE
     ASSET_INVALID = "asset_invalid"
     UNKNOWN = "unknown"
 
@@ -111,13 +116,39 @@ def classify_hard_reasons(
     return failures
 
 
+def classify_typed_failures(
+    failures: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+) -> list[ClassifiedFailure]:
+    """Project critic-owned failure codes without parsing diagnostic prose."""
+    classified: list[ClassifiedFailure] = []
+    for failure in failures or []:
+        if str(failure.get("relation_type") or "") != ROOM_CONTAINMENT_FAILURE_CODE:
+            continue
+        if str(failure.get("label") or "fail").lower() != "fail":
+            continue
+        object_id = str(failure.get("primary_object") or "")
+        diagnostics = failure.get("diagnostics")
+        classified.append(
+            ClassifiedFailure(
+                category=FailureCategory.ROOM_CONTAINMENT,
+                reason=ROOM_CONTAINMENT_FAILURE_CODE,
+                object_id=object_id,
+                metadata=dict(diagnostics) if isinstance(diagnostics, dict) else {},
+            )
+        )
+    return classified
+
+
 def build_repair_plan(
     *,
     stage: str,
     hard_reasons: list[str] | tuple[str, ...] | None,
+    typed_failures: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
     max_attempts: int = 1,
 ) -> RepairPlan:
-    failures = classify_hard_reasons(hard_reasons)
+    failures = classify_typed_failures(typed_failures) + classify_hard_reasons(
+        hard_reasons
+    )
     operators: list[str] = []
     categories = {failure.category for failure in failures}
     if FailureCategory.ASSET_INVALID in categories:
@@ -134,6 +165,8 @@ def build_repair_plan(
         operators.append("resnap_to_valid_support_surface")
     if FailureCategory.OUT_OF_BOUNDS in categories:
         operators.append("project_inside_room_bounds")
+    if FailureCategory.ROOM_CONTAINMENT in categories:
+        operators.append("repair_room_containment")
     if not operators:
         operators.append("fallback_local_repair_instruction")
     return RepairPlan(

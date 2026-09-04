@@ -140,7 +140,9 @@ def load_object_collision_geometry(obj: SceneObject) -> list[trimesh.Trimesh]:
     If no collision geometry is available, falls back to loading and converting
     the visual geometry from Y-up (GLTF) to Z-up (Drake) coordinates.
 
-    Applies both SDF scale (from mesh loading) and object's runtime scale_factor.
+    SDF collision geometry already carries every scale Drake will simulate. The
+    SceneObject scale factor is only applied to the visual-geometry fallback,
+    whose file is not rewritten by SDF rescaling.
 
     Args:
         obj: Scene object with sdf_path and/or geometry_path.
@@ -153,8 +155,10 @@ def load_object_collision_geometry(obj: SceneObject) -> list[trimesh.Trimesh]:
     """
     # Try to load collision geometry from SDF.
     collision_meshes = []
+    loaded_from_sdf = False
     if obj.sdf_path:
         collision_meshes = load_collision_meshes_from_sdf(obj.sdf_path)
+        loaded_from_sdf = bool(collision_meshes)
 
     # Fallback to visual geometry if no collision geometry available.
     if not collision_meshes:
@@ -165,8 +169,10 @@ def load_object_collision_geometry(obj: SceneObject) -> list[trimesh.Trimesh]:
         )
         collision_meshes = load_and_convert_visual_mesh(obj.geometry_path)
 
-    # Apply object's runtime scale_factor (set by rescale operations).
-    if obj.scale_factor != 1.0:
+    # Avoid applying scale twice: generated/rescaled SDF collision geometry is
+    # already in its physics dimensions. HSSD stores scale_factor separately
+    # for support-surface metadata, not for a second collision-mesh resize.
+    if not loaded_from_sdf and obj.scale_factor != 1.0:
         for mesh in collision_meshes:
             mesh.vertices *= obj.scale_factor
 

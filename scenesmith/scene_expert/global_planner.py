@@ -876,8 +876,9 @@ class GlobalPlanner:
             original_task=original_task,
         )
 
-        if getattr(self, "_structured_llm", None) is not None:
-            result = self._structured_llm.complete(
+        structured_llm = getattr(self, "_structured_llm", None)
+        if structured_llm is not None:
+            result = structured_llm.complete(
                 role="global_planner",
                 stage=stage,
                 event="generate_stage_brief",

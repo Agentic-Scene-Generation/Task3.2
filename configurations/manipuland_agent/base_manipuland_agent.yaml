@@ -301,6 +301,10 @@ openai:
     mesh_analysis: "none"  # For mesh physics analysis
     asset_analysis: "none"  # For asset router request analysis
     asset_validation: "none"  # For asset router mesh validation
+  max_output_tokens:
+    planner: 1536
+    designer: 24576
+    critic: 12288
   # How verbose the model's output should be.
   # Options: "low", "medium", "high".
   # Lower verbosity = faster and cheaper but may omit details.
@@ -336,9 +340,10 @@ context_furniture:
 # OpenAI API timeout configuration (seconds).
 api_timeout:
   connect: 10.0  # Connection establishment
-  read: 300  # 5 minutes
-  write: 300  # 5 minutes
-  pool: 300  # 5 minutes
+  read: 600  # 10 minutes
+  write: 600  # 10 minutes
+  pool: 600  # 10 minutes
+  max_retries: 0  # Scene-level typed retry owns transient recovery.
 
 # Loop detection configuration for function tools
 loop_detection:

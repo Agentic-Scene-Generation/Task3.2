@@ -63,7 +63,11 @@ from scenesmith.scene_expert.schemas import (
 from scenesmith.scene_expert.slow_memory.trajectory import TrajectoryCollector
 from scenesmith.scene_expert.task_compiler import TaskCompiler
 from scenesmith.scene_expert.trace_logger import TraceLogger, collect_code_provenance
-from scenesmith.scene_expert.verifier import FullVerifier, StageVerifier
+from scenesmith.scene_expert.verifier import (
+    FullVerifier,
+    StageVerifier,
+    non_degradable_blocker_codes,
+)
 from scenesmith.scenebenchmark_critic.config import critic_config_from_any
 from scenesmith.scenebenchmark_critic.intent_compiler import IntentCompiler
 from scenesmith.scenebenchmark_critic.intent_contract import build_intent_contract
@@ -97,6 +101,7 @@ class StageCommitResult:
     retryable: bool = False
     reason: str = ""
     quality_failure: bool = False
+    non_degradable_blockers: tuple[str, ...] = ()
 
 
 def _empty_memory_pack() -> MemoryPack:
@@ -269,12 +274,12 @@ def _compile_intent_contract_if_enabled(
     cfg_dict: dict,
     task_spec: SceneTaskSpec | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Compile v5 exactly once when the embedded critic is enabled.
+    """Compile the SemanticIR-backed contract once when the critic is enabled.
 
     The private config entries are consumed by ``_generate_room`` so the
     contract survives the floor-plan boundary even when SceneExpert itself is
-    disabled.  The compiler itself falls back to the deterministic prompt
-    parser when the model cannot return a valid contract.
+    disabled. Invalid provider or SemanticIR responses remain explicit
+    compilation failures after the bounded corrective retry.
     """
     critic_config = critic_config_from_any(cfg_dict)
     if not critic_config.enabled:
@@ -331,8 +336,8 @@ def _compile_intent_contract_if_enabled(
         cfg_dict["_scenebenchmark_intent_cache_key"] = {
             "prompt_sha256": prompt_hash,
             "task_spec_sha256": task_spec_hash,
-                "spec_version": INTENT_COMPILER_SPEC_VERSION,
-                "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+            "spec_version": INTENT_COMPILER_SPEC_VERSION,
+            "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
             "mode": "deterministic",
         }
         return contract, trace
@@ -1165,6 +1170,7 @@ class SceneExpertHookRunner:
                 "[SceneExpert] Failed to capture deterministic repair activity: %s",
                 error,
             )
+
     def record_runtime_failure_continuation(self, provenance: dict[str, Any]) -> None:
         """Attach checkpoint-gated runtime salvage to the stage trace evidence."""
         if not isinstance(provenance, dict):
@@ -2089,6 +2095,11 @@ class SceneExpertHookRunner:
             reason=result_reason,
             quality_failure=(
                 verify_report is not None and not passed and not verification_error
+            ),
+            non_degradable_blockers=(
+                non_degradable_blocker_codes(verify_report.issues)
+                if verify_report is not None
+                else ()
             ),
         )
 

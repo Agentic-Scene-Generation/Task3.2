@@ -334,6 +334,9 @@ FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS="${FAIL_STAGE_ON_UNRESOLVED_HARD_CONST
 # Preserve failed quality trajectories and final renders by default in probes.
 # Production experiments keep their base-config default of "strict".
 QUALITY_FAILURE_POLICY="${QUALITY_FAILURE_POLICY:-degraded}"
+# A typed scene-local failure remains visible in artifacts and metrics but does
+# not block critic-probe batches. Shared-base generation overrides this to strict.
+SCENE_FAILURE_POLICY="${SCENE_FAILURE_POLICY:-record}"
 BRANCH_FROM_SHARED_BASE="${BRANCH_FROM_SHARED_BASE:-false}"
 SHARED_BASE_STOP_STAGE="${SHARED_BASE_STOP_STAGE:-floor_plan}"
 SHARED_BASE_ROOT="${SHARED_BASE_ROOT:-}"
@@ -651,6 +654,10 @@ if ! FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS="$(normalize_bool "$FAIL_STAGE_ON
 fi
 if [[ "$QUALITY_FAILURE_POLICY" != "strict" && "$QUALITY_FAILURE_POLICY" != "degraded" ]]; then
     echo "ERROR: QUALITY_FAILURE_POLICY must be strict or degraded" >&2
+    exit 1
+fi
+if [[ "$SCENE_FAILURE_POLICY" != "strict" && "$SCENE_FAILURE_POLICY" != "record" ]]; then
+    echo "ERROR: SCENE_FAILURE_POLICY must be strict or record" >&2
     exit 1
 fi
 if ! CRITIC_PROBE_RENDER_FINAL_VIEWS="$(normalize_bool "$CRITIC_PROBE_RENDER_FINAL_VIEWS")"; then
@@ -978,6 +985,7 @@ export SCENEEXPERT_DISABLE_MATERIALS="$DISABLE_MATERIALS"
 export SCENEEXPERT_DISABLE_BWRAP="$DISABLE_BWRAP"
 export SCENEEXPERT_SKIP_MAIN_BPY_IMPORT="$SKIP_MAIN_BPY_IMPORT"
 export FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS
+export QUALITY_FAILURE_POLICY SCENE_FAILURE_POLICY
 export HSSD_RETRIEVAL_BACKEND HSSD_RENDERED_ASSET_CHOICE
 export HSSD_ZVEC_COLLECTION_PATH
 export CONVEX_MAX_OMP_THREADS SCENEEXPERT_OMP_NUM_THREADS
@@ -1074,6 +1082,7 @@ echo "continue after batch failure: $CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE"
 echo "final-view parallelism: $CRITIC_PROBE_FINAL_VIEW_PARALLELISM"
 echo "fail unresolved furniture hard constraints: $FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS"
 echo "quality failure policy: $QUALITY_FAILURE_POLICY"
+echo "critic-on scene failure policy: $SCENE_FAILURE_POLICY (shared-base: strict)"
 echo "HSSD retrieval: backend=$HSSD_RETRIEVAL_BACKEND rendered_asset_choice=$HSSD_RENDERED_ASSET_CHOICE"
 if [ "$HSSD_RETRIEVAL_BACKEND" = "embedding" ]; then
     if [ -z "$HSSD_ZVEC_COLLECTION_PATH" ]; then
@@ -1361,6 +1370,7 @@ run_batch() {
     local batch_csv="$run_root/batch_cases.csv"
     local stop_stage="$PIPELINE_STOP_STAGE"
     local critic_enabled=true
+    local scene_failure_policy="$SCENE_FAILURE_POLICY"
     local start_stage=""
     local resume_from=""
     local shared_base_batch_root=""
@@ -1377,6 +1387,7 @@ run_batch() {
     if [ "$run_kind" = "shared_base" ]; then
         stop_stage="$SHARED_BASE_STOP_STAGE"
         critic_enabled=false
+        scene_failure_policy="strict"
     elif [ "$BRANCH_FROM_SHARED_BASE" = "true" ]; then
         start_stage="$BRANCH_START_STAGE"
         shared_base_batch_root="$SHARED_BASE_ROOT/$batch_label"
@@ -1410,6 +1421,7 @@ run_batch() {
         "+name=critic_on_${batch_label}"
         "${COMMON_ARGS[@]}" "${port_args[@]}"
         "experiment.tasks=[generate_scenes]"
+        "experiment.scene_failure_policy=${scene_failure_policy}"
         "experiment.pipeline.stop_stage=${stop_stage}"
         "experiment.scenebenchmark_critic.enabled=${critic_enabled}"
         "hydra.run.dir=${run_root}/hydra"
@@ -1781,16 +1793,22 @@ if [ "$run_exit_code" -eq 0 ]; then
     fi
 fi
 
-# Metrics are generated for successful and failed probes alike.  The collector
-# is read-only outside OUTPUT_ROOT/metrics and is deliberately non-fatal so it
-# can never hide or replace the generation process exit code.
+# Metrics are generated for successful and failed probes alike. A metrics write
+# failure is a probe failure, but it never replaces an earlier generation code.
 if [ "$DRY_RUN" = "false" ]; then
     echo "collecting independent run metrics: $OUTPUT_ROOT/metrics"
-    if ! "$PYTHON_BIN" -m scenesmith.scene_expert.run_metrics \
+    metrics_exit_code=0
+    if "$PYTHON_BIN" -m scenesmith.scene_expert.run_metrics \
         --output-root "$OUTPUT_ROOT" \
         --run-id "$RUN_ID" \
         --process-exit-code "$run_exit_code"; then
-        echo "WARNING: run metrics collection failed; generation artifacts are unchanged" >&2
+        :
+    else
+        metrics_exit_code=$?
+        echo "ERROR: run metrics collection failed with exit code $metrics_exit_code; generation artifacts are unchanged" >&2
+        if [ "$run_exit_code" -eq 0 ]; then
+            run_exit_code="$metrics_exit_code"
+        fi
     fi
 fi
 if [ "$CRITIC_PROBE_RENDER_FINAL_VIEWS" = "true" ] \

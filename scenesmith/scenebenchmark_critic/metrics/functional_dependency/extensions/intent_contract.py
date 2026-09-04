@@ -57,6 +57,7 @@ from scenesmith.scenebenchmark_critic.object_taxonomy import generation_owner
 
 
 _ENTRANCE_CATEGORIES = frozenset({"door", "entrance", "entry"})
+SUPPORT_READINESS_FAILURE_CODE = "support_readiness"
 _VIRTUAL_ROUTE_CATEGORIES = frozenset(
     {
         "access_route",
@@ -165,6 +166,63 @@ def _evaluate_coverage_requirements(
             )
             continue
 
+        disposition = str(requirement.get("disposition") or "compiled")
+        if kind == "unresolved":
+            results.append(
+                _result(
+                    synthetic,
+                    suffix="unresolved",
+                    label="unknown",
+                    primary=str(requirement["requirement_id"]),
+                    related=[],
+                    relation_type="coverage",
+                    tier="core",
+                    contract_state="unknown",
+                    reason=(
+                        f"Explicit requirement `{normalized}` could not be reliably "
+                        "bound to an authoritative entity."
+                    ),
+                    diagnostics={
+                        "coverage_status": "unresolved",
+                        "disposition": disposition,
+                        "requirement_id": str(requirement["requirement_id"]),
+                        "kind": kind,
+                        "normalized": normalized,
+                        "current_stage": stage,
+                        "evidence_span": str(requirement.get("evidence_span") or ""),
+                    },
+                )
+            )
+            continue
+
+        if kind == "soft_scope":
+            results.append(
+                _result(
+                    synthetic,
+                    suffix="soft_scope",
+                    label="unknown",
+                    primary=str(requirement["requirement_id"]),
+                    related=[],
+                    relation_type="coverage",
+                    tier="auxiliary",
+                    contract_state="unknown",
+                    reason=(
+                        f"Explicit requirement `{normalized}` is outside hard geometry "
+                        "critic scope."
+                    ),
+                    diagnostics={
+                        "coverage_status": "soft_scope",
+                        "disposition": disposition,
+                        "requirement_id": str(requirement["requirement_id"]),
+                        "kind": kind,
+                        "normalized": normalized,
+                        "current_stage": stage,
+                        "evidence_span": str(requirement.get("evidence_span") or ""),
+                    },
+                )
+            )
+            continue
+
         if kind == "forbidden_inventory":
             selector = {"category": normalized, "quantifier": "all"}
             matched_ids = selected_ids(selector, objects)
@@ -236,6 +294,7 @@ def _evaluate_coverage_requirements(
                     ),
                     diagnostics={
                         "coverage_status": "degraded",
+                        "disposition": disposition,
                         "requirement_id": str(requirement["requirement_id"]),
                         "kind": kind,
                         "normalized": normalized,
@@ -470,7 +529,7 @@ def _evaluate_support_readiness(
                 label=label,
                 primary=target_id,
                 related=[],
-                relation_type="support_readiness",
+                relation_type=SUPPORT_READINESS_FAILURE_CODE,
                 tier="core" if label != "unknown" else "auxiliary",
                 reason=reason,
                 diagnostics={

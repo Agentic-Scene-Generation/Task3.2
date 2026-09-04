@@ -244,10 +244,17 @@ def improve_furniture_relations(
     configured_budget = critic_config.auto_repair.furniture_relation_budget
     if configured_budget is None:
         configured_budget = critic_config.auto_repair.max_candidate_evaluations
-    if configured_budget is None and "relation_repair_max_candidate_evaluations" in critic_config.extra:
-        console_logger.warning("relation_repair_max_candidate_evaluations is deprecated; use auto_repair.furniture_relation_budget")
+    if (
+        configured_budget is None
+        and "relation_repair_max_candidate_evaluations" in critic_config.extra
+    ):
+        console_logger.warning(
+            "relation_repair_max_candidate_evaluations is deprecated; use auto_repair.furniture_relation_budget"
+        )
         try:
-            configured_budget = int(critic_config.extra["relation_repair_max_candidate_evaluations"])
+            configured_budget = int(
+                critic_config.extra["relation_repair_max_candidate_evaluations"]
+            )
         except (TypeError, ValueError):
             configured_budget = None
     candidate_budget = 64 if configured_budget is None else configured_budget
@@ -1607,39 +1614,6 @@ def _room_containment_repair_targets(
     geometry = context.scene.room_geometry
     if obj is None or geometry is None:
         return []
-
-    for result in context.payload.get("results") or []:
-        if (
-            str(result.get("primary_object") or "") != object_id
-            or str(result.get("relation_type") or "") != "back_against_wall"
-        ):
-            continue
-        wall_id = next(
-            (
-                str(value)
-                for value in (
-                    result.get("selected_related_objects")
-                    or result.get("related_objects")
-                    or []
-                )
-                if _scene_wall(context.scene, str(value)) is not None
-            ),
-            None,
-        )
-        if wall_id is None:
-            continue
-        wall_targets = _wall_backed_targets(context.scene, object_id, wall_id)
-        if wall_targets:
-            return [
-                _RepairTarget(
-                    object_id,
-                    "room_containment",
-                    context.check_id,
-                    center,
-                    yaw,
-                )
-                for center, yaw in wall_targets
-            ]
 
     center = _world_center_xy(obj)
     if center is None:

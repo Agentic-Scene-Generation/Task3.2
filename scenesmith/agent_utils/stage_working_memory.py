@@ -571,6 +571,10 @@ class StageWorkingMemory:
         context_snapshot: dict[str, Any] | None = None,
         image_refs: list[str] | None = None,
         capture_replay: bool = False,
+        requested_max_tokens: int | None = None,
+        stage_execution_attempt: int | None = None,
+        client_cancelled: bool | None = None,
+        elapsed_sec: float | None = None,
     ) -> None:
         """Persist legacy debug output or gated replay-ready Slow Memory evidence."""
         if not self.enabled:
@@ -585,6 +589,10 @@ class StageWorkingMemory:
             raw_response=raw_response,
             error=error,
             event_kind=event_kind,
+            requested_max_tokens=requested_max_tokens,
+            stage_execution_attempt=stage_execution_attempt,
+            client_cancelled=client_cancelled,
+            elapsed_sec=elapsed_sec,
         )
         payload = record.model_dump()
         safe_name = "".join(

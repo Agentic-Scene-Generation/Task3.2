@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from types import SimpleNamespace
 
@@ -10,8 +11,10 @@ import pytest
 
 from pydantic import ValidationError
 
+import scenesmith.scenebenchmark_critic.intent_compiler as intent_compiler_module
 from scenesmith.scenebenchmark_critic.intent_schema import (
     INTENT_COMPILER_SPEC_VERSION,
+    INTENT_COMPILER_SEMANTIC_IR_VERSION,
     INTENT_CONTRACT_SCHEMA_VERSION,
     canonical_selector_category,
     intent_compiler_wire_json_schema,
@@ -21,9 +24,11 @@ from scenesmith.scenebenchmark_critic.intent_schema import (
 from scenesmith.utils.llm_json import json_response_format
 from scenesmith.scenebenchmark_critic.intent_compiler import (
     IncompleteIntentContractError,
+    IntentCompilationError,
     IntentCompiler,
     _attach_grounding_provenance,
     _grounding_catalog,
+    _system_prompt,
     _validate_contract_completeness,
 )
 from scenesmith.scenebenchmark_critic.intent_contract import (
@@ -110,7 +115,7 @@ def test_structural_window_is_not_furniture_inventory() -> None:
         for row in contract["constraints"]
     )
     assert "window" not in intent_contract_required_counts(scene)
-    assert INTENT_COMPILER_SPEC_VERSION == "scenesmith.intent_compiler.v15"
+    assert INTENT_COMPILER_SPEC_VERSION == "scenesmith.intent_compiler.v16"
 
 
 def test_repair_placeholder_uses_stable_compound_name_as_category() -> None:
@@ -1536,6 +1541,45 @@ def test_singular_target_wording_is_normalized_to_existential_binding() -> None:
     )
 
 
+def test_semantic_ir_validation_does_not_reinterpret_evidence_quantifier() -> None:
+    contract = validate_intent_contract(
+        {
+            "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+            "prompt": "a floor lamp beside one armchair",
+            "constraints": [
+                {
+                    "relation": "near",
+                    "subjects": {"category": "floor_lamp", "count": 1},
+                    "targets": {"category": "armchair", "count": 1},
+                    "source": "explicit_prompt",
+                    "evidence_span": "a floor lamp beside one armchair",
+                }
+            ],
+        },
+        validate_prompt_semantics=False,
+    )
+
+    assert contract["constraints"][0]["targets"]["quantifier"] == "all"
+
+
+def test_semantic_ir_validation_keeps_explicit_prompt_provenance_required() -> None:
+    with pytest.raises(ValidationError, match="explicit_prompt relations require"):
+        validate_intent_contract(
+            {
+                "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+                "constraints": [
+                    {
+                        "relation": "near",
+                        "subjects": {"category": "floor_lamp", "count": 1},
+                        "targets": {"category": "armchair", "count": 1},
+                        "source": "explicit_prompt",
+                    }
+                ],
+            },
+            validate_prompt_semantics=False,
+        )
+
+
 def test_collective_subject_does_not_fail_contract_binding() -> None:
     contract = validate_intent_contract(
         {
@@ -2598,6 +2642,31 @@ def _response(
     )
 
 
+def _semantic_ir(requirements: list[dict]) -> str:
+    return json.dumps(
+        {
+            "schema_version": INTENT_COMPILER_SEMANTIC_IR_VERSION,
+            "requirements": [
+                {"target_ref": None, **requirement} for requirement in requirements
+            ],
+        }
+    )
+
+
+def _semantic_scope(*groundings: str) -> str:
+    return _semantic_ir(
+        [
+            {
+                "requirement_id": f"scope_{index}",
+                "kind": "soft_scope",
+                "grounding": grounding,
+                "reason": "non-geometric scope",
+            }
+            for index, grounding in enumerate(groundings)
+        ]
+    )
+
+
 def _compiler_with_responses(
     responses: list[SimpleNamespace | BaseException],
 ) -> IntentCompiler:
@@ -2622,6 +2691,14 @@ def _compiler_with_responses(
     return compiler
 
 
+# v16 deliberately removed deterministic prompt parsing/enrichment from the
+# live IntentCompiler. The retained fixtures below document the v15 contract
+# shape, but must never become requirements for the LLM-only admission path.
+_LEGACY_LIVE_COMPILER_REASON = (
+    "v15 legacy contract fixture; v16 accepts CompilerSemanticIR only"
+)
+
+
 def test_task_spec_rejects_removed_intent_constraints_field() -> None:
     with pytest.raises(ValidationError, match="intent_constraints"):
         SceneTaskSpec.model_validate(
@@ -2637,7 +2714,18 @@ def test_intent_compiler_retries_once_without_task_spec_input() -> None:
     compiler = _compiler_with_responses(
         [
             _response('{"constraints": [{"relation": "one_per_side"}]}'),
-            _response('{"constraints": []}'),
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "room_scope",
+                            "kind": "soft_scope",
+                            "grounding": "prompt:0",
+                            "reason": "room inventory statement",
+                        }
+                    ]
+                )
+            ),
         ]
     )
 
@@ -2652,14 +2740,661 @@ def test_intent_compiler_retries_once_without_task_spec_input() -> None:
     ]
     first_user_message = compiler._test_calls[0]["messages"][1]["content"]
     assert "Original scene prompt:" in first_user_message
-    assert "TaskSpec" not in first_user_message
+    assert "Normalized SceneTaskSpec" not in first_user_message
 
     for call in compiler._test_calls:
         assert call["response_format"] == json_response_format(
             model=compiler._model,
-            name="intent_contract",
+            name="compiler_semantic_ir",
             schema=intent_compiler_wire_json_schema(),
         )
+
+
+def test_intent_compiler_projects_grounded_catalog_relations_and_coverage() -> None:
+    task_spec = SceneTaskSpec(
+        room_type="living room",
+        style="standard",
+        required_large_objects=["display_shelf"] * 3,
+    )
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "inventory",
+                            "kind": "inventory",
+                            "grounding": "prompt:0",
+                            "subject_ref": "inventory:display_shelf",
+                        },
+                        {
+                            "requirement_id": "wall_relation",
+                            "kind": "relation",
+                            "grounding": "prompt:0",
+                            "relation": "against_wall",
+                            "subject_ref": "inventory:display_shelf",
+                            "target_ref": "anchor:wall",
+                            "subject_count": 3,
+                        },
+                        {
+                            "requirement_id": "no_tv",
+                            "kind": "forbidden_inventory",
+                            "grounding": "prompt:0",
+                            "forbidden_category": "television",
+                        },
+                    ]
+                )
+            )
+        ]
+    )
+
+    result = compiler.compile(
+        "A living room with three display shelves against the wall and no TV.",
+        task_spec=task_spec,
+    )
+
+    assert any(
+        row["relation"] == "required_count"
+        and row["subjects"]["category"] == "display_shelf"
+        and row["subjects"]["count"] == 3
+        for row in result["constraints"]
+    )
+    assert any(
+        row["relation"] == "against_wall"
+        and row["subjects"]["category"] == "display_shelf"
+        and row["targets"]["category"] == "wall"
+        for row in result["constraints"]
+    )
+    assert not any(
+        row["subjects"]["category"] == "monitor" for row in result["constraints"]
+    )
+    assert result["coverage_requirements"] == [
+        {
+            "requirement_id": "no_tv",
+            "kind": "forbidden_inventory",
+            "disposition": "compiled",
+            "normalized": "television",
+            "earliest_stage": "furniture",
+            "final_stage": "final",
+            "source": "explicit_prompt",
+            "evidence_span": "A living room with three display shelves against the wall and no TV.",
+            "relation": "",
+        }
+    ]
+    assert {row["disposition"] for row in result["coverage_ledger"]} == {"compiled"}
+    assert (
+        "inventory:display_shelf"
+        in compiler.last_trace["attempts"][0]["accepted_entity_refs"]
+    )
+
+
+@pytest.mark.parametrize("relation", ["flanking", "in_front_of", "near"])
+def test_intent_compiler_drops_edge_only_fields_from_normal_relations(
+    relation: str,
+) -> None:
+    task_spec = SceneTaskSpec(
+        room_type="office",
+        style="standard",
+        required_large_objects=["chair", "chair", "desk"],
+    )
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "ordinary_relation",
+                            "kind": "relation",
+                            "grounding": "prompt:0",
+                            "relation": relation,
+                            "subject_ref": "inventory:chair",
+                            "target_ref": "inventory:desk",
+                            "subject_count": 2,
+                            "edge_frame": "target_local_rectangle",
+                            "groups": [
+                                {
+                                    "edge_class": "long",
+                                    "counts_per_edge": [1, 1],
+                                }
+                            ],
+                            "orientation": "toward_target",
+                        }
+                    ]
+                )
+            )
+        ]
+    )
+
+    result = compiler.compile(
+        "Place two chairs in relation to the desk.", task_spec=task_spec
+    )
+
+    constraint = next(
+        row for row in result["constraints"] if row["relation"] == relation
+    )
+    assert constraint.get("edge_frame") is None
+    assert constraint.get("groups") == []
+    assert constraint.get("orientation") is None
+    ledger = next(
+        row
+        for row in result["coverage_ledger"]
+        if row["requirement_id"] == "ordinary_relation"
+    )
+    assert ledger["ignored_semantic_fields"] == [
+        "edge_frame",
+        "groups",
+        "orientation",
+    ]
+    assert len(compiler._test_calls) == 1
+
+
+def test_intent_compiler_retries_hallucinated_ref_then_preserves_unresolved_coverage() -> (
+    None
+):
+    task_spec = SceneTaskSpec(
+        room_type="dining room",
+        style="standard",
+        required_large_objects=["dining_table"],
+        required_small_objects=["bowl_of_fruit"],
+    )
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "phantom",
+                            "kind": "relation",
+                            "grounding": "prompt:0",
+                            "relation": "on_top_of",
+                            "subject_ref": "inventory:phantom_object",
+                            "target_ref": "inventory:dining_table",
+                        }
+                    ]
+                )
+            ),
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "fruit_bowl",
+                            "kind": "relation",
+                            "grounding": "prompt:0",
+                            "relation": "on_top_of",
+                            "subject_ref": "inventory:bowl_of_fruit",
+                            "target_ref": "inventory:dining_table",
+                        },
+                        {
+                            "requirement_id": "ambiguous_detail",
+                            "kind": "unresolved",
+                            "grounding": "prompt:0",
+                            "reason": "ambiguous decorative placement",
+                        },
+                    ]
+                )
+            ),
+        ]
+    )
+
+    result = compiler.compile(
+        "Put a bowl of fruit on the dining table with an ambiguous decorative detail.",
+        task_spec=task_spec,
+    )
+
+    bowl_relation = next(
+        row for row in result["constraints"] if row["relation"] == "on_top_of"
+    )
+    assert bowl_relation["subjects"]["category"] == "bowl_of_fruit"
+    assert compiler.last_trace["status"] == "retry_ok"
+    assert "unbound entity_ref" in compiler.last_trace["attempts"][0]["error"]
+    assert compiler.last_trace["attempts"][0]["rejected_entity_refs"] == [
+        {
+            "requirement_id": "phantom",
+            "grounding": "prompt:0",
+            "entity_ref": "inventory:phantom_object",
+            "reason": "unknown_or_unbound_entity_ref",
+        }
+    ]
+    assert (
+        compiler.last_trace["rejected_entity_refs"]
+        == compiler.last_trace["attempts"][0]["rejected_entity_refs"]
+    )
+    assert result["coverage_requirements"][0]["disposition"] == "unresolved"
+
+
+def test_intent_compiler_retry_teaches_catalog_target_ref_not_target_role() -> None:
+    task_spec = SceneTaskSpec(
+        room_type="bedroom", style="standard", required_large_objects=["bed"]
+    )
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "bed_by_window",
+                            "kind": "relation",
+                            "grounding": "prompt:0",
+                            "relation": "next_to",
+                            "subject_ref": "inventory:bed",
+                            "target_role": "window",
+                            "target_cohort": "window",
+                        }
+                    ]
+                )
+            ),
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "bed_by_window",
+                            "kind": "relation",
+                            "grounding": "prompt:0",
+                            "relation": "next_to",
+                            "subject_ref": "inventory:bed",
+                            "target_ref": "anchor:window",
+                            "target_role": "window",
+                            "target_cohort": "window",
+                        }
+                    ]
+                )
+            ),
+        ]
+    )
+
+    result = compiler.compile("Put the bed next to the window.", task_spec=task_spec)
+
+    relation = next(
+        row for row in result["constraints"] if row["relation"] == "next_to"
+    )
+    assert relation["targets"]["category"] == "window"
+    assert compiler.last_trace["status"] == "retry_ok"
+    correction = compiler._test_calls[1]["messages"][1]["content"]
+    assert "target_role and target_cohort are optional metadata only" in correction
+    assert 'target_ref="anchor:window"' in correction
+
+
+def test_intent_compiler_retry_uses_semantic_ir_for_unary_secondary_ref() -> None:
+    task_spec = SceneTaskSpec(
+        room_type="bedroom", style="standard", required_large_objects=["bed"]
+    )
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "bed_by_window",
+                            "kind": "relation",
+                            "grounding": "prompt:0",
+                            "relation": "next_to",
+                            "subject_ref": "inventory:bed",
+                            "target_ref": "anchor:window",
+                            "secondary_target_ref": "anchor:wall",
+                        }
+                    ]
+                )
+            ),
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "bed_by_window",
+                            "kind": "relation",
+                            "grounding": "prompt:0",
+                            "relation": "next_to",
+                            "subject_ref": "inventory:bed",
+                            "target_ref": "anchor:window",
+                        }
+                    ]
+                )
+            ),
+        ]
+    )
+
+    result = compiler.compile("Put the bed next to the window.", task_spec=task_spec)
+
+    assert result["retry_count"] == 1
+    correction = compiler._test_calls[1]["messages"][1]["content"]
+    assert "remove secondary_target_ref; keep exactly one target_ref" in correction
+    assert "secondary_category" not in correction
+    assert "targets object" not in correction
+
+
+def test_intent_compiler_exhaustion_never_calls_deterministic_prompt_fallback(
+    monkeypatch,
+) -> None:
+    def _unexpected_parser(*_args, **_kwargs):
+        raise AssertionError(
+            "live compiler must not invoke deterministic prompt parsing"
+        )
+
+    monkeypatch.setattr(
+        intent_compiler_module, "build_intent_contract", _unexpected_parser
+    )
+    compiler = _compiler_with_responses([_response("not json"), _response("still bad")])
+
+    with pytest.raises(IntentCompilationError, match="failed after two attempts"):
+        compiler.compile("A room with a desk.")
+
+    assert compiler.last_trace["status"] == "error"
+
+
+def test_intent_compiler_ignores_refs_and_relation_metadata_on_coverage_rows() -> None:
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "no_tv",
+                            "kind": "forbidden_inventory",
+                            "grounding": "prompt:0",
+                            "forbidden_category": "television",
+                            "relation": "surround",
+                            "subject_ref": "inventory:phantom_tv",
+                            "target_ref": "anchor:room",
+                            "subject_count": 2,
+                            "target_count": 1,
+                            "subject_role": "toy",
+                            "target_role": "room_center",
+                        }
+                    ]
+                )
+            )
+        ]
+    )
+
+    result = compiler.compile("A room with no TV.")
+
+    assert result["retry_count"] == 0
+    assert compiler.last_trace["status"] == "ok"
+    assert compiler.last_trace["attempts"][0]["rejected_entity_refs"] == [
+        {
+            "requirement_id": "no_tv",
+            "grounding": "prompt:0",
+            "entity_ref": "inventory:phantom_tv",
+            "reason": "ignored_non_endpoint_entity_ref",
+        },
+        {
+            "requirement_id": "no_tv",
+            "grounding": "prompt:0",
+            "entity_ref": "anchor:room",
+            "reason": "ignored_non_endpoint_entity_ref",
+        },
+    ]
+    assert compiler.last_trace["attempts"][0]["accepted_entity_refs"] == []
+    assert result["constraints"] == []
+    assert result["coverage_requirements"][0]["kind"] == "forbidden_inventory"
+    assert result["coverage_ledger"] == [
+        {
+            "requirement_id": "no_tv",
+            "grounding": "prompt:0",
+            "kind": "forbidden_inventory",
+            "entity_refs": [],
+            "surface_mentions": [],
+            "reason": "",
+            "ignored_semantic_fields": [
+                "relation",
+                "subject_count",
+                "subject_ref",
+                "subject_role",
+                "target_count",
+                "target_ref",
+                "target_role",
+            ],
+            "disposition": "compiled",
+        }
+    ]
+
+
+def test_intent_compiler_soft_scope_discards_scene_like_relation_payload() -> None:
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "playful_accents",
+                            "kind": "soft_scope",
+                            "grounding": "prompt:0",
+                            "reason": "playful decorative mood",
+                            "relation": "surround",
+                            "subject_ref": "inventory:plush_toy",
+                            "target_ref": "anchor:room",
+                            "subject_count": 3,
+                            "target_count": 1,
+                            "subject_role": "accent",
+                            "target_role": "center",
+                        }
+                    ]
+                )
+            )
+        ]
+    )
+
+    result = compiler.compile("Use playful plush toys around the room.")
+
+    assert result["retry_count"] == 0
+    assert result["constraints"] == []
+    assert result["coverage_requirements"] == [
+        {
+            "requirement_id": "playful_accents",
+            "kind": "soft_scope",
+            "disposition": "soft_scope",
+            "normalized": "playful_decorative_mood",
+            "earliest_stage": "floor_plan",
+            "final_stage": "final",
+            "source": "explicit_prompt",
+            "evidence_span": "Use playful plush toys around the room.",
+            "relation": "",
+        }
+    ]
+    ledger = result["coverage_ledger"][0]
+    assert ledger["entity_refs"] == []
+    assert ledger["ignored_semantic_fields"] == [
+        "relation",
+        "subject_count",
+        "subject_ref",
+        "subject_role",
+        "target_count",
+        "target_ref",
+        "target_role",
+    ]
+    assert [
+        row["entity_ref"] for row in compiler.last_trace["rejected_entity_refs"]
+    ] == ["inventory:plush_toy", "anchor:room"]
+
+
+def test_intent_compiler_rejects_unbound_inventory_claim_before_coverage_admission() -> (
+    None
+):
+    task_spec = SceneTaskSpec(
+        room_type="office", style="standard", required_large_objects=["desk"]
+    )
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "desk",
+                            "kind": "inventory",
+                            "grounding": "prompt:0",
+                        }
+                    ]
+                )
+            ),
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "desk",
+                            "kind": "inventory",
+                            "grounding": "prompt:0",
+                            "subject_ref": "inventory:desk",
+                        }
+                    ]
+                )
+            ),
+        ]
+    )
+
+    result = compiler.compile("An office with a desk.", task_spec=task_spec)
+
+    assert result["retry_count"] == 1
+    assert compiler.last_trace["status"] == "retry_ok"
+    assert (
+        "inventory requires an inventory subject_ref"
+        in compiler.last_trace["attempts"][0]["error"]
+    )
+    assert [row["relation"] for row in result["constraints"]] == ["required_count"]
+    assert result["coverage_ledger"] == [
+        {
+            "requirement_id": "desk",
+            "grounding": "prompt:0",
+            "kind": "inventory",
+            "entity_refs": ["inventory:desk"],
+            "surface_mentions": [],
+            "reason": "",
+            "disposition": "compiled",
+        }
+    ]
+
+
+def test_intent_compiler_failure_trace_keeps_all_rejected_entity_refs() -> None:
+    task_spec = SceneTaskSpec(
+        room_type="office", style="standard", required_large_objects=["desk"]
+    )
+    hallucinated_ir = _semantic_ir(
+        [
+            {
+                "requirement_id": "monitor",
+                "kind": "relation",
+                "grounding": "prompt:0",
+                "relation": "near",
+                "subject_ref": "inventory:monitor",
+                "target_ref": "inventory:desk",
+            }
+        ]
+    )
+    compiler = _compiler_with_responses(
+        [_response(hallucinated_ir), _response(hallucinated_ir)]
+    )
+
+    with pytest.raises(IntentCompilationError, match="failed after two attempts"):
+        compiler.compile("An office with a desk.", task_spec=task_spec)
+
+    assert [
+        row["entity_ref"] for row in compiler.last_trace["rejected_entity_refs"]
+    ] == ["inventory:monitor", "inventory:monitor"]
+    assert all(
+        attempt["rejected_entity_refs"] for attempt in compiler.last_trace["attempts"]
+    )
+
+
+def test_intent_compiler_prompt_describes_semantic_ir_refs_not_legacy_selectors() -> (
+    None
+):
+    prompt = _system_prompt()
+
+    assert "subject_ref, target_ref" in prompt
+    assert "do not emit targets, subjects, category" in prompt
+    assert '"target_ref": "inventory:bed"' in prompt
+
+
+def test_intent_compiler_keeps_relation_cohort_distinct_from_inventory_total() -> None:
+    task_spec = SceneTaskSpec(
+        room_type="dining room",
+        style="standard",
+        required_large_objects=["dining_table"] + ["dining_chair"] * 5,
+    )
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "chairs_by_table_edges",
+                            "kind": "relation",
+                            "grounding": "prompt:0",
+                            "relation": "edge_distribution",
+                            "subject_ref": "inventory:dining_chair",
+                            "target_ref": "inventory:dining_table",
+                            "subject_count": 5,
+                            "subject_cohort": "dining_seating",
+                            "edge_frame": "target_local_rectangle",
+                            "groups": [
+                                {"edge_class": "long", "counts_per_edge": [2, 2]},
+                                {"edge_class": "short", "counts_per_edge": [1, 0]},
+                            ],
+                            "orientation": "toward_target",
+                        }
+                    ]
+                )
+            )
+        ]
+    )
+
+    result = compiler.compile(
+        "Arrange four dining chairs along the long sides and one on a short side.",
+        task_spec=task_spec,
+    )
+
+    edge = next(
+        row for row in result["constraints"] if row["relation"] == "edge_distribution"
+    )
+    assert edge["subjects"]["category"] == "dining_chair"
+    assert edge["subjects"]["count"] == 5
+    assert edge["subjects"]["cohort"] == "dining_seating"
+    assert [group["counts_per_edge"] for group in edge["groups"]] == [[2, 2], [1, 0]]
+
+
+def test_intent_compiler_raises_after_provider_failures_without_fallback() -> None:
+    compiler = _compiler_with_responses(
+        [ConnectionError("temporary outage"), ConnectionError("temporary outage")]
+    )
+
+    with pytest.raises(IntentCompilationError, match="failed after two attempts"):
+        compiler.compile("A room with a desk.")
+
+    assert compiler.last_trace["status"] == "error"
+    assert [row["status"] for row in compiler.last_trace["attempts"]] == [
+        "error",
+        "error",
+    ]
+
+
+def test_intent_compiler_without_task_spec_keeps_unbound_prompt_entity_unresolved() -> (
+    None
+):
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "desk_relation",
+                            "kind": "unresolved",
+                            "grounding": "prompt:0",
+                            "reason": "desk is absent from SceneTaskSpec inventory",
+                            "surface_mentions": ["desk", "monitor"],
+                        }
+                    ]
+                )
+            )
+        ]
+    )
+
+    result = compiler.compile("Put a monitor on the desk.")
+
+    assert result["constraints"] == []
+    assert result["coverage_requirements"][0]["kind"] == "unresolved"
+    assert result["coverage_requirements"][0]["disposition"] == "unresolved"
+    assert not any(
+        entry["entity_ref"] == "inventory:desk"
+        for entry in compiler.last_trace["entity_catalog"]
+    )
 
 
 def test_intent_compiler_injects_both_task_compiler_constraint_channels() -> None:
@@ -2669,19 +3404,9 @@ def test_intent_compiler_injects_both_task_compiler_constraint_channels() -> Non
         [
             _response('{"constraints": [{"relation": "one_per_side"}]}'),
             _response(
-                '{"constraints": ['
-                '{"relation": "flanking", '
-                '"subjects": {"category": "nightstand", "count": 2}, '
-                '"targets": {"category": "bed", "count": 1}, '
-                '"source": "model_inferred", "evidence_span": "", '
-                '"inference_reason": "TaskCompiler interaction_constraints: '
-                f'{interaction}"}}, '
-                '{"relation": "centered_in_room", '
-                '"subjects": {"category": "dining_table", "count": 1}, '
-                '"targets": {"category": "room", "count": 1}, '
-                '"source": "model_inferred", "evidence_span": "", '
-                '"inference_reason": "TaskCompiler aesthetic_constraints: '
-                f'{aesthetic}"}}]}}'
+                _semantic_scope(
+                    "prompt:0", "interaction:0", "aesthetic:0", "aesthetic:1"
+                )
             ),
         ]
     )
@@ -2692,26 +3417,18 @@ def test_intent_compiler_injects_both_task_compiler_constraint_channels() -> Non
         aesthetic_constraints=[aesthetic, "use a modern material palette"],
     )
 
-    inferred = [
-        row for row in result["constraints"] if row["source"] == "model_inferred"
-    ]
-    assert {row["relation"] for row in inferred} == {
-        "flanking",
-        "centered_in_room",
-    }
+    assert result["constraints"] == []
     for call in compiler._test_calls:
         user_message = call["messages"][1]["content"]
         assert interaction in user_message
         assert aesthetic in user_message
         assert "use a modern material palette" in user_message
-    assert compiler.last_trace["unmapped_task_compiler_constraints"] == {
-        "interaction_constraints": [],
-        "aesthetic_constraints": [],
+    assert {row["grounding"] for row in result["coverage_ledger"]} == {
+        "prompt:0",
+        "interaction:0",
+        "aesthetic:0",
+        "aesthetic:1",
     }
-    assert {
-        row["text"]: row["disposition"]
-        for row in compiler.last_trace["task_compiler_constraint_dispositions"]
-    }["use a modern material palette"] == "unsupported-soft"
 
 
 def test_intent_compiler_injects_complete_task_spec_and_owns_inventory() -> None:
@@ -2726,7 +3443,9 @@ def test_intent_compiler_injects_complete_task_spec_and_owns_inventory() -> None
         interaction_constraints=["nightstands should be reachable from the bed"],
         aesthetic_constraints=["functional layout with clear circulation paths"],
     )
-    compiler = _compiler_with_responses([_response('{"constraints": []}')])
+    compiler = _compiler_with_responses(
+        [_response(_semantic_scope("prompt:0", "interaction:0", "aesthetic:0"))]
+    )
 
     result = compiler.compile(
         "A functional bedroom with one bed and one nightstand.", task_spec=task_spec
@@ -2752,11 +3471,11 @@ def test_intent_compiler_injects_complete_task_spec_and_owns_inventory() -> None
         if row["relation"] == "required_count"
     }
     assert required["nightstand"]["subjects"]["count"] == 2
-    assert required["nightstand"]["source"] == "explicit_prompt"
+    assert required["nightstand"]["source"] == "task_compiler_inventory"
     assert required["mirror"]["stage"] == "wall_mounted"
     assert required["ceiling_light"]["stage"] == "ceiling_mounted"
     assert required["book"]["stage"] == "manipuland"
-    assert any("Inventory count conflict" in warning for warning in result["warnings"])
+    assert result["coverage_ledger"]
 
 
 def test_task_spec_inventory_drops_overlapping_prompt_fragment_counts() -> None:
@@ -2766,7 +3485,7 @@ def test_task_spec_inventory_drops_overlapping_prompt_fragment_counts() -> None:
         required_large_objects=["sofa_chair"] * 4,
         required_small_objects=["glass_bowl"] * 2,
     )
-    compiler = _compiler_with_responses([_response('{"constraints": []}')])
+    compiler = _compiler_with_responses([_response(_semantic_scope("prompt:0"))])
 
     result = compiler.compile(
         "A room with four sofa chairs and two glass bowls.", task_spec=task_spec
@@ -2784,7 +3503,7 @@ def test_intent_compiler_retries_parseable_length_response() -> None:
     compiler = _compiler_with_responses(
         [
             _response('{"constraints": []}', finish_reason="length"),
-            _response('{"constraints": []}'),
+            _response(_semantic_scope("prompt:0")),
         ]
     )
 
@@ -2803,7 +3522,7 @@ def test_intent_compiler_retries_warnings_only_response() -> None:
     compiler = _compiler_with_responses(
         [
             _response('{"room_type": "living room", "warnings": ["' + warning + '"]}'),
-            _response('{"constraints": []}'),
+            _response(_semantic_scope("prompt:0")),
         ]
     )
 
@@ -2814,18 +3533,13 @@ def test_intent_compiler_retries_warnings_only_response() -> None:
         "error",
         "retry_ok",
     ]
-    assert (
-        "omitted required constraints field"
-        in compiler.last_trace["attempts"][0]["error"]
-    )
-    assert warning in result["warnings"]
+    assert "semantic IR schema_version" in compiler.last_trace["attempts"][0]["error"]
+    assert result["warnings"] == []
     retry_message = compiler._test_calls[1]["messages"][1]["content"]
-    assert "warnings alone are not a complete contract" in retry_message
+    assert "semantic IR schema_version" in retry_message
 
 
-def test_intent_compiler_warnings_only_fallback_preserves_warnings_and_inventory() -> (
-    None
-):
+def test_intent_compiler_warnings_only_responses_are_runtime_failure() -> None:
     first_warning = "Table settings remain context."
     second_warning = "Circulation remains context."
     compiler = _compiler_with_responses(
@@ -2840,23 +3554,14 @@ def test_intent_compiler_warnings_only_fallback_preserves_warnings_and_inventory
         required_large_objects=["sofa", "coffee table"],
     )
 
-    result = compiler.compile("A living room.", task_spec=task_spec)
+    with pytest.raises(IntentCompilationError, match="failed after two attempts"):
+        compiler.compile("A living room.", task_spec=task_spec)
 
-    assert compiler.last_trace["status"] == "deterministic_fallback"
-    assert "omitted required constraints field" in compiler.last_trace["failure_reason"]
+    assert compiler.last_trace["status"] == "error"
     assert [row["status"] for row in compiler.last_trace["attempts"]] == [
         "error",
         "error",
-        "deterministic_fallback",
     ]
-    assert first_warning in result["warnings"]
-    assert second_warning in result["warnings"]
-    required = {
-        row["subjects"]["category"]: row["subjects"]["count"]
-        for row in result["constraints"]
-        if row["relation"] == "required_count"
-    }
-    assert required == {"coffee_table": 1, "sofa": 1}
 
 
 def test_contract_completeness_rejects_missing_task_inventory_count() -> None:
@@ -2979,7 +3684,7 @@ def test_contract_completeness_accepts_environment_anchors(anchor: str) -> None:
     _validate_contract_completeness(contract, {"required_large_objects": ["desk"]})
 
 
-def test_intent_compiler_length_fallback_keeps_complete_task_inventory() -> None:
+def test_intent_compiler_length_exhaustion_is_runtime_failure() -> None:
     compiler = _compiler_with_responses(
         [
             _response('{"constraints": []}', finish_reason="length"),
@@ -2994,15 +3699,10 @@ def test_intent_compiler_length_fallback_keeps_complete_task_inventory() -> None
         required_small_objects=["monitor", "monitor"],
     )
 
-    result = compiler.compile("An office.", task_spec=task_spec)
+    with pytest.raises(IntentCompilationError, match="failed after two attempts"):
+        compiler.compile("An office.", task_spec=task_spec)
 
-    assert compiler.last_trace["status"] == "deterministic_fallback"
-    required = {
-        row["subjects"]["category"]: row["subjects"]["count"]
-        for row in result["constraints"]
-        if row["relation"] == "required_count"
-    }
-    assert required == {"clock": 1, "desk": 2, "monitor": 2, "wastebasket": 1}
+    assert compiler.last_trace["status"] == "error"
 
 
 def test_task_spec_components_replace_composite_table_setting_count() -> None:
@@ -3035,6 +3735,7 @@ def test_task_spec_components_replace_composite_table_setting_count() -> None:
     assert counts["glass"]["quantifier"] == "at_least"
 
 
+@pytest.mark.skip(reason=_LEGACY_LIVE_COMPILER_REASON)
 def test_intent_compiler_maps_reachability_to_near_not_flanking() -> None:
     interaction = "nightstands should be accessible from the bed"
     compiler = _compiler_with_responses(
@@ -3063,6 +3764,7 @@ def test_intent_compiler_maps_reachability_to_near_not_flanking() -> None:
     assert inferred[0]["targets"]["category"] == "bed"
 
 
+@pytest.mark.skip(reason=_LEGACY_LIVE_COMPILER_REASON)
 def test_intent_compiler_uses_minimum_for_place_setting_cutlery_support() -> None:
     prompt = (
         "A dining room has table settings for four including plates, cutlery, and "
@@ -3106,6 +3808,7 @@ def test_intent_compiler_uses_minimum_for_place_setting_cutlery_support() -> Non
     assert required_cutlery["subjects"]["quantifier"] == "at_least"
 
 
+@pytest.mark.skip(reason=_LEGACY_LIVE_COMPILER_REASON)
 def test_intent_compiler_prefers_explicit_prompt_over_task_constraint() -> None:
     inferred = "place the dining table against a wall"
     compiler = _compiler_with_responses(
@@ -3242,22 +3945,102 @@ def test_generic_speaker_selector_matches_floor_speaker_assets() -> None:
 
 def test_intent_compiler_wire_schema_excludes_free_text_provenance() -> None:
     schema = intent_compiler_wire_json_schema()
-    relation_schema = schema["$defs"]["IntentWireRelation"]
+    requirement_schema = schema["properties"]["requirements"]["items"]
 
-    assert schema["required"] == ["constraints"]
-    assert set(relation_schema["properties"]) == {
-        "relation",
-        "subjects",
-        "targets",
-        "edge_frame",
-        "groups",
-        "orientation",
-        "grounding",
-    }
-    assert {"source", "evidence_span", "inference_reason", "required_count"}.isdisjoint(
-        relation_schema["properties"]
+    assert schema["required"] == ["schema_version", "requirements"]
+    assert {"subject_ref", "target_ref", "grounding", "kind"} <= set(
+        requirement_schema["properties"]
     )
-    assert "required_count" not in relation_schema["properties"]["relation"]["enum"]
+    assert {"source", "evidence_span", "inference_reason", "required_count"}.isdisjoint(
+        requirement_schema["properties"]
+    )
+    assert "required_count" not in requirement_schema["properties"]["relation"]["enum"]
+
+
+def test_intent_compiler_wire_schema_requires_nullable_target_ref_field() -> None:
+    schema = intent_compiler_wire_json_schema()
+    requirement_schema = schema["properties"]["requirements"]["items"]
+
+    assert "target_ref" in requirement_schema["required"]
+    assert requirement_schema["properties"]["target_ref"] == {
+        "anyOf": [
+            {
+                "type": "string",
+                "pattern": r"^(inventory|anchor):[a-z0-9_]+$",
+            },
+            {"type": "null"},
+        ]
+    }
+
+
+def test_intent_compiler_retries_when_provider_omits_required_target_ref() -> None:
+    missing_target_ref = json.dumps(
+        {
+            "schema_version": INTENT_COMPILER_SEMANTIC_IR_VERSION,
+            "requirements": [
+                {
+                    "requirement_id": "prompt_scope",
+                    "kind": "soft_scope",
+                    "grounding": "prompt:0",
+                    "reason": "non-geometric scope",
+                }
+            ],
+        }
+    )
+    compiler = _compiler_with_responses(
+        [_response(missing_target_ref), _response(_semantic_scope("prompt:0"))]
+    )
+
+    result = compiler.compile("A room with a desk.")
+
+    assert result["retry_count"] == 1
+    assert (
+        "semantic IR requirement omitted target_ref"
+        in compiler.last_trace["attempts"][0]["error"]
+    )
+    assert "Every SemanticIR requirement needs the target_ref field" in (
+        compiler._test_calls[1]["messages"][1]["content"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("subject_count", "1"),
+        ("subject_count", True),
+        ("surface_mentions", "desk and wall"),
+    ],
+)
+def test_intent_compiler_retries_when_decoded_semantic_ir_violates_wire_types(
+    field: str, value: object
+) -> None:
+    task_spec = SceneTaskSpec(
+        room_type="office", style="standard", required_large_objects=["desk"]
+    )
+    malformed_requirement = {
+        "requirement_id": "desk_by_wall",
+        "kind": "relation",
+        "grounding": "prompt:0",
+        "relation": "near",
+        "subject_ref": "inventory:desk",
+        "target_ref": "anchor:wall",
+        field: value,
+    }
+    compiler = _compiler_with_responses(
+        [
+            _response(_semantic_ir([malformed_requirement])),
+            _response(_semantic_scope("prompt:0")),
+        ]
+    )
+
+    result = compiler.compile("An office with a desk.", task_spec=task_spec)
+
+    assert result["retry_count"] == 1
+    assert compiler.last_trace["status"] == "retry_ok"
+    assert (
+        "semantic IR wire schema validation failed"
+        in compiler.last_trace["attempts"][0]["error"]
+    )
 
 
 def test_intent_compiler_expands_grounding_ids_deterministically() -> None:
@@ -3314,6 +4097,7 @@ def test_intent_compiler_expands_grounding_ids_deterministically() -> None:
         )
 
 
+@pytest.mark.skip(reason=_LEGACY_LIVE_COMPILER_REASON)
 def test_intent_compiler_canonicalizes_two_object_side_wording_to_flanking() -> None:
     compiler = _compiler_with_responses(
         [
@@ -3340,7 +4124,7 @@ def test_intent_compiler_canonicalizes_two_object_side_wording_to_flanking() -> 
     assert relation.get("orientation") is None
 
 
-def test_intent_compiler_does_not_upgrade_inventory_to_flanking() -> None:
+def test_intent_compiler_rejects_ungrounded_semantic_relations() -> None:
     invented = (
         '{"constraints": [{"relation": "flanking", '
         '"subjects": {"category": "nightstand", "count": 2}, '
@@ -3350,25 +4134,19 @@ def test_intent_compiler_does_not_upgrade_inventory_to_flanking() -> None:
     )
     compiler = _compiler_with_responses([_response(invented), _response(invented)])
 
-    result = compiler.compile(
-        "A bedroom with a bed, two nightstands, and a wardrobe in the corner."
-    )
+    with pytest.raises(IntentCompilationError, match="failed after two attempts"):
+        compiler.compile(
+            "A bedroom with a bed, two nightstands, and a wardrobe in the corner."
+        )
 
-    assert compiler.last_trace["status"] == "deterministic_fallback"
+    assert compiler.last_trace["status"] == "error"
     assert [item["status"] for item in compiler.last_trace["attempts"]] == [
         "error",
         "error",
-        "deterministic_fallback",
     ]
-    assert all(row["relation"] != "flanking" for row in result["constraints"])
-    assert any(
-        row["relation"] == "required_count"
-        and row["subjects"]["category"] == "nightstand"
-        and row["subjects"]["count"] == 2
-        for row in result["constraints"]
-    )
 
 
+@pytest.mark.skip(reason=_LEGACY_LIVE_COMPILER_REASON)
 def test_intent_compiler_restores_missing_target_from_prompt_parser() -> None:
     compiler = _compiler_with_responses(
         [
@@ -3400,6 +4178,7 @@ def test_intent_compiler_restores_missing_target_from_prompt_parser() -> None:
     ]
 
 
+@pytest.mark.skip(reason=_LEGACY_LIVE_COMPILER_REASON)
 def test_intent_compiler_rewrites_object_centering_mistaken_for_wall_centering() -> (
     None
 ):
@@ -3433,6 +4212,7 @@ def test_intent_compiler_rewrites_object_centering_mistaken_for_wall_centering()
     ]
 
 
+@pytest.mark.skip(reason=_LEGACY_LIVE_COMPILER_REASON)
 def test_intent_compiler_rewrites_vertical_centering_mistaken_for_front_axis() -> None:
     prompt = (
         "Place one stool centered in front of and facing the dressing table. "
@@ -3484,6 +4264,7 @@ def test_intent_compiler_rewrites_vertical_centering_mistaken_for_front_axis() -
     )
 
 
+@pytest.mark.skip(reason=_LEGACY_LIVE_COMPILER_REASON)
 def test_intent_compiler_restores_unique_edge_fields_omitted_by_llama() -> None:
     prompt = (
         "Arrange five dining chairs around one rectangular dining table: two "
@@ -3520,6 +4301,7 @@ def test_intent_compiler_restores_unique_edge_fields_omitted_by_llama() -> None:
     ]
 
 
+@pytest.mark.skip(reason=_LEGACY_LIVE_COMPILER_REASON)
 def test_intent_compiler_corrects_unique_edge_shape_and_drops_duplicate_faces() -> None:
     prompt = (
         "Arrange seven office chairs around one rectangular conference table: "
@@ -3556,6 +4338,7 @@ def test_intent_compiler_corrects_unique_edge_shape_and_drops_duplicate_faces() 
     assert {"subjects.count", "groups"}.issubset(restored[0]["fields"])
 
 
+@pytest.mark.skip(reason=_LEGACY_LIVE_COMPILER_REASON)
 def test_intent_compiler_rejects_wall_center_from_table_side_grounding() -> None:
     compiler = _compiler_with_responses(
         [
@@ -3593,6 +4376,7 @@ def test_intent_compiler_rejects_wall_center_from_table_side_grounding() -> None
         ),
     ],
 )
+@pytest.mark.skip(reason=_LEGACY_LIVE_COMPILER_REASON)
 def test_intent_compiler_rejects_top_support_for_containment_wording(
     prompt: str,
     subject: str,
@@ -3642,6 +4426,7 @@ def test_room_endpoint_does_not_hide_earlier_container_coverage() -> None:
     assert "cabinet holding books" in containment[0]["evidence_span"]
 
 
+@pytest.mark.skip(reason=_LEGACY_LIVE_COMPILER_REASON)
 def test_intent_compiler_retry_spells_out_unary_target_cardinality() -> None:
     compiler = _compiler_with_responses(
         [
@@ -3664,7 +4449,7 @@ def test_intent_compiler_retry_spells_out_unary_target_cardinality() -> None:
     assert "exactly one primary target selector" in retry_message
 
 
-def test_intent_compiler_falls_back_after_semantic_json_failures() -> None:
+def test_intent_compiler_schema_exhaustion_is_runtime_failure() -> None:
     invalid = (
         '{"constraints": [{"relation": "centered_in_room", '
         '"subjects": {"category": "conference_table"}, '
@@ -3673,19 +4458,13 @@ def test_intent_compiler_falls_back_after_semantic_json_failures() -> None:
     )
     compiler = _compiler_with_responses([_response(invalid), _response(invalid)])
 
-    result = compiler.compile("A bedroom with a bed centered on the main wall.")
+    with pytest.raises(IntentCompilationError, match="failed after two attempts"):
+        compiler.compile("A bedroom with a bed centered on the main wall.")
 
-    assert result["retry_count"] == 1
-    assert result["warnings"]
-    assert compiler.last_trace["status"] == "deterministic_fallback"
-    centered = [
-        row for row in result["constraints"] if row["relation"] == "centered_on_wall"
-    ]
-    assert centered
-    assert centered[0]["targets"]["category"] == "wall"
+    assert compiler.last_trace["status"] == "error"
 
 
-def test_intent_compiler_restores_unique_media_target_without_fallback() -> None:
+def test_intent_compiler_does_not_restore_missing_relation_targets() -> None:
     invalid = (
         '{"constraints": [{"relation": "faces", '
         '"subjects": {"category": "sofa"}, '
@@ -3694,14 +4473,12 @@ def test_intent_compiler_restores_unique_media_target_without_fallback() -> None
     )
     compiler = _compiler_with_responses([_response(invalid), _response(invalid)])
 
-    result = compiler.compile(
-        "A living room with a sofa facing a TV stand and television on the opposite wall."
-    )
+    with pytest.raises(IntentCompilationError, match="failed after two attempts"):
+        compiler.compile(
+            "A living room with a sofa facing a TV stand and television on the opposite wall."
+        )
 
-    assert compiler.last_trace["status"] == "ok_enriched"
-    assert compiler.last_trace["restored_targets"]
-    facing = next(row for row in result["constraints"] if row["relation"] == "faces")
-    assert facing["targets"]["category"] == "tv_stand"
+    assert compiler.last_trace["status"] == "error"
 
 
 def test_deterministic_contract_recognizes_floor_near_manipulands() -> None:
@@ -3840,7 +4617,7 @@ def test_television_selector_prioritizes_structured_display_compound_identity() 
     assert selected_ids(selector, [adapter_shelf, true_television]) == ["television_0"]
 
 
-def test_deterministic_fallback_preserves_display_shelf_contract() -> None:
+def test_display_shelf_invalid_semantic_ir_is_runtime_failure() -> None:
     compiler = _compiler_with_responses([_response("not json"), _response("still bad")])
     task_spec = SceneTaskSpec(
         room_type="living room",
@@ -3848,22 +4625,13 @@ def test_deterministic_fallback_preserves_display_shelf_contract() -> None:
         required_large_objects=["display_shelf", "display_shelf", "display_shelf"],
     )
 
-    result = compiler.compile(
-        "A living room with three display shelves against the wall and no TV.",
-        task_spec=task_spec,
-    )
+    with pytest.raises(IntentCompilationError, match="failed after two attempts"):
+        compiler.compile(
+            "A living room with three display shelves against the wall and no TV.",
+            task_spec=task_spec,
+        )
 
-    assert compiler.last_trace["status"] == "deterministic_fallback"
-    assert not any(
-        row.get("subjects", {}).get("category") == "monitor"
-        for row in result["constraints"]
-    )
-    assert any(
-        row["relation"] == "required_count"
-        and row["subjects"]["category"] == "display_shelf"
-        and row["subjects"]["count"] == 3
-        for row in result["constraints"]
-    )
+    assert compiler.last_trace["status"] == "error"
 
 
 def test_deterministic_contract_recognizes_room_center_contains_wording() -> None:
@@ -3901,6 +4669,7 @@ def test_schema_rejects_direction_that_only_qualifies_a_wall() -> None:
         )
 
 
+@pytest.mark.skip(reason=_LEGACY_LIVE_COMPILER_REASON)
 def test_intent_compiler_retries_wall_qualified_directional_relation() -> None:
     prompt = (
         "A dining room with four dining chairs and a sideboard against the wall "
@@ -3936,6 +4705,7 @@ def test_intent_compiler_retries_wall_qualified_directional_relation() -> None:
     assert "Do not convert 'X against the wall" in retry_message
 
 
+@pytest.mark.skip(reason=_LEGACY_LIVE_COMPILER_REASON)
 def test_intent_compiler_restores_explicit_floor_support_omitted_by_llm() -> None:
     prompt = (
         "A living room with a two-seater sofa and two large potted plants on "
@@ -3964,6 +4734,7 @@ def test_intent_compiler_restores_explicit_floor_support_omitted_by_llm() -> Non
     assert compiler.last_trace["enriched_constraints"]
 
 
+@pytest.mark.skip(reason=_LEGACY_LIVE_COMPILER_REASON)
 def test_intent_compiler_restores_classroom_operation_zone_ontology() -> None:
     prompt = (
         "A classroom with a teacher's desk, six student desks with chairs, "
@@ -4002,6 +4773,7 @@ def test_classroom_chair_cardinality_binds_generic_chair_assets() -> None:
     ]
 
 
+@pytest.mark.skip(reason=_LEGACY_LIVE_COMPILER_REASON)
 def test_intent_compiler_normalizes_chair_one_per_support_to_pairing() -> None:
     prompt = "A classroom with six student desks, each with a chair."
     compiler = _compiler_with_responses(
@@ -4030,6 +4802,7 @@ def test_intent_compiler_normalizes_chair_one_per_support_to_pairing() -> None:
     )
 
 
+@pytest.mark.skip(reason=_LEGACY_LIVE_COMPILER_REASON)
 def test_intent_compiler_enriches_explicit_group_relations_omitted_by_llm() -> None:
     prompt = (
         "A practical office with four separate desks. Pair each desk with exactly "
@@ -4051,6 +4824,7 @@ def test_intent_compiler_enriches_explicit_group_relations_omitted_by_llm() -> N
     )
 
 
+@pytest.mark.skip(reason=_LEGACY_LIVE_COMPILER_REASON)
 def test_intent_compiler_enriches_explicit_wall_anchor_and_access_omitted_by_llm() -> (
     None
 ):
@@ -4509,43 +5283,36 @@ def test_legacy_contract_parser_keeps_wall_qualified_behind_as_wall_relation() -
     assert [row["relation"] for row in sideboard_relations] == ["against_wall"]
 
 
-def test_intent_compiler_falls_back_after_unparseable_responses() -> None:
+def test_intent_compiler_raises_after_unparseable_responses() -> None:
     compiler = _compiler_with_responses([_response("no json"), _response("still bad")])
 
-    result = compiler.compile("A room with a desk.")
+    with pytest.raises(IntentCompilationError, match="failed after two attempts"):
+        compiler.compile("A room with a desk.")
 
-    assert result["warnings"]
-    assert compiler.last_trace["status"] == "deterministic_fallback"
+    assert compiler.last_trace["status"] == "error"
     assert compiler.last_trace["retry_count"] == 1
     assert [item["status"] for item in compiler.last_trace["attempts"]] == [
         "error",
         "error",
-        "deterministic_fallback",
     ]
 
 
-def test_intent_compiler_falls_back_after_transport_errors() -> None:
+def test_intent_compiler_raises_after_transport_errors() -> None:
     compiler = _compiler_with_responses(
         [ConnectionError("temporary outage"), ConnectionError("temporary outage")]
     )
 
-    result = compiler.compile(
-        "A living room with a sofa facing a TV stand and television on the opposite wall."
-    )
+    with pytest.raises(IntentCompilationError, match="failed after two attempts"):
+        compiler.compile(
+            "A living room with a sofa facing a TV stand and television on the opposite wall."
+        )
 
-    assert compiler.last_trace["status"] == "deterministic_fallback"
+    assert compiler.last_trace["status"] == "error"
     assert compiler.last_trace["failure_reason"] == "ConnectionError: temporary outage"
     assert [item["status"] for item in compiler.last_trace["attempts"]] == [
         "error",
         "error",
-        "deterministic_fallback",
     ]
-    assert any(
-        row["relation"] == "on_top_of"
-        and row["subjects"]["category"] == "television"
-        and row["targets"]["category"] == "tv_stand"
-        for row in result["constraints"]
-    )
 
 
 def test_intent_compiler_is_disabled_without_critic_request(
@@ -4572,7 +5339,9 @@ def test_intent_compiler_config_uses_deterministic_contract_without_llm(
 ) -> None:
     class UnexpectedCompiler:
         def __init__(self, **_kwargs):
-            raise AssertionError("disabled intent compiler must not construct IntentCompiler")
+            raise AssertionError(
+                "disabled intent compiler must not construct IntentCompiler"
+            )
 
     monkeypatch.setattr(hooks, "IntentCompiler", UnexpectedCompiler)
 

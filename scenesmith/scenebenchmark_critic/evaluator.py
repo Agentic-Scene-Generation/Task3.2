@@ -29,6 +29,9 @@ from scenesmith.scenebenchmark_critic.result_identity import (
     deduplicate_checks,
     deduplicate_results,
 )
+from scenesmith.scenebenchmark_critic.stage_ownership import (
+    normalize_result_stage_ownerships,
+)
 
 
 def build_all_checks(
@@ -143,7 +146,8 @@ def run_case_pack_checks(
         timing["run_case_pack_checks_sec"] = round(
             time.perf_counter() - timing_start, 6
         )
-    return deduplicate_results(apply_contract_execution_states(case_pack, results))
+    results = apply_contract_execution_states(case_pack, results)
+    return deduplicate_results(normalize_result_stage_ownerships(results))
 
 
 def evaluate_case_pack(
