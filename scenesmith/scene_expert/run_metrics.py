@@ -24,7 +24,7 @@ from scenesmith.scene_expert.experiment_identity import stable_source_bundle_has
 
 console_logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "sceneexpert.run_metrics.v7"
+SCHEMA_VERSION = "sceneexpert.run_metrics.v8"
 SCENE_COLUMNS = (
     "run_id",
     "batch_id",
@@ -72,6 +72,9 @@ SCENE_COLUMNS = (
     "evaluation_arm",
     "evaluation_require_frozen_memory",
     "shared_base_fingerprint",
+    "compiled_input_fingerprint",
+    "task_spec_fingerprint",
+    "intent_contract_fingerprint",
     "source_bundle_hash",
     "model",
     "code_revision",
@@ -110,6 +113,8 @@ SCENE_COLUMNS = (
     "memory_read_only",
     "memory_zero_result_reasons",
     "memory_zero_result_events",
+    "memory_selection_rejection_count",
+    "memory_selection_rejection_reasons",
     "memory_retrieval_time_sec",
     "memory_writer_status",
     "memory_writer_candidate_count",
@@ -332,10 +337,19 @@ def _memory_metrics(
     source_run_ids: dict[str, list[str]] = {}
     bank_ids: list[str] = []
     bank_revisions: list[int] = []
+    selection_rejection_reasons: dict[str, int] = {}
     current_task_id = "task_" + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
     for stage_payload in stages:
         stage = str(stage_payload.get("stage") or "")
         pack = stage_payload.get("memory_pack") or {}
+        for decision in pack.get("selection_decisions") or []:
+            if not isinstance(decision, dict) or decision.get("decision") != "rejected":
+                continue
+            for reason in decision.get("reasons") or ["unspecified"]:
+                reason_text = str(reason or "unspecified")
+                selection_rejection_reasons[reason_text] = (
+                    selection_rejection_reasons.get(reason_text, 0) + 1
+                )
         ids = [
             *list(pack.get("success_case_ids") or []),
             *list(pack.get("failure_case_ids") or []),
@@ -431,6 +445,10 @@ def _memory_metrics(
         "memory_dirs": memory_dirs,
         "memory_zero_result_reasons": zero_reasons,
         "memory_zero_result_events": zero_events,
+        "memory_selection_rejection_count": sum(selection_rejection_reasons.values()),
+        "memory_selection_rejection_reasons": dict(
+            sorted(selection_rejection_reasons.items())
+        ),
         "memory_retrieval_time_sec": round(retrieval_time, 6),
     }
 
@@ -794,6 +812,9 @@ def _scene_metrics(
     memory_identity = dict(trace.get("memory_identity") or {})
     evaluation_contract = dict(trace.get("evaluation_contract") or {})
     shared_base_identity = dict(evaluation_contract.get("shared_base_identity") or {})
+    compiled_inputs_identity = dict(
+        evaluation_contract.get("compiled_inputs_identity") or {}
+    )
     memory_snapshot = dict(
         (trace.get("component_status") or {}).get("memory_snapshot") or {}
     )
@@ -862,6 +883,15 @@ def _scene_metrics(
             "require_frozen_memory"
         ),
         "shared_base_fingerprint": str(shared_base_identity.get("fingerprint") or ""),
+        "compiled_input_fingerprint": str(
+            compiled_inputs_identity.get("compiled_input_fingerprint") or ""
+        ),
+        "task_spec_fingerprint": str(
+            compiled_inputs_identity.get("task_spec_fingerprint") or ""
+        ),
+        "intent_contract_fingerprint": str(
+            compiled_inputs_identity.get("intent_contract_fingerprint") or ""
+        ),
         "source_bundle_hash": source_bundle_hash,
         "model": str(trace.get("model") or ""),
         "code_revision": str(
@@ -1001,6 +1031,13 @@ def collect_run_metrics(
     shared_base_fingerprints = _unique(
         row["shared_base_fingerprint"] for row in scene_rows
     )
+    compiled_input_fingerprints = _unique(
+        row["compiled_input_fingerprint"] for row in scene_rows
+    )
+    task_spec_fingerprints = _unique(row["task_spec_fingerprint"] for row in scene_rows)
+    intent_contract_fingerprints = _unique(
+        row["intent_contract_fingerprint"] for row in scene_rows
+    )
     source_bundle_hashes = _unique(row["source_bundle_hash"] for row in scene_rows)
     experiment_names = _unique(row["experiment_name"] for row in scene_rows)
     models = _unique(row["model"] for row in scene_rows)
@@ -1073,6 +1110,9 @@ def collect_run_metrics(
     shared_base_all_present = bool(
         scene_rows and all(row["shared_base_fingerprint"] for row in scene_rows)
     )
+    compiled_inputs_all_present = bool(
+        scene_rows and all(row["compiled_input_fingerprint"] for row in scene_rows)
+    )
     memory_read_only_all = bool(
         scene_rows and all(row["memory_read_only"] is True for row in scene_rows)
     )
@@ -1095,6 +1135,8 @@ def collect_run_metrics(
             warnings.append("evaluation_arm_missing_or_mixed")
         if not shared_base_all_present:
             warnings.append("evaluation_shared_base_fingerprint_missing")
+        if not compiled_inputs_all_present:
+            warnings.append("evaluation_compiled_input_fingerprint_missing")
         if not memory_read_only_all:
             warnings.append("evaluation_memory_bank_not_read_only")
         if not frozen_required_all:
@@ -1123,11 +1165,17 @@ def collect_run_metrics(
         len(row["optional_autonomy_preserved_stages"]) for row in scene_rows
     )
     skill_rejection_reasons: dict[str, int] = {}
+    memory_selection_rejection_reasons: dict[str, int] = {}
     for row in scene_rows:
         for reason, count in row["skill_rejection_reasons"].items():
             reason_text = str(reason)
             skill_rejection_reasons[reason_text] = int(
                 skill_rejection_reasons.get(reason_text, 0)
+            ) + _as_int(count)
+        for reason, count in row["memory_selection_rejection_reasons"].items():
+            reason_text = str(reason)
+            memory_selection_rejection_reasons[reason_text] = int(
+                memory_selection_rejection_reasons.get(reason_text, 0)
             ) + _as_int(count)
 
     summary = {
@@ -1200,6 +1248,12 @@ def collect_run_metrics(
                 for row in scene_rows
                 for reason in row["memory_zero_result_reasons"]
             }
+        ),
+        "memory_selection_rejection_count": sum(
+            row["memory_selection_rejection_count"] for row in scene_rows
+        ),
+        "memory_selection_rejection_reasons": dict(
+            sorted(memory_selection_rejection_reasons.items())
         ),
         "memory_writer_observed_scenes": len(writer_observed),
         "memory_writer_failure_scenes": len(writer_failures),
@@ -1375,6 +1429,10 @@ def collect_run_metrics(
             "arms": evaluation_arms,
             "shared_base_fingerprints": shared_base_fingerprints,
             "shared_base_all_present": shared_base_all_present,
+            "compiled_input_fingerprints": compiled_input_fingerprints,
+            "task_spec_fingerprints": task_spec_fingerprints,
+            "intent_contract_fingerprints": intent_contract_fingerprints,
+            "compiled_inputs_all_present": compiled_inputs_all_present,
             "memory_read_only_all": memory_read_only_all,
             "frozen_required_all": frozen_required_all,
             "contract_ready": bool(
@@ -1383,6 +1441,7 @@ def collect_run_metrics(
                 and len(evaluation_dimensions) == 1
                 and len(evaluation_arms) == 1
                 and shared_base_all_present
+                and compiled_inputs_all_present
                 and memory_snapshot_all_unchanged
                 and memory_snapshot_identity_stable
                 and memory_read_only_all

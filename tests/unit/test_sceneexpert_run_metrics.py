@@ -116,6 +116,14 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
                         },
                         "memory_bank_id": "bank-1",
                         "memory_bank_revision": 2,
+                        "selection_decisions": [
+                            {
+                                "memory_id": "failure-unverified",
+                                "memory_type": "failure",
+                                "decision": "rejected",
+                                "reasons": ["unverified_failure"],
+                            }
+                        ],
                     },
                     "planner_trace": {"status": "ok"},
                     "execution_evidence": {
@@ -324,6 +332,10 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
         "run-cold",
         "run-earlier",
     ]
+    assert metrics["summary"]["memory_selection_rejection_count"] == 1
+    assert metrics["summary"]["memory_selection_rejection_reasons"] == {
+        "unverified_failure": 1
+    }
     assert not any(
         "batch_001.log" in warning for warning in metrics["data_quality_warnings"]
     )
@@ -496,6 +508,11 @@ def test_frozen_evaluation_contract_is_materialized_in_run_metrics(tmp_path) -> 
                 "require_frozen_memory": True,
                 "shared_base_identity": {
                     "fingerprint": "sceneexpert.shared_base_snapshot.v1:def"
+                },
+                "compiled_inputs_identity": {
+                    "compiled_input_fingerprint": "sceneexpert.compiled_input.v1:aaa",
+                    "task_spec_fingerprint": "sceneexpert.task_spec.v1:bbb",
+                    "intent_contract_fingerprint": "sceneexpert.intent_contract.v1:ccc",
                 },
             },
             "component_flags": {

@@ -36,6 +36,9 @@ evaluation:
   controlled_dimension: "${oc.env:SCENEEXPERT_EVAL_DIMENSION,''}"
   arm: "${oc.env:SCENEEXPERT_EVAL_ARM,''}"
   require_frozen_memory: ${oc.env:SCENEEXPERT_EVAL_REQUIRE_FROZEN_MEMORY,false}
+  # Pair-scoped, cross-arm cache for the exact TaskCompiler and critic intent
+  # inputs. The controlled pair launcher sets this automatically.
+  compiled_inputs_dir: "${oc.env:SCENEEXPERT_EVAL_COMPILED_INPUTS_DIR,''}"
 
 # Independent component gates. ``null`` inherits the legacy mode preset; an
 # explicit true/false overrides it. This preserves existing experiment names
@@ -163,6 +166,16 @@ memory:
     # Prevent an identical prompt from retrieving its own earlier output. This
     # makes 4c evidence genuinely cross-task rather than replay leakage.
     exclude_same_task: ${oc.env:SCENEEXPERT_MEMORY_EXCLUDE_SAME_TASK,true}
+  # Retrieval may recall several candidates for audit, but only this bounded,
+  # cross-bank set can reach GlobalPlanner or a native designer prompt.
+  injection_budget:
+    max_total_records: ${oc.env:SCENEEXPERT_MEMORY_MAX_TOTAL_RECORDS,3}
+    max_success_cases: ${oc.env:SCENEEXPERT_MEMORY_INJECT_MAX_SUCCESS,1}
+    max_failure_cases: ${oc.env:SCENEEXPERT_MEMORY_INJECT_MAX_FAILURE,1}
+    max_skills: ${oc.env:SCENEEXPERT_MEMORY_INJECT_MAX_SKILLS,1}
+    max_total_chars: ${oc.env:SCENEEXPERT_MEMORY_MAX_INJECTION_CHARS,8000}
+    require_verified_failures: ${oc.env:SCENEEXPERT_MEMORY_REQUIRE_VERIFIED_FAILURES,true}
+    require_failure_grounding: ${oc.env:SCENEEXPERT_MEMORY_REQUIRE_FAILURE_GROUNDING,true}
   writer:
     # Success memory requires both final/stage pass evidence and this score.
     success_min_overall_score: ${oc.env:SCENEEXPERT_MEMORY_SUCCESS_MIN_SCORE,0.75}

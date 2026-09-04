@@ -37,6 +37,10 @@ def _run(run_id: str, *, ready: bool, time_sec: float, critic: float) -> dict:
             "arms": [arm],
             "shared_base_fingerprints": ["shared-base-bedroom"],
             "shared_base_all_present": True,
+            "compiled_input_fingerprints": ["compiled-bedroom"],
+            "task_spec_fingerprints": ["task-bedroom"],
+            "intent_contract_fingerprints": ["intent-bedroom"],
+            "compiled_inputs_all_present": True,
             "contract_ready": True,
         },
         "summary": {"completion_rate": 1.0 if ready else 0.5},
@@ -55,6 +59,9 @@ def _run(run_id: str, *, ready: bool, time_sec: float, critic: float) -> dict:
                 "hard_constraint_pass": True,
                 "relation_satisfaction": critic,
                 "shared_base_fingerprint": "shared-base-bedroom",
+                "compiled_input_fingerprint": "compiled-bedroom",
+                "task_spec_fingerprint": "task-bedroom",
+                "intent_contract_fingerprint": "intent-bedroom",
                 "component_flags": {
                     "fast_memory_retrieval": treatment,
                     "memory_writer": False,
@@ -140,3 +147,16 @@ def test_changed_shared_base_blocks_causal_comparison() -> None:
 
     assert result["comparison_ready"] is False
     assert "shared_base_fingerprint_mismatch" in result["data_quality_warnings"]
+
+
+def test_changed_compiler_inputs_block_causal_comparison() -> None:
+    baseline = _run("cold", ready=True, time_sec=100.0, critic=0.8)
+    treatment = _run("warm", ready=True, time_sec=80.0, critic=0.9)
+    treatment["scenes"][0]["task_spec_fingerprint"] = "different-task"
+    treatment["evaluation_contract"]["task_spec_fingerprints"] = ["different-task"]
+
+    result = compare_run_metrics(baseline, treatment)
+
+    assert result["comparison_ready"] is False
+    assert result["identity_checks"]["compiled_inputs.per_case_fingerprint"] is False
+    assert "compiled_input_fingerprint_mismatch" in result["data_quality_warnings"]

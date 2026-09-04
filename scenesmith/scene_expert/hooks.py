@@ -34,6 +34,7 @@ from scenesmith.scene_expert.config_utils import (
     resolve_stage_policies,
 )
 from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
+from scenesmith.scene_expert.evaluation_inputs import FrozenCompiledInputStore
 from scenesmith.scene_expert.experiment_identity import (
     MEMORY_RETRIEVAL_EVALUATION_DIMENSION,
     shared_base_scene_identity as _shared_base_scene_identity,
@@ -51,6 +52,10 @@ from scenesmith.scene_expert.harness import (
 from scenesmith.scene_expert.memory.activity import MemoryActivityLogger
 from scenesmith.scene_expert.memory.injection import build_memory_injection_bundle
 from scenesmith.scene_expert.memory.retriever import MemoryRetriever
+from scenesmith.scene_expert.memory.selection_policy import (
+    BudgetedMemoryRetriever,
+    MemoryInjectionPolicy,
+)
 from scenesmith.scene_expert.memory.schemas import MemoryUtilityObservation
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.writer import MemoryWriter
@@ -3050,6 +3055,25 @@ def build_hook_runner(
         if component_flags["memory_writer"]:
             raise ValueError("Paired Memory evaluation requires memory_writer=false")
 
+    compiled_inputs_dir = str(evaluation_cfg.get("compiled_inputs_dir") or "").strip()
+    if evaluation_requested and not compiled_inputs_dir:
+        raise ValueError(
+            "Paired Memory evaluation requires a pair-scoped compiled_inputs_dir"
+        )
+
+    # Capture resolved experiment identity before TaskCompiler/IntentCompiler
+    # attach any per-scene runtime envelopes to cfg_dict.
+    config_hash = _stable_config_hash(cfg_dict)
+    experiment_signature = _stable_experiment_signature(cfg_dict)
+    control_signature = (
+        _stable_control_signature(
+            cfg_dict,
+            controlled_dimension=evaluation_dimension,
+        )
+        if evaluation_requested
+        else experiment_signature
+    )
+
     stage_policies = resolve_stage_policies(cfg_dict)
     console_logger.info(f"[SceneExpert] Building hook runner (mode={mode})")
 
@@ -3143,6 +3167,27 @@ def build_hook_runner(
                 f"Unsupported SceneExpert memory retriever_type={retriever_type!r}. "
                 "Use 'lexical' or 'hybrid'."
             )
+        injection_cfg = memory_cfg.get("injection_budget", {}) or {}
+        retriever = BudgetedMemoryRetriever(
+            retriever,
+            store=memory_store,
+            policy=MemoryInjectionPolicy(
+                max_total_records=_cfg_int(injection_cfg.get("max_total_records"), 3),
+                max_success_cases=_cfg_int(injection_cfg.get("max_success_cases"), 1),
+                max_failure_cases=_cfg_int(injection_cfg.get("max_failure_cases"), 1),
+                max_skills=_cfg_int(injection_cfg.get("max_skills"), 1),
+                max_total_chars=_cfg_int(injection_cfg.get("max_total_chars"), 8000),
+                require_verified_failures=_cfg_bool(
+                    injection_cfg.get("require_verified_failures"), True
+                ),
+                require_failure_grounding=_cfg_bool(
+                    injection_cfg.get("require_failure_grounding"), True
+                ),
+                object_overlap_threshold=_cfg_float(
+                    ret_cfg.get("object_overlap_threshold"), 0.15
+                ),
+            ),
+        )
     if component_flags["memory_writer"]:
         writer_kwargs: dict[str, Any] = {
             "model": model,
@@ -3218,65 +3263,123 @@ def build_hook_runner(
 
     from scenesmith.scene_expert.task_compiler import _fallback_spec_from_prompt
 
-    task_compiler: TaskCompiler | None = None
-    task_compiler_trace: dict[str, Any] = {}
-    if component_flags["task_compiler"]:
-        task_compiler = TaskCompiler(
+    def compile_current_inputs() -> dict[str, Any]:
+        task_compiler: TaskCompiler | None = None
+        task_compiler_trace: dict[str, Any] = {}
+        if component_flags["task_compiler"]:
+            task_compiler = TaskCompiler(
+                model=model,
+                api_base_url=api_base,
+                api_key=api_key,
+                llm_client=structured_llm_client,
+            )
+            try:
+                current_task_spec = task_compiler.compile(prompt)
+            except Exception as e:
+                console_logger.warning(
+                    "TaskCompiler failed, using fallback task spec from prompt text: %s",
+                    e,
+                )
+                current_task_spec = _fallback_spec_from_prompt(prompt)
+            task_compiler_trace = dict(getattr(task_compiler, "last_trace", {}) or {})
+        else:
+            current_task_spec = _fallback_spec_from_prompt(prompt)
+            task_compiler_trace = {
+                "status": "disabled",
+                "attempts": [],
+                "failure_reason": "TaskCompiler disabled by component gate",
+            }
+
+        current_task_spec, behavior_spec = apply_behavior_template(
+            prompt,
+            current_task_spec,
+            config=behavior_cfg,
+            output_path=scene_debug_dir / "behavior_spec.json",
             model=model,
             api_base_url=api_base,
             api_key=api_key,
-            llm_client=structured_llm_client,
         )
-        try:
-            task_spec = task_compiler.compile(prompt)
-        except Exception as e:
-            console_logger.warning(
-                f"TaskCompiler failed, using fallback task spec from prompt text: {e}"
+        if behavior_spec is not None:
+            console_logger.info(
+                "[SceneExpert] Applied deterministic behavior template; spec=%s",
+                scene_debug_dir / "behavior_spec.json",
             )
-            task_spec = _fallback_spec_from_prompt(prompt)
-        task_compiler_trace = dict(getattr(task_compiler, "last_trace", {}) or {})
-    else:
-        task_spec = _fallback_spec_from_prompt(prompt)
-        task_compiler_trace = {
-            "status": "disabled",
-            "attempts": [],
-            "failure_reason": "TaskCompiler disabled by component gate",
+
+        current_contract, current_intent_trace = _compile_intent_contract_if_enabled(
+            prompt=prompt,
+            scene_id=scene_id,
+            output_dir=output_dir,
+            cfg_dict=cfg_dict,
+            task_spec=current_task_spec,
+        )
+        pre_reconciliation = current_task_spec
+        current_task_spec = _reconcile_task_spec_stage_ownership(
+            current_task_spec, current_contract
+        )
+        ownership_audit = _audit_stage_ownership(
+            pre_reconciliation,
+            current_task_spec,
+            current_contract,
+        )
+        task_compiler_trace["ownership_reconciliation"] = ownership_audit
+        if ownership_audit["errors"]:
+            raise ValueError(
+                "Stage ownership reconciliation failed: "
+                + "; ".join(ownership_audit["errors"])
+            )
+        return {
+            "task_spec": current_task_spec.model_dump(mode="json", exclude_none=True),
+            "intent_contract": current_contract,
+            "compiler_metadata": {
+                "task_compiler_trace": task_compiler_trace,
+                "intent_trace": current_intent_trace,
+                "intent_cache_key": dict(
+                    cfg_dict.get("_scenebenchmark_intent_cache_key") or {}
+                ),
+                "behavior_spec": (
+                    behavior_spec.model_dump(mode="json")
+                    if behavior_spec is not None
+                    else None
+                ),
+            },
         }
 
-    task_spec, behavior_spec = apply_behavior_template(
-        prompt,
-        task_spec,
-        config=behavior_cfg,
-        output_path=scene_debug_dir / "behavior_spec.json",
-        model=model,
-        api_base_url=api_base,
-        api_key=api_key,
-    )
-    if behavior_spec is not None:
-        console_logger.info(
-            "[SceneExpert] Applied deterministic behavior template; spec=%s",
-            scene_debug_dir / "behavior_spec.json",
+    compiled_inputs_identity: dict[str, Any] = {}
+    if evaluation_requested:
+        compiled_payload, compiled_inputs_identity = FrozenCompiledInputStore(
+            compiled_inputs_dir
+        ).load_or_create(
+            scene_id=scene_id,
+            prompt=prompt,
+            producer=compile_current_inputs,
         )
+    else:
+        compiled_payload = compile_current_inputs()
 
-    intent_contract, intent_trace = _compile_intent_contract_if_enabled(
-        prompt=prompt,
-        scene_id=scene_id,
-        output_dir=output_dir,
-        cfg_dict=cfg_dict,
-        task_spec=task_spec,
+    task_spec = SceneTaskSpec.model_validate(compiled_payload["task_spec"])
+    intent_contract = dict(compiled_payload.get("intent_contract") or {})
+    compiler_metadata = dict(compiled_payload.get("compiler_metadata") or {})
+    task_compiler_trace = dict(compiler_metadata.get("task_compiler_trace") or {})
+    intent_trace = dict(compiler_metadata.get("intent_trace") or {})
+    cfg_dict["_scenebenchmark_intent_contract"] = intent_contract
+    cfg_dict["_scenebenchmark_intent_trace"] = intent_trace
+    cfg_dict["_scenebenchmark_intent_cache_key"] = dict(
+        compiler_metadata.get("intent_cache_key") or {}
     )
-    pre_reconciliation_task_spec = task_spec
-    task_spec = _reconcile_task_spec_stage_ownership(task_spec, intent_contract)
-    ownership_audit = _audit_stage_ownership(
-        pre_reconciliation_task_spec,
-        task_spec,
-        intent_contract,
+    intent_trace_path = scene_debug_dir / "trace" / "intent_compiler.json"
+    intent_trace_path.parent.mkdir(parents=True, exist_ok=True)
+    intent_trace_path.write_text(
+        json.dumps(intent_trace, indent=2, ensure_ascii=False, default=str) + "\n",
+        encoding="utf-8",
+        newline="\n",
     )
-    task_compiler_trace["ownership_reconciliation"] = ownership_audit
-    if ownership_audit["errors"]:
-        raise ValueError(
-            "Stage ownership reconciliation failed: "
-            + "; ".join(ownership_audit["errors"])
+    behavior_payload = compiler_metadata.get("behavior_spec")
+    if isinstance(behavior_payload, dict):
+        (scene_debug_dir / "behavior_spec.json").write_text(
+            json.dumps(behavior_payload, indent=2, ensure_ascii=False, default=str)
+            + "\n",
+            encoding="utf-8",
+            newline="\n",
         )
 
     # Harness always assembles planner context, while its FSM and budget
@@ -3319,16 +3422,6 @@ def build_hook_runner(
         .get("stop_stage", GENERATION_TERMINAL_STAGE)
         or GENERATION_TERMINAL_STAGE
     )
-    config_hash = _stable_config_hash(cfg_dict)
-    experiment_signature = _stable_experiment_signature(cfg_dict)
-    control_signature = (
-        _stable_control_signature(
-            cfg_dict,
-            controlled_dimension=evaluation_dimension,
-        )
-        if evaluation_requested
-        else experiment_signature
-    )
     memory_identity = (
         memory_store.snapshot_identity(refresh=True) if memory_store is not None else {}
     )
@@ -3350,6 +3443,7 @@ def build_hook_runner(
             "memory_writer_enabled": component_flags["memory_writer"],
             "memory_read_only": bool(memory_store and memory_store.read_only),
             "shared_base_identity": shared_base_identity,
+            "compiled_inputs_identity": compiled_inputs_identity,
         }
         if evaluation_requested
         else {}

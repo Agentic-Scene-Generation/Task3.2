@@ -106,7 +106,9 @@ Guidelines:
   circulation, and opening-free wall length. Do not invent rooms, partitions,
   or other structural markers unless the Immutable User Task explicitly asks
   for structural separation.
-- Prioritize failure patterns from memory — they encode hard-won lessons.
+- Build the plan from the immutable task and positive guidance first. Treat the
+  bounded, verified failure pattern from memory as one local guardrail; it must
+  not suppress required assets, optional design autonomy, or an entire stage.
 - When an Immutable User Task is supplied, its explicit object, topology, and
   facing relations are authoritative. Memory and current-scene observations may
   refine only non-conflicting details. Omit a suggestion instead of replacing an

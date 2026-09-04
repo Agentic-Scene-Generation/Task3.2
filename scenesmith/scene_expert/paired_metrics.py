@@ -14,11 +14,14 @@ from typing import Any, Iterable
 
 from scenesmith.scene_expert.experiment_identity import stable_source_bundle_hash
 
-SCHEMA_VERSION = "sceneexpert.paired_metrics.v4"
+SCHEMA_VERSION = "sceneexpert.paired_metrics.v5"
 PAIR_COLUMNS = (
     "case_id",
     "prompt_match",
     "shared_base_match",
+    "compiled_input_match",
+    "task_spec_match",
+    "intent_contract_match",
     "baseline_status",
     "treatment_status",
     "baseline_generation_status",
@@ -296,6 +299,17 @@ def compare_run_metrics(
     identity_checks["evaluation_contract.controlled_dimension"] = dimension_matches
     identity_checks["evaluation_contract.arms"] = arms_valid
     identity_checks["evaluation_contract.ready"] = contracts_ready
+    for key in (
+        "compiled_input_fingerprints",
+        "task_spec_fingerprints",
+        "intent_contract_fingerprints",
+    ):
+        before_values = sorted(str(value) for value in baseline_contract.get(key, []))
+        after_values = sorted(str(value) for value in treatment_contract.get(key, []))
+        matches = bool(before_values) and before_values == after_values
+        identity_checks[f"evaluation_contract.{key}"] = matches
+        if not matches:
+            warnings.append(f"evaluation_contract_mismatch:{key}")
     for key, passed in (
         ("pair_id", pair_ids_match),
         ("controlled_dimension", dimension_matches),
@@ -308,6 +322,7 @@ def compare_run_metrics(
     pairs: list[dict[str, Any]] = []
     prompt_mismatch = False
     shared_base_mismatch = False
+    compiled_input_mismatch = False
     for case_id in sorted(baseline_cases & treatment_cases):
         before = baseline_rows[case_id]
         after = treatment_rows[case_id]
@@ -342,11 +357,28 @@ def compare_run_metrics(
             before_shared_base == after_shared_base
         )
         shared_base_mismatch = shared_base_mismatch or not shared_base_match
+        before_compiled_input = str(before.get("compiled_input_fingerprint") or "")
+        after_compiled_input = str(after.get("compiled_input_fingerprint") or "")
+        compiled_input_match = bool(before_compiled_input) and (
+            before_compiled_input == after_compiled_input
+        )
+        before_task_spec = str(before.get("task_spec_fingerprint") or "")
+        after_task_spec = str(after.get("task_spec_fingerprint") or "")
+        task_spec_match = bool(before_task_spec) and before_task_spec == after_task_spec
+        before_intent = str(before.get("intent_contract_fingerprint") or "")
+        after_intent = str(after.get("intent_contract_fingerprint") or "")
+        intent_contract_match = bool(before_intent) and before_intent == after_intent
+        compiled_input_mismatch = compiled_input_mismatch or not (
+            compiled_input_match and task_spec_match and intent_contract_match
+        )
         pairs.append(
             {
                 "case_id": case_id,
                 "prompt_match": prompt_match,
                 "shared_base_match": shared_base_match,
+                "compiled_input_match": compiled_input_match,
+                "task_spec_match": task_spec_match,
+                "intent_contract_match": intent_contract_match,
                 "baseline_status": before_status,
                 "treatment_status": after_status,
                 "baseline_generation_status": str(
@@ -420,6 +452,11 @@ def compare_run_metrics(
     )
     if shared_base_mismatch:
         warnings.append("shared_base_fingerprint_mismatch")
+    identity_checks["compiled_inputs.per_case_fingerprint"] = bool(pairs) and not (
+        compiled_input_mismatch
+    )
+    if compiled_input_mismatch:
+        warnings.append("compiled_input_fingerprint_mismatch")
 
     baseline_ready = bool(baseline.get("quality_comparison_ready"))
     treatment_ready = bool(treatment.get("quality_comparison_ready"))
@@ -476,7 +513,11 @@ def compare_run_metrics(
         "evaluation_contract.controlled_dimension",
         "evaluation_contract.arms",
         "evaluation_contract.ready",
+        "evaluation_contract.compiled_input_fingerprints",
+        "evaluation_contract.task_spec_fingerprints",
+        "evaluation_contract.intent_contract_fingerprints",
         "shared_base.per_case_fingerprint",
+        "compiled_inputs.per_case_fingerprint",
         "component_flags.baseline_memory_off_full",
         "component_flags.treatment_memory_on_full",
         "memory_delivery.baseline_isolated",

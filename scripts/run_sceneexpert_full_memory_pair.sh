@@ -37,6 +37,8 @@ PAIR_ACTION="${PAIR_ACTION:-both}"
 
 PYTHON_BIN="${PYTHON_BIN:-$PROJECT_ROOT/.venv/bin/python}"
 PAIR_METRICS_DIR="${PAIR_METRICS_DIR:-$PROJECT_ROOT/outputs/critic_probe/${PAIR_ID}_metrics}"
+PAIR_CONTRACT_ROOT="${PAIR_CONTRACT_ROOT:-$PROJECT_ROOT/outputs/critic_probe/${PAIR_ID}_contract}"
+COMPILED_INPUTS_DIR="${COMPILED_INPUTS_DIR:-$PAIR_CONTRACT_ROOT/compiled_inputs}"
 
 die() {
   echo "ERROR: $*" >&2
@@ -123,6 +125,7 @@ run_arm() {
   echo "memory_root=$FROZEN_MEMORY_ROOT"
   echo "fast_memory_retrieval=$retrieval_enabled"
   echo "memory_writer=false"
+  echo "compiled_inputs=$COMPILED_INPUTS_DIR"
 
   env \
     PROJECT_ROOT="$PROJECT_ROOT" \
@@ -138,6 +141,7 @@ run_arm() {
     SCENEEXPERT_EVAL_DIMENSION=fast_memory_retrieval \
     SCENEEXPERT_EVAL_ARM="$arm" \
     SCENEEXPERT_EVAL_REQUIRE_FROZEN_MEMORY=true \
+    SCENEEXPERT_EVAL_COMPILED_INPUTS_DIR="$COMPILED_INPUTS_DIR" \
     bash "$FULL_REUSE_LAUNCHER"
 }
 

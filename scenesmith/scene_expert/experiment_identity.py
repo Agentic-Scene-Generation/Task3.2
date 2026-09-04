@@ -45,6 +45,7 @@ _SUPPORTED_CONTROLLED_DIMENSIONS = frozenset({MEMORY_RETRIEVAL_EVALUATION_DIMENS
 
 def stable_config_hash(cfg_dict: dict[str, Any]) -> str:
     """Hash the complete resolved configuration for exact replay identity."""
+    cfg_dict = _strip_runtime_private_keys(cfg_dict)
     try:
         payload = json.dumps(cfg_dict, sort_keys=True, default=str)
     except TypeError:
@@ -52,8 +53,25 @@ def stable_config_hash(cfg_dict: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
+def _strip_runtime_private_keys(value: Any) -> Any:
+    """Remove post-resolution runtime envelopes from an exact config snapshot."""
+    if isinstance(value, dict):
+        return {
+            str(key): _strip_runtime_private_keys(item)
+            for key, item in value.items()
+            if not str(key).startswith("_")
+        }
+    if isinstance(value, (list, tuple)):
+        return [_strip_runtime_private_keys(item) for item in value]
+    return value
+
+
 def _volatile_key(key: object, path: tuple[str, ...], value: Any) -> bool:
     normalized = str(key).casefold()
+    if normalized.startswith("_"):
+        # Runtime-only envelopes such as compiled intent contracts must never
+        # fragment experiment identity across scenes or controlled arms.
+        return True
     if normalized in {"prompt", "prompts"}:
         # Scene tasks vary per case and must not fragment a run signature.
         # Agent prompt-template selectors (for example

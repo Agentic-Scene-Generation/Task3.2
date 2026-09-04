@@ -118,6 +118,17 @@ class RetrievedMemorySelection(BaseModel):
     injected_text: str = ""
 
 
+class MemorySelectionDecision(BaseModel):
+    """One auditable admission or rejection made by the injection policy."""
+
+    memory_id: str
+    memory_type: Literal["success", "failure", "skill"]
+    decision: Literal["selected", "rejected"]
+    reasons: list[str] = Field(default_factory=list)
+    retrieval_rank: int = Field(default=0, ge=0)
+    retrieval_score: float | None = None
+
+
 class SkillSelectionDecision(BaseModel):
     """Auditable deterministic gate applied before skill ranking/injection."""
 
@@ -171,6 +182,8 @@ class MemoryPack(BaseModel):
     memory_bank_id: str = ""
     memory_bank_revision: int = 0
     selections: list[RetrievedMemorySelection] = Field(default_factory=list)
+    selection_decisions: list[MemorySelectionDecision] = Field(default_factory=list)
+    selection_policy: dict[str, Any] = Field(default_factory=dict)
     skill_filter_decisions: list[SkillSelectionDecision] = Field(default_factory=list)
 
     def deduplicated(self) -> "MemoryPack":

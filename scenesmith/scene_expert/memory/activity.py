@@ -318,6 +318,15 @@ class MemoryActivityLogger:
             retrieval = entry.get("retrieval") or {}
             injection = entry.get("injection") or {}
             report = entry.get("verify_report") or {}
+            rejected = [
+                item
+                for item in retrieval.get("selection_decisions", []) or []
+                if isinstance(item, dict) and item.get("decision") == "rejected"
+            ]
+            rejected_summary = "; ".join(
+                f"{item.get('memory_id', '')} ({', '.join(item.get('reasons') or [])})"
+                for item in rejected
+            )
             lines.extend(
                 [
                     f"## {stage}",
@@ -329,6 +338,12 @@ class MemoryActivityLogger:
                     "- Selected IDs: `"
                     + ", ".join(injection.get("selected_memory_ids", []))
                     + "`",
+                    "- Injection policy: `"
+                    + json.dumps(
+                        retrieval.get("selection_policy", {}), ensure_ascii=False
+                    )
+                    + "`",
+                    "- Rejected candidates: `" + (rejected_summary or "none") + "`",
                     "- Injection hash: `"
                     + str(
                         (entry.get("execution_evidence") or {}).get(

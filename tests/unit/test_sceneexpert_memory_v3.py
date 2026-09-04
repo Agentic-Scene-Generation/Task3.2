@@ -110,6 +110,20 @@ def test_experiment_signature_ignores_per_scene_prompt_and_identity() -> None:
     assert stable_experiment_signature(first) == stable_experiment_signature(second)
 
 
+def test_exact_and_control_identity_ignore_runtime_private_contracts() -> None:
+    first = {
+        "experiment": {"pipeline": {"stop_stage": "manipuland"}},
+        "_scenebenchmark_intent_contract": {"constraint_id": "case-a"},
+    }
+    second = {
+        "experiment": {"pipeline": {"stop_stage": "manipuland"}},
+        "_scenebenchmark_intent_contract": {"constraint_id": "case-b"},
+    }
+
+    assert stable_config_hash(first) == stable_config_hash(second)
+    assert stable_experiment_signature(first) == stable_experiment_signature(second)
+
+
 def test_experiment_signature_keeps_agent_prompt_template_selection() -> None:
     first = {
         "experiment": {"prompts": ["A classroom."]},
