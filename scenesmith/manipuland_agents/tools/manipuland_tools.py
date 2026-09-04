@@ -509,6 +509,7 @@ class ManipulandTools:
             transform=reference.transform,
             mesh=mesh,
             link_name=reference.link_name,
+            open_above=all(surface.open_above for surface in surfaces),
         )
 
     def set_noise_profile(self, mode: PlacementNoiseMode) -> None:
@@ -749,6 +750,16 @@ class ManipulandTools:
                 highest_surface_id = str(surface.surface_id)
 
         return surface_id == highest_surface_id
+
+    @staticmethod
+    def _height_fits_surface_clearance(
+        surface: SupportSurface, object_height: float
+    ) -> bool:
+        """Return whether bounded overhead clearance admits the object height."""
+        if getattr(surface, "open_above", False) is True:
+            return True
+        clearance = float(surface.bounding_box_max[2] - surface.bounding_box_min[2])
+        return object_height <= clearance
 
     def _validate_convex_hull_footprint(
         self,
@@ -1098,7 +1109,8 @@ class ManipulandTools:
                 - surface_id: Unique identifier for the surface
                 - area_m2: Surface area in square meters
                 - height_m: Approximate height in meters (Z coordinate of surface)
-                - clearance_height: Vertical clearance in meters (max object height)
+                - clearance_height: Measured clearance band in meters
+                - open_above: Whether the space above has no finite obstacle
             """
             surfaces_info = []
             for surface_id_str, surface in self.support_surfaces.items():
@@ -1116,6 +1128,7 @@ class ManipulandTools:
                             ),
                             3,
                         ),
+                        "open_above": surface.open_above,
                     }
                 )
 
@@ -1713,7 +1726,7 @@ class ManipulandTools:
                 f"surface_clearance={surface_clearance:.3f}m"
             )
 
-            if object_height > surface_clearance:
+            if not self._height_fits_surface_clearance(target_surface, object_height):
                 return self._create_placement_failure_result(
                     asset_id=asset_id,
                     message=(
@@ -1991,7 +2004,7 @@ class ManipulandTools:
                 f"surface_clearance={surface_clearance:.3f}m"
             )
 
-            if object_height > surface_clearance:
+            if not self._height_fits_surface_clearance(target_surface, object_height):
                 return self._create_placement_failure_result(
                     asset_id=object_id,
                     message=(
@@ -3913,6 +3926,7 @@ class ManipulandTools:
             world_z=float(world_position[2]),
             clearance_height=float(surface.bounding_box_max[2]),
             manipulands=manipuland_infos,
+            open_above=surface.open_above,
         )
 
     @log_scene_action

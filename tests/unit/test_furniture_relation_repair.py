@@ -1809,20 +1809,18 @@ def test_media_axis_offset_fails_and_repairs_living_group(tmp_path: Path) -> Non
     assert {fix.object_id for fix in fixes} == {
         "sofa_0",
         "tv_stand_0",
-        "television_0",
     }
     np.testing.assert_allclose(coffee_table.transform.translation()[:2], [-1.05, 0.0])
     after = evaluate_room_scene(scene, config=config, stage="media_axis_after")
-    assert all(
-        result["label"] == "pass"
+    labels_after = {
+        str(result["relation_type"]): str(result["label"])
         for result in after["results"]
-        if result.get("relation_type")
-        in {
-            "seating_to_media",
-            "object_on_support",
-            "centered_between_alignment",
-        }
-    )
+        if result.get("relation_type") in {"seating_to_media", "object_on_support"}
+    }
+    assert labels_after == {
+        "seating_to_media": "pass",
+        "object_on_support": "fail",
+    }
 
 
 def _activity_zone_scene(
@@ -2078,7 +2076,6 @@ def test_media_group_repair_resolves_failed_support_and_between_dependencies(
     assert {pose.object_id for pose in media_target.member_poses} == {
         "sofa_0",
         "tv_stand_0",
-        "television_0",
         "coffee_table_0",
     }
 
@@ -2087,12 +2084,11 @@ def test_media_group_repair_resolves_failed_support_and_between_dependencies(
     assert {fix.object_id for fix in fixes} >= {
         "sofa_0",
         "tv_stand_0",
-        "television_0",
         "coffee_table_0",
     }
     after = evaluate_room_scene(scene, config=config, stage="media_group_after")
-    assert all(
-        result["label"] == "pass"
+    labels_after = {
+        str(result["relation_type"]): str(result["label"])
         for result in after["results"]
         if result.get("relation_type")
         in {
@@ -2100,7 +2096,12 @@ def test_media_group_repair_resolves_failed_support_and_between_dependencies(
             "object_on_support",
             "centered_between_alignment",
         }
-    )
+    }
+    assert labels_after == {
+        "seating_to_media": "pass",
+        "object_on_support": "fail",
+        "centered_between_alignment": "pass",
+    }
 
 
 def test_repairs_multiple_wall_backed_stools_with_wall_normal_orientation(
@@ -2510,7 +2511,7 @@ def test_wall_backed_repair_keeps_nearby_required_relation(tmp_path: Path) -> No
     assert result_by_object["tv_stand_0"]["label"] == "pass"
 
 
-def test_freestanding_television_repair_restores_media_support(tmp_path: Path) -> None:
+def test_furniture_repair_defers_explicit_television_support(tmp_path: Path) -> None:
     tv_stand = _object(
         "tv_stand_0", "tv_stand", (0.0, 1.1, 0.3), (1.4, 0.5, 0.6), yaw_deg=90.0
     )
@@ -2539,26 +2540,16 @@ def test_freestanding_television_repair_restores_media_support(tmp_path: Path) -
         and item.get("primary_object") == "television_0"
     )
     assert before["label"] == "fail"
-    assert [
-        (item.get("primary_object"), item.get("relation_type"))
-        for item in unresolved_furniture_relation_failures(scene, config=config)
-    ] == [("television_0", "object_on_support")]
+    assert unresolved_furniture_relation_failures(scene, config=config) == []
+    old_tv_transform = television.transform.GetAsMatrix4().copy()
+    old_stand_transform = tv_stand.transform.GetAsMatrix4().copy()
 
     validator_calls = 0
 
     def candidate_validator(candidate: RoomScene) -> bool:
         nonlocal validator_calls
         validator_calls += 1
-        candidate_tv_bounds = candidate.objects[
-            UniqueID("television_0")
-        ].compute_world_bounds()
-        candidate_stand_bounds = candidate.objects[
-            UniqueID("tv_stand_0")
-        ].compute_world_bounds()
-        assert candidate_tv_bounds is not None and candidate_stand_bounds is not None
-        # The support repair must clear the physical support volume rather than
-        # only satisfying the evaluator's XY overlap criterion.
-        return bool(candidate_tv_bounds[0][2] > candidate_stand_bounds[1][2])
+        return True
 
     fixes = improve_furniture_relations(
         scene,
@@ -2566,25 +2557,10 @@ def test_freestanding_television_repair_restores_media_support(tmp_path: Path) -
         candidate_validator=candidate_validator,
     )
 
-    assert [(fix.object_id, fix.relation_type) for fix in fixes] == [
-        ("television_0", "object_on_support")
-    ]
-    assert validator_calls == 1
-    tv_bounds = television.compute_world_bounds()
-    stand_bounds = tv_stand.compute_world_bounds()
-    assert tv_bounds is not None and stand_bounds is not None
-    np.testing.assert_allclose(
-        (tv_bounds[0][:2] + tv_bounds[1][:2]) / 2.0,
-        (stand_bounds[0][:2] + stand_bounds[1][:2]) / 2.0,
-    )
-    assert math.isclose(
-        float(tv_bounds[0][2]), float(stand_bounds[1][2]) + 0.01, abs_tol=1e-6
-    )
-    assert math.isclose(
-        RollPitchYaw(television.transform.rotation()).yaw_angle(),
-        RollPitchYaw(tv_stand.transform.rotation()).yaw_angle(),
-        abs_tol=1e-6,
-    )
+    assert fixes == []
+    assert validator_calls == 0
+    np.testing.assert_allclose(television.transform.GetAsMatrix4(), old_tv_transform)
+    np.testing.assert_allclose(tv_stand.transform.GetAsMatrix4(), old_stand_transform)
     after = next(
         item
         for item in evaluate_room_scene(scene, config=config, stage="media_after")[
@@ -2593,7 +2569,7 @@ def test_freestanding_television_repair_restores_media_support(tmp_path: Path) -
         if item.get("relation_type") == "object_on_support"
         and item.get("primary_object") == "television_0"
     )
-    assert after["label"] == "pass"
+    assert after["label"] == "fail"
 
 
 def test_hard_support_collision_is_prioritized_before_unrelated_repairs(
@@ -2702,7 +2678,7 @@ def test_media_support_repair_does_not_move_pair_for_window(tmp_path: Path) -> N
 
     fixes = improve_furniture_relations(scene, config=config)
 
-    assert {fix.object_id for fix in fixes} == {"television_0"}
+    assert fixes == []
     np.testing.assert_allclose(tv_stand.transform.translation()[:2], [0.0, 1.7])
     payload = evaluate_room_scene(scene, config=config, stage="media_window_after")
     result_by_id = {result["check_id"]: result for result in payload["results"]}
@@ -2712,9 +2688,9 @@ def test_media_support_repair_does_not_move_pair_for_window(tmp_path: Path) -> N
         if result.get("relation_type") == "object_on_support"
         and result.get("primary_object") == "television_0"
     )
-    assert support_result["label"] == "pass"
-    assert result_by_id["window_clearance__window_0"]["label"] == "fail"
-    assert result_by_id["window_clearance__window_0"]["scoring_tier"] == "core"
+    assert support_result["label"] == "fail"
+    assert result_by_id["window_clearance__window_0"]["label"] == "pass"
+    assert result_by_id["window_clearance__window_0"]["scoring_tier"] == "auxiliary"
 
 
 def test_media_support_repair_leaves_between_group_for_window(tmp_path: Path) -> None:
@@ -2864,7 +2840,7 @@ def test_media_support_repair_leaves_between_group_for_window(tmp_path: Path) ->
         candidate_validator=candidate_validator,
     )
 
-    assert {fix.object_id for fix in fixes} == {"television_0"}
+    assert fixes == []
     new_rug_center = (
         rug.compute_world_bounds()[0][:2] + rug.compute_world_bounds()[1][:2]
     ) / 2.0
@@ -2884,9 +2860,9 @@ def test_media_support_repair_leaves_between_group_for_window(tmp_path: Path) ->
         if result.get("relation_type") == "object_on_support"
         and result.get("primary_object") == "television_0"
     )
-    assert support_result["label"] == "pass"
-    assert result_by_id["window_clearance__window_0"]["label"] == "fail"
-    assert result_by_id["window_clearance__window_0"]["scoring_tier"] == "core"
+    assert support_result["label"] == "fail"
+    assert result_by_id["window_clearance__window_0"]["label"] == "pass"
+    assert result_by_id["window_clearance__window_0"]["scoring_tier"] == "auxiliary"
     assert (
         next(
             result

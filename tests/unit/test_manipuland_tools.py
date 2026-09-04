@@ -54,6 +54,8 @@ class TestManipulandTools(unittest.TestCase):
         self.mock_surface.bounding_box_max = np.array(
             [0.5, 0.5, 0.5]
         )  # 0.5m clearance.
+        self.mock_surface.open_above = False
+        self.mock_surface.transform = RigidTransform(p=[0.0, 0.0, 1.0])
         self.mock_surface.contains_point_2d = Mock(return_value=True)
         self.mock_surface.to_world_pose = Mock(
             return_value=RigidTransform(p=[0.0, 0.0, 1.0])
@@ -90,6 +92,30 @@ class TestManipulandTools(unittest.TestCase):
             self.manipuland_tools.active_noise_profile,
             self.cfg.placement_noise.perfect_profile,
         )
+
+    def test_height_clearance_allows_tall_object_only_when_surface_is_open(self):
+        self.mock_surface.open_above = True
+        self.assertTrue(
+            self.manipuland_tools._height_fits_surface_clearance(
+                self.mock_surface, object_height=1.0
+            )
+        )
+
+        self.mock_surface.open_above = False
+        self.assertFalse(
+            self.manipuland_tools._height_fits_surface_clearance(
+                self.mock_surface, object_height=1.0
+            )
+        )
+
+    def test_surface_state_dto_exposes_open_above(self):
+        self.mock_surface.open_above = True
+
+        dto = self.manipuland_tools._support_surface_to_dto_with_manipulands(
+            self.mock_surface, []
+        )
+
+        self.assertTrue(dto.open_above)
 
     def test_generation_filter_blocks_fulfilled_floor_requirement(self):
         self.manipuland_tools.fulfilled_floor_requirements = {
@@ -331,6 +357,26 @@ class TestManipulandTools(unittest.TestCase):
         logical_surface = merged[0]
         self.assertTrue(logical_surface.contains_point_2d(np.array([0.0, 0.0])))
         self.assertTrue(logical_surface.contains_point_2d(np.array([0.99, 0.0])))
+
+    def test_coalesced_surface_is_open_only_when_every_piece_is_open(self):
+        def surface(surface_id: str, x: float, open_above: bool) -> SupportSurface:
+            return SupportSurface(
+                surface_id=UniqueID(surface_id),
+                bounding_box_min=np.array([-0.5, -0.4, 0.01]),
+                bounding_box_max=np.array([0.5, 0.4, 0.5]),
+                transform=RigidTransform(p=[x, 0.0, 0.8]),
+                open_above=open_above,
+            )
+
+        all_open = ManipulandTools._coalesce_adjacent_support_surfaces(
+            [surface("S_8", 0.0, True), surface("S_9", 1.0, True)]
+        )
+        partly_bounded = ManipulandTools._coalesce_adjacent_support_surfaces(
+            [surface("S_8", 0.0, True), surface("S_9", 1.0, False)]
+        )
+
+        self.assertTrue(all_open[0].open_above)
+        self.assertFalse(partly_bounded[0].open_above)
 
     def test_disconnected_support_surfaces_are_not_coalesced(self):
         def surface(surface_id: str, x: float) -> SupportSurface:
@@ -845,6 +891,131 @@ class TestManipulandTools(unittest.TestCase):
             call_kwargs["rotation_yaw_std_degrees"],
             self.cfg.placement_noise.natural_profile.rotation_yaw_std_degrees,
         )
+
+    def test_first_placement_of_tall_object_respects_open_above(self):
+        asset_id = UniqueID("television_asset")
+        asset = Mock(
+            object_id=asset_id,
+            name="television",
+            description="Tall television",
+            geometry_path=Path("/tmp/television.obj"),
+            sdf_path=Path("/tmp/television.sdf"),
+            image_path=None,
+            metadata={},
+            bbox_min=np.array([-0.2, -0.05, 0.0]),
+            bbox_max=np.array([0.2, 0.05, 1.0]),
+            scale_factor=1.0,
+        )
+        self.mock_asset_manager.get_asset_by_id.return_value = asset
+        self.mock_scene.generate_unique_id.return_value = UniqueID("television_0")
+        self.mock_surface.from_world_pose = Mock(
+            return_value=(np.array([0.0, 0.0]), 0.0)
+        )
+
+        with (
+            patch.object(ManipulandTools, "_is_top_surface", return_value=True),
+            patch.object(
+                ManipulandTools,
+                "_validate_convex_hull_footprint",
+                return_value=(True, None),
+            ),
+            patch(
+                "scenesmith.manipuland_agents.tools.manipuland_tools."
+                "apply_placement_noise",
+                side_effect=lambda transform, **_kwargs: transform,
+            ),
+        ):
+            self.mock_surface.open_above = True
+            opened = json.loads(
+                self.manipuland_tools._place_manipuland_on_surface_impl(
+                    asset_id=str(asset_id),
+                    surface_id=str(self.mock_surface.surface_id),
+                    position_x=0.0,
+                    position_z=0.0,
+                )
+            )
+            self.mock_surface.open_above = False
+            bounded = json.loads(
+                self.manipuland_tools._place_manipuland_on_surface_impl(
+                    asset_id=str(asset_id),
+                    surface_id=str(self.mock_surface.surface_id),
+                    position_x=0.0,
+                    position_z=0.0,
+                )
+            )
+
+        self.assertTrue(opened["success"])
+        self.assertEqual(opened["parent_surface_id"], "test_surface_001")
+        self.assertFalse(bounded["success"])
+        self.assertIn("exceeds surface clearance", bounded["message"])
+
+    def test_move_of_tall_object_respects_open_above(self):
+        object_id = UniqueID("television_0")
+        scene_obj = Mock()
+        scene_obj.object_id = object_id
+        scene_obj.name = "television"
+        scene_obj.geometry_path = Path("/tmp/television.obj")
+        scene_obj.metadata = {}
+        scene_obj.scale_factor = 1.0
+        scene_obj.bbox_min = np.array([-0.2, -0.05, 0.0])
+        scene_obj.bbox_max = np.array([0.2, 0.05, 1.0])
+        scene_obj.transform = RigidTransform()
+        scene_obj.placement_info = Mock(
+            parent_surface_id=self.mock_surface.surface_id,
+            position_2d=np.array([0.0, 0.0]),
+            rotation_2d=0.0,
+        )
+        self.mock_scene.get_object.return_value = scene_obj
+        self.mock_surface.from_world_pose = Mock(
+            return_value=(np.array([0.2, 0.0]), 0.0)
+        )
+
+        with (
+            patch.object(ManipulandTools, "_is_top_surface", return_value=True),
+            patch.object(
+                ManipulandTools,
+                "_validate_convex_hull_footprint",
+                return_value=(True, None),
+            ),
+            patch(
+                "scenesmith.manipuland_agents.tools.manipuland_tools."
+                "apply_placement_noise",
+                side_effect=lambda transform, **_kwargs: transform,
+            ),
+            patch(
+                "scenesmith.manipuland_agents.tools.manipuland_tools."
+                "violates_hard_one_per_support_reparenting",
+                return_value=False,
+            ),
+            patch(
+                "scenesmith.manipuland_agents.tools.manipuland_tools."
+                "exact_surface_covers_object",
+                return_value=True,
+            ),
+        ):
+            self.mock_surface.open_above = True
+            opened = json.loads(
+                self.manipuland_tools._move_manipuland_impl(
+                    object_id=str(object_id),
+                    surface_id=str(self.mock_surface.surface_id),
+                    position_x=0.2,
+                    position_z=0.0,
+                )
+            )
+            self.mock_surface.open_above = False
+            bounded = json.loads(
+                self.manipuland_tools._move_manipuland_impl(
+                    object_id=str(object_id),
+                    surface_id=str(self.mock_surface.surface_id),
+                    position_x=0.3,
+                    position_z=0.0,
+                )
+            )
+
+        self.assertTrue(opened["success"])
+        self.mock_scene.move_object.assert_called_once()
+        self.assertFalse(bounded["success"])
+        self.assertIn("exceeds surface clearance", bounded["message"])
 
     def test_validate_convex_hull_strict_containment(self):
         """Test convex hull validation with strict containment (0% overlap)."""

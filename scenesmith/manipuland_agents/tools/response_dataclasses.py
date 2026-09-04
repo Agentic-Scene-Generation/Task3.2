@@ -83,6 +83,8 @@ class SupportSurfaceInfo(JSONSerializable):
     """Surface center Z position in world frame (meters)."""
     clearance_height: float
     """Vertical clearance above surface in meters (maximum object height)."""
+    open_above: bool = False
+    """Whether no finite vertical obstacle bounds the space above."""
 
 
 @dataclass
@@ -109,6 +111,8 @@ class SupportSurfaceWithManipulands(JSONSerializable):
     """Vertical clearance above surface in meters (maximum object height)."""
     manipulands: list["SimplifiedManipulandInfo"]
     """Manipulands placed on this surface with surface-relative positions."""
+    open_above: bool = False
+    """Whether no finite vertical obstacle bounds the space above."""
 
 
 @dataclass
