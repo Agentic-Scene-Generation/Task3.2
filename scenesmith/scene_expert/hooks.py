@@ -52,11 +52,15 @@ from scenesmith.scene_expert.harness import (
 from scenesmith.scene_expert.memory.activity import MemoryActivityLogger
 from scenesmith.scene_expert.memory.injection import build_memory_injection_bundle
 from scenesmith.scene_expert.memory.retriever import MemoryRetriever
+from scenesmith.scene_expert.memory.schemas import MemoryUtilityObservation
 from scenesmith.scene_expert.memory.selection_policy import (
     BudgetedMemoryRetriever,
     MemoryInjectionPolicy,
 )
-from scenesmith.scene_expert.memory.schemas import MemoryUtilityObservation
+from scenesmith.scene_expert.memory.state import (
+    build_memory_scene_state,
+    format_memory_scene_state,
+)
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.writer import MemoryWriter
 from scenesmith.scene_expert.relation_context import StageRelationProjector
@@ -1660,6 +1664,8 @@ class SceneExpertHookRunner:
             stage=stage,
             stage_brief=self._current_stage_brief,
             memory_pack=self._current_memory_pack,
+            task_spec=self._task_spec,
+            relation_context=self._current_relation_context,
         )
         self._current_stage_brief = self._current_injection_bundle.enriched_stage_brief
         enhanced = self._prompt
@@ -1858,6 +1864,7 @@ class SceneExpertHookRunner:
             intent_contract=self._intent_contract,
             scene=scene,
         )
+        current_memory_state = build_memory_scene_state(scene)
 
         # --- Step 1: Memory retrieval (skip in harness_only mode) ---
         if self._retriever is not None and self._component_enabled(
@@ -1869,6 +1876,7 @@ class SceneExpertHookRunner:
                     self._task_spec,
                     stage,
                     relation_context=self._current_relation_context,
+                    scene_state=current_memory_state,
                 )
                 retrieval_elapsed = time.time() - retrieval_start
                 n_hints = len(self._current_memory_pack.success_hints) + len(
@@ -1906,7 +1914,7 @@ class SceneExpertHookRunner:
         if self._component_enabled("global_planner"):
             try:
                 planner_start = time.time()
-                scene_state_summary = self._build_scene_state_summary()
+                scene_state_summary = self._build_scene_state_summary(scene)
                 context = self._harness.build_context(
                     stage=stage,
                     task_spec=self._task_spec,
@@ -1947,18 +1955,28 @@ class SceneExpertHookRunner:
             stage=stage,
             stage_brief=self._current_stage_brief,
             memory_pack=self._current_memory_pack,
+            task_spec=self._task_spec,
+            relation_context=self._current_relation_context,
         )
         self._current_stage_brief = self._current_injection_bundle.enriched_stage_brief
-        injection_text = self._current_injection_bundle.final_text
+        # Only task-derived guidance stays in the scene description. Cross-task
+        # advice is delivered at native Designer request boundaries by the
+        # existing context-bundle hook, including design-change calls.
+        injection_text = self._current_injection_bundle.brief_text
+        setattr(
+            scene,
+            "scene_expert_memory_delivery_enabled",
+            self._component_enabled("prompt_injection"),
+        )
+        setattr(
+            scene,
+            "scene_expert_accepted_memory_bundle",
+            self._current_injection_bundle.model_dump(mode="json"),
+        )
+        setattr(scene, "scene_expert_memory_directives", "")
         if self._component_enabled("prompt_injection") and injection_text:
             scene.text_description += "\n\n" + injection_text
             setattr(scene, "scene_expert_brief", injection_text)
-            if self._current_injection_bundle.memory_text:
-                setattr(
-                    scene,
-                    "scene_expert_memory_directives",
-                    self._current_injection_bundle.memory_text,
-                )
             briefs = getattr(scene, "scene_expert_briefs", {})
             if not isinstance(briefs, dict):
                 briefs = {}
@@ -2834,8 +2852,15 @@ class SceneExpertHookRunner:
                 return
             raise
 
-    def _build_scene_state_summary(self) -> str:
-        """Build a text summary of completed stages for the GlobalPlanner."""
+    def _build_scene_state_summary(self, scene: RoomScene | None = None) -> str:
+        """Describe actual bounded scene observations, not only FSM progress."""
+        if scene is not None:
+            return (
+                "Completed stages: "
+                + ", ".join(self._completed_stages)
+                + "\n"
+                + format_memory_scene_state(build_memory_scene_state(scene))
+            )
         if not self._completed_stages:
             return "Empty scene — no objects placed yet."
         return "Completed stages: " + ", ".join(self._completed_stages)
@@ -3396,6 +3421,13 @@ def build_hook_runner(
         api_base_url=api_base,
         api_key=api_key,
         llm_client=structured_llm_client,
+        max_tokens=_cfg_int(
+            (
+                (structured_llm_cfg.get("roles", {}) or {}).get("global_planner", {})
+                or {}
+            ).get("max_tokens"),
+            2048,
+        ),
     )
     floor_plan_reservation_cfg = _deep_merge_dicts(
         root_se_cfg.get("floor_plan_reservations", {}),

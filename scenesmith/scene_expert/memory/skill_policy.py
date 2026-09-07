@@ -77,6 +77,9 @@ def _relation(value: Any) -> str:
 
 def _object_role(value: Any) -> str:
     normalized = _normalize(value)
+    # Runtime object names often carry an instance suffix (office_chair_1).
+    # Strip only terminal numeric IDs; retain semantic role modifiers.
+    normalized = re.sub(r"(?:_\d+)+$", "", normalized)
     # TaskCompiler inventory is free text and often plural, whereas intent
     # selectors are singular.  Keep the normalization local so the lightweight
     # memory retriever does not import Drake-backed critic packages.
@@ -129,13 +132,19 @@ def _contract_facts(
     relation_context: StageRelationContext | None,
 ) -> tuple[list[dict[str, Any]], set[str], set[str]]:
     constraints = list(relation_context.hard_constraints) if relation_context else []
-    relations = {_relation(item.get("relation")) for item in constraints}
+    constraints = [
+        row for row in constraints if str(row.get("strength") or "hard") == "hard"
+    ]
+    relations = {
+        _relation(item.get("relation") or item.get("relation_type"))
+        for item in constraints
+    }
     objects = {
         category
         for item in constraints
         for category in (
-            _selector_category(item.get("subjects")),
-            _selector_category(item.get("targets")),
+            _selector_category(item.get("subjects") or item.get("subject")),
+            _selector_category(item.get("targets") or item.get("target")),
         )
         if category
     }
@@ -147,8 +156,12 @@ def _endpoints_match(
     skill_target: str,
     constraint: dict[str, Any],
 ) -> bool:
-    constraint_subject = _selector_category(constraint.get("subjects"))
-    constraint_target = _selector_category(constraint.get("targets"))
+    constraint_subject = _selector_category(
+        constraint.get("subjects") or constraint.get("subject")
+    )
+    constraint_target = _selector_category(
+        constraint.get("targets") or constraint.get("target")
+    )
     if skill_subject and not _category_compatible(skill_subject, constraint_subject):
         return False
     if skill_target and not _category_compatible(skill_target, constraint_target):
@@ -162,9 +175,15 @@ def _cardinality_conflicts(
 ) -> bool:
     if not skill_cardinality:
         return False
-    subjects = constraint.get("subjects") or {}
-    targets = constraint.get("targets") or {}
+    subjects = constraint.get("subjects") or constraint.get("subject") or {}
+    targets = constraint.get("targets") or constraint.get("target") or {}
+    subjects = subjects if isinstance(subjects, dict) else {}
+    targets = targets if isinstance(targets, dict) else {}
     comparisons = {
+        "count": constraint.get("count"),
+        "min_count": constraint.get("min_count"),
+        "max_count": constraint.get("max_count"),
+        "quantifier": constraint.get("quantifier"),
         "subject_count": subjects.get("count"),
         "target_count": targets.get("count"),
         "orientation": constraint.get("orientation"),
@@ -195,7 +214,9 @@ def _hard_contract_conflicts(
                 spatial.subject_role, spatial.target_role, constraint
             ):
                 continue
-            contract_relation = _relation(constraint.get("relation"))
+            contract_relation = _relation(
+                constraint.get("relation") or constraint.get("relation_type")
+            )
             relation_pair = frozenset({skill_relation, contract_relation})
             conflicts = relation_pair in _CONFLICTING_RELATIONS
             cardinality_conflict = (
@@ -233,6 +254,7 @@ def evaluate_skill_for_task(
     task_spec: SceneTaskSpec,
     stage: str,
     relation_context: StageRelationContext | None = None,
+    available_objects: list[str] | None = None,
 ) -> SkillPolicyResult:
     """Reject a skill before ranking when its explicit contract is unsafe."""
     reasons: list[str] = []
@@ -240,7 +262,11 @@ def evaluate_skill_for_task(
     constraints, contract_relations, contract_objects = _contract_facts(
         relation_context
     )
-    task_objects = {*_task_objects(task_spec, stage), *contract_objects}
+    task_objects = {
+        *_task_objects(task_spec, stage),
+        *contract_objects,
+        *[_object_role(x) for x in (available_objects or [])],
+    }
     declared_rooms = [
         *skill.room_types,
         *skill.applicability.room_types,

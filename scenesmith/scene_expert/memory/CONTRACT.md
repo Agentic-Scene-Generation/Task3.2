@@ -23,8 +23,8 @@ and optional placement text are derived from the same persisted record.
   keys that collide across success, failure, and skill records.
 
 This is the retrieval/admission contract, not evidence that a Designer actually
-used an instruction. Planner acceptance and decision-time delivery are separate
-follow-up work.
+used an instruction. Planner acceptance and decision-time delivery are described
+in [CONTEXT.md](CONTEXT.md).
 
 ## Spatial evidence is local to a constraint
 
@@ -70,13 +70,13 @@ policy; unverifiable relations are not silently upgraded. Explicit updates are
 separate from accumulating observations: incompatible spatial claims are not
 merged merely because their record IDs match.
 
-Derived vector indexes use `memory-text.v2`. Index building always renders the
+Derived vector indexes use `memory-text.v3`. Index building always renders the
 current canonical record instead of trusting stale stored `embedding_text`.
 Old-format indexes are stale and rebuild when `auto_build_missing=true` (the
 current ACP launcher enables this). The first use can incur embedding cost.
 
 For read-only/frozen banks, an index path inside the bank is redirected to an
-external temporary cache under `scenesmith-memory-index/<path-hash>/memory-text.v2`.
+external temporary cache under `scenesmith-memory-index/<path-hash>/memory-text.v3`.
 Record files, manifest, revision, and source evidence are not rewritten. An
 explicit external index directory is also supported. If automatic rebuilding
 is disabled, rebuild using the same embedding model as runtime:

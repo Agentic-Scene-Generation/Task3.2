@@ -25,6 +25,7 @@ from scenesmith.agent_utils.thinking import (
     thinking_directive_from_effort,
 )
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
+from scenesmith.scene_expert.memory.adaptation import effective_relation_grade
 from scenesmith.scene_expert.schemas import (
     HarnessContext,
     MemoryPack,
@@ -73,6 +74,19 @@ You MUST output valid JSON matching this exact schema:
     }
   ],
   "stage_objective": "string — one clear sentence describing the goal for this stage",
+  "memory_adaptations": [
+    {
+      "memory_type": "success, failure, or skill",
+      "memory_id": "exact candidate memory_id",
+      "source_content_hash": "exact candidate content_hash",
+      "decision": "accepted, adapted, or rejected",
+      "reason": "why applicable to this current design problem or why rejected",
+      "bindings": [{"source_role": "source object role", "current_role": "current task or observed role", "object_ids": []}],
+      "preconditions": ["conditions that must hold in this scene"],
+      "actions": ["complete current-task design or repair procedure; preserve safety conditions"],
+      "checks": ["how the designer checks the action against the current intent"]
+    }
+  ],
   "recommended_skills": ["list of skill names from memory to apply, can be empty"],
   "constraints_for_designer": [
     "list of concrete placement/arrangement rules for the designer",
@@ -88,7 +102,18 @@ You MUST output valid JSON matching this exact schema:
 
 Guidelines:
 - Be specific and actionable. Vague guidance is useless for small models.
-- Derive constraints from: the task spec, the current scene state, AND the retrieved memory.
+- Keep ordinary StageBrief fields derived ONLY from the task and current scene.
+  All memory-derived advice belongs ONLY in memory_adaptations. Never copy a
+  rejected candidate into constraints, objective, optional proposals, checks,
+  failure_patterns_to_avoid, or recommended_skills. Omitted choices abstain.
+- Decide for every typed candidate. Accept only useful, applicable experience;
+  adapt actions to current roles/anchors/supports. Unknown evidence is not a
+  verified solution. Bind existing objects by exact current ID; leave IDs empty
+  for a role still to be created. Do not invent objects, coordinates, axes or
+  measured clearance. Preserve full skill preconditions/procedure/checks.
+- An observed optional object is context, NOT a required asset. For template
+  counts/groups use the exact current hard intent, never the source quantities.
+  A suggestion cannot alter critic scoring, skip a stage, or suppress autonomy.
 - The Authoritative Stage Intent section contains the exact hard contract rows
   for this stage. Cover every constraint_id and never rewrite, weaken, or
   replace one with a convention.
@@ -689,19 +714,37 @@ def _add_floor_plan_reservation_guidance(
 
 
 def _format_memory_for_prompt(memory_pack: MemoryPack) -> str:
-    """Format memory pack into a compact text block."""
-    parts: list[str] = []
-    if memory_pack.success_hints:
-        parts.append("Success patterns from similar scenes:")
-        parts.extend(f"  {i+1}. {h}" for i, h in enumerate(memory_pack.success_hints))
-    if memory_pack.failure_hints:
-        parts.append("Known failure patterns to avoid:")
-        parts.extend(f"  {i+1}. {h}" for i, h in enumerate(memory_pack.failure_hints))
-    if memory_pack.skill_texts:
-        parts.append("Applicable skills:")
-        for skill_text in memory_pack.skill_texts:
-            parts.append(skill_text)
-    return "\n".join(parts) if parts else "No relevant memory retrieved for this stage."
+    """Expose complete, identity-bound candidates to the existing Planner call."""
+    rows = memory_pack.deduplicated().selections
+    if not rows:
+        return "No identity-bound memory candidates. Return memory_adaptations=[]."
+    return json.dumps(
+        [
+            {
+                "memory_type": row.memory_type,
+                "memory_id": row.memory_id,
+                "content_hash": row.content_hash,
+                "advice": row.injected_text,
+                "verified_spatial_reference": row.placement_text,
+                "spatial_relations": [
+                    {
+                        **{
+                            key: value
+                            for key, value in relation.items()
+                            if key not in {"verification_evidence", "geometry_verified"}
+                        },
+                        "verification_status": effective_relation_grade(relation),
+                    }
+                    for relation in row.spatial_relations
+                ],
+                "applicability": row.applicability,
+                "evidence_warnings": row.evidence_warnings,
+            }
+            for row in rows
+        ],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
 
 
 def _stage_required_objects(task_spec: SceneTaskSpec, stage: str) -> list[str]:

@@ -102,4 +102,12 @@ def selection_from_record(
         content_hash=record_content_hash(record),
         payload_version=PAYLOAD_VERSION,
         evidence_warnings=warnings,
+        spatial_relations=[
+            item.model_dump(mode="json") for item in record.spatial_relations
+        ],
+        applicability=(
+            record.applicability.model_dump(mode="json")
+            if isinstance(record, Skill)
+            else {}
+        ),
     )

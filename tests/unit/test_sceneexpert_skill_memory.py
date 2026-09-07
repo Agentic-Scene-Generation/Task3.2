@@ -28,6 +28,7 @@ from scenesmith.scene_expert.schemas import (
     StageVerifyReport,
     VerifyIssue,
 )
+from tests.unit.memory_context_fixtures import accepting_brief
 
 
 def _meeting_task() -> SceneTaskSpec:
@@ -212,7 +213,8 @@ def test_complete_skill_is_injected_once_and_funnel_is_explicit() -> None:
     )
     bundle = build_memory_injection_bundle(
         stage="furniture",
-        stage_brief=StageBrief(
+        stage_brief=accepting_brief(
+            pack,
             stage="furniture",
             stage_objective="Build the meeting layout.",
             recommended_skills=[skill.skill_name],
@@ -256,7 +258,8 @@ def test_skill_funnel_labels_relevant_hard_failure_without_causal_claim() -> Non
     )
     bundle = build_memory_injection_bundle(
         stage="furniture",
-        stage_brief=StageBrief(
+        stage_brief=accepting_brief(
+            pack,
             stage="furniture",
             stage_objective="Build the meeting layout.",
             recommended_skills=[skill.skill_name],

@@ -23,6 +23,7 @@ from scenesmith.scene_expert.schemas import (
     StageExecutionEvidence,
     StageVerifyReport,
 )
+from tests.unit.memory_context_fixtures import accepting_brief
 
 
 def _task_spec() -> SceneTaskSpec:
@@ -224,7 +225,8 @@ def test_canonical_bundle_does_not_repeat_memory_directives() -> None:
     )
     bundle = build_memory_injection_bundle(
         stage="furniture",
-        stage_brief=StageBrief(
+        stage_brief=accepting_brief(
+            pack,
             stage="furniture",
             stage_objective="Create a usable classroom.",
         ),
@@ -233,8 +235,9 @@ def test_canonical_bundle_does_not_repeat_memory_directives() -> None:
 
     assert bundle.final_text.count(success) == 1
     assert bundle.final_text.count(failure) == 1
-    assert bundle.final_text.count(skill) == 1
-    assert bundle.final_text.count(pack.placement_reference) == 1
+    assert bundle.final_text.count("[Skill: align_student_seating]") == 1
+    assert bundle.final_text.count("Bind chairs to desks.") == 1
+    assert pack.placement_reference not in bundle.final_text
     assert bundle.selected_memory_ids == [
         "success_1",
         "failure_1",
@@ -269,7 +272,8 @@ def test_memory_activity_links_selection_injection_and_outcome() -> None:
         )
         bundle = build_memory_injection_bundle(
             stage="furniture",
-            stage_brief=StageBrief(
+            stage_brief=accepting_brief(
+                pack,
                 stage="furniture",
                 stage_objective="Create a usable classroom.",
             ),

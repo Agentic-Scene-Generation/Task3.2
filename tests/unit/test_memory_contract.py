@@ -37,6 +37,7 @@ from scenesmith.scene_expert.schemas import (
     SceneTaskSpec,
     StageBrief,
 )
+from tests.unit.memory_context_fixtures import accepting_brief
 
 
 def _constraint() -> dict:
@@ -271,7 +272,7 @@ def test_long_failure_keeps_action_check_and_preconditions(tmp_path: Path) -> No
     pack = _retrieve(store, MemoryPack(failure_case_ids=["f"]))
     bundle = build_memory_injection_bundle(
         stage="furniture",
-        stage_brief=StageBrief(stage="furniture", stage_objective="Design"),
+        stage_brief=accepting_brief(pack, stage="furniture", stage_objective="Design"),
         memory_pack=pack,
     )
     assert "ACTION_MARKER" in bundle.final_text and "CHECK_MARKER" in bundle.final_text

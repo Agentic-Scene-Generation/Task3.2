@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from scenesmith.scene_expert.memory.adaptation import source_conflicts
 from scenesmith.scene_expert.memory.contracts import selection_from_record
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
 from scenesmith.scene_expert.memory.scoring import (
@@ -14,6 +15,7 @@ from scenesmith.scene_expert.memory.scoring import (
     record_required_objects,
     task_required_objects,
 )
+from scenesmith.scene_expert.memory.state import observed_roles
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.schemas import (
     MemoryPack,
@@ -78,12 +80,18 @@ class BudgetedMemoryRetriever:
         task_spec: SceneTaskSpec,
         stage: str,
         relation_context: StageRelationContext | None = None,
+        scene_state: dict | None = None,
     ) -> MemoryPack:
         candidate_pack = self._delegate.retrieve(
             task_spec,
             stage,
             relation_context=relation_context,
+            **({"scene_state": scene_state} if scene_state is not None else {}),
         ).deduplicated()
+        if scene_state is not None:
+            candidate_pack = candidate_pack.model_copy(
+                update={"current_scene_state": scene_state}
+            )
         return self._apply(candidate_pack, task_spec, stage, relation_context)
 
     def _apply(
@@ -127,6 +135,7 @@ class BudgetedMemoryRetriever:
                     task_spec=task_spec,
                     stage=stage,
                     relation_context=relation_context,
+                    available_objects=observed_roles(pack.current_scene_state),
                 )
                 if (memory_type, memory_id) in records and record is None:
                     reasons = ["ambiguous_record_identity"]
@@ -145,6 +154,7 @@ class BudgetedMemoryRetriever:
                             row.score_components if row is not None else {}
                         ),
                     )
+                    reasons.extend(source_conflicts(canonical, relation_context))
                     if (
                         row is not None
                         and row.content_hash
@@ -259,6 +269,7 @@ class BudgetedMemoryRetriever:
         task_spec: SceneTaskSpec,
         stage: str,
         relation_context: StageRelationContext | None,
+        available_objects: list[str] | None = None,
     ) -> list[str]:
         if record is None:
             return ["missing_record"]
@@ -279,7 +290,9 @@ class BudgetedMemoryRetriever:
             and not (record_required_objects(record) or record.spatial_relations)
         ):
             return reasons
-        task_objects = task_required_objects(task_spec, stage)
+        task_objects = task_required_objects(task_spec, stage) + (
+            available_objects or []
+        )
         object_match = bool(record_required_objects(record)) and (
             object_overlap(record_required_objects(record), task_objects)
             >= self.policy.object_overlap_threshold

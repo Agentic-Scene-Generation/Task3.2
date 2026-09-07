@@ -26,6 +26,7 @@ from scenesmith.scene_expert.memory.scoring import (
     task_required_objects,
 )
 from scenesmith.scene_expert.memory.skill_policy import evaluate_skill_for_task
+from scenesmith.scene_expert.memory.state import observed_roles
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.text_builder import (
     EMBEDDING_TEXT_VERSION,
@@ -107,11 +108,21 @@ class HybridMemoryRetriever:
         task_spec: SceneTaskSpec,
         stage: str,
         relation_context: StageRelationContext | None = None,
+        scene_state: dict | None = None,
     ) -> MemoryPack:
         total_start = time.perf_counter()
         if self._store.refresh_if_changed():
             self._index_cache.clear()
         query_text = build_query_text(task_spec, stage)
+        available_objects = observed_roles(scene_state)
+        if available_objects:
+            query_text += "\nObserved (not required) objects: " + ", ".join(
+                available_objects
+            )
+        if relation_context is not None:
+            query_text += "\nCurrent task relations: " + json.dumps(
+                relation_context.hard_constraints, ensure_ascii=False, sort_keys=True
+            )
         if not self._has_active_stage_records(stage):
             total_sec = time.perf_counter() - total_start
             self._record_timing(
@@ -145,6 +156,7 @@ class HybridMemoryRetriever:
             bank_timings=bank_timings,
             relation_context=relation_context,
             skill_decisions=skill_decisions,
+            available_objects=available_objects,
         )
         failure = self._retrieve_bank(
             "failure",
@@ -155,6 +167,7 @@ class HybridMemoryRetriever:
             bank_timings=bank_timings,
             relation_context=relation_context,
             skill_decisions=skill_decisions,
+            available_objects=available_objects,
         )
         skills = self._retrieve_bank(
             "skill",
@@ -165,6 +178,7 @@ class HybridMemoryRetriever:
             bank_timings=bank_timings,
             relation_context=relation_context,
             skill_decisions=skill_decisions,
+            available_objects=available_objects,
         )
 
         selected_skill_names = {
@@ -251,6 +265,7 @@ class HybridMemoryRetriever:
             memory_bank_revision=self._store.revision,
             selections=selections,
             skill_filter_decisions=list(skill_decisions.values()),
+            current_scene_state=scene_state or {},
         ).deduplicated()
 
     def _build_selections(
@@ -338,6 +353,7 @@ class HybridMemoryRetriever:
         bank_timings: list[dict[str, Any]],
         relation_context: StageRelationContext | None,
         skill_decisions: dict[str, SkillSelectionDecision],
+        available_objects: list[str] | None = None,
     ) -> list[tuple[float, MemoryRecord]]:
         bank_timing: dict[str, Any] = {
             "memory_type": memory_type,
@@ -393,6 +409,7 @@ class HybridMemoryRetriever:
                 memory_type,
                 relation_context=relation_context,
                 skill_decisions=skill_decisions,
+                available_objects=available_objects,
             ):
                 bank_timing["structured_filtered_count"] += 1
                 continue
@@ -403,6 +420,7 @@ class HybridMemoryRetriever:
                 stage=stage,
                 memory_type=memory_type,
                 weights=self._weights,
+                available_objects=available_objects,
             )
             scored.append((score, record))
 
@@ -432,6 +450,7 @@ class HybridMemoryRetriever:
         *,
         relation_context: StageRelationContext | None,
         skill_decisions: dict[str, SkillSelectionDecision],
+        available_objects: list[str] | None = None,
     ) -> bool:
         if record.stage != stage:
             return False
@@ -442,13 +461,16 @@ class HybridMemoryRetriever:
                 task_spec,
                 stage,
                 relation_context=relation_context,
+                available_objects=available_objects,
             )
             skill_decisions[record.skill_name] = policy.decision
             if not policy.eligible:
                 return False
 
         if memory_type == "failure" and isinstance(record, FailureCase):
-            task_objects = task_required_objects(task_spec, stage)
+            task_objects = task_required_objects(task_spec, stage) + (
+                available_objects or []
+            )
             if record.object and (
                 object_overlap([record.object], task_objects)
                 < self._object_overlap_threshold
@@ -471,7 +493,10 @@ class HybridMemoryRetriever:
             if not record_objects:
                 return True
             return (
-                object_overlap(record_objects, task_required_objects(task_spec, stage))
+                object_overlap(
+                    record_objects,
+                    task_required_objects(task_spec, stage) + (available_objects or []),
+                )
                 >= self._object_overlap_threshold
             )
 
@@ -481,7 +506,9 @@ class HybridMemoryRetriever:
         record_objects = record_required_objects(record)
         if not record_objects:
             return True
-        task_objects = task_required_objects(task_spec, stage)
+        task_objects = task_required_objects(task_spec, stage) + (
+            available_objects or []
+        )
         if not task_objects:
             # Object-bearing success memory cannot invent furniture for a task
             # that has no explicit object requirement in this stage.

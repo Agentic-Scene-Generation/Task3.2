@@ -12,7 +12,7 @@ from collections.abc import Mapping, Sequence
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
 
 MemoryRecord = SuccessCase | FailureCase | Skill
-EMBEDDING_TEXT_VERSION = "memory-text.v2"
+EMBEDDING_TEXT_VERSION = "memory-text.v3"
 
 
 def _clean(value: object) -> str:
@@ -59,10 +59,9 @@ def _append_spatial_relations(lines: list[str], record: MemoryRecord) -> None:
 
 
 def _append_provenance(lines: list[str], record: MemoryRecord) -> None:
-    provenance = record.provenance
-    _append_line(lines, "source_task_id", provenance.task_id or record.source_task_id)
-    _append_line(lines, "source_run_id", provenance.run_id or record.source_run_id)
-    _append_line(lines, "critic_source", provenance.critic_source)
+    # IDs/run labels are retained in atomic selections and persisted records,
+    # not semantic retrieval features. Only the evidence kind is useful here.
+    _append_line(lines, "critic_source", record.provenance.critic_source)
 
 
 def _build_success_text(record: SuccessCase) -> str:

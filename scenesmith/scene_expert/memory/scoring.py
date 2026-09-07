@@ -159,8 +159,9 @@ def hybrid_score(
     stage: str,
     memory_type: str,
     weights: HybridScoreWeights = HybridScoreWeights(),
+    available_objects: list[str] | None = None,
 ) -> float:
-    task_objects = task_required_objects(task_spec, stage)
+    task_objects = task_required_objects(task_spec, stage) + (available_objects or [])
     obj_score = object_overlap(record_required_objects(record), task_objects)
     stage_room_score = room_stage_match(record, task_spec, stage)
     quality = compute_memory_quality(record, memory_type)

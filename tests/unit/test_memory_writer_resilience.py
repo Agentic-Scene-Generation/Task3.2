@@ -6,14 +6,14 @@ from tempfile import TemporaryDirectory
 
 from pydantic import ValidationError
 
+from scenesmith.scene_expert.memory.injection import build_memory_injection_bundle
+from scenesmith.scene_expert.memory.retriever import MemoryRetriever
 from scenesmith.scene_expert.memory.schemas import (
     FailureMemoryCandidate,
     MemoryWriterResponse,
     SkillMemoryCandidate,
     SuccessMemoryCandidate,
 )
-from scenesmith.scene_expert.memory.injection import build_memory_injection_bundle
-from scenesmith.scene_expert.memory.retriever import MemoryRetriever
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.writer import MemoryWriter
 from scenesmith.scene_expert.schemas import (
@@ -24,6 +24,7 @@ from scenesmith.scene_expert.schemas import (
 )
 from scenesmith.scene_expert.structured_llm import StructuredLLMResult
 from scenesmith.scene_expert.trace_logger import TraceLogger
+from tests.unit.memory_context_fixtures import accepting_brief
 
 
 def _full_report(*, passed: bool = True) -> FullVerifyReport:
@@ -429,14 +430,10 @@ class MemoryWriterResilienceTest(unittest.TestCase):
         )
 
         self.assertEqual(2, len(ops))
-        self.assertTrue(
-            all(op.content["source"] == "deterministic" for op in ops)
-        )
+        self.assertTrue(all(op.content["source"] == "deterministic" for op in ops))
         self.assertTrue(all(op.content["status"] == "candidate" for op in ops))
         self.assertEqual("persisted_candidate", writer.last_trace["write_status"])
-        self.assertEqual(
-            "deterministic_skill_bootstrap", writer.last_trace["source"]
-        )
+        self.assertEqual("deterministic_skill_bootstrap", writer.last_trace["source"])
         self.assertTrue(writer.last_trace["degraded"])
         self.assertFalse(writer.last_trace["fallback_written"])
 
@@ -458,9 +455,7 @@ class MemoryWriterResilienceTest(unittest.TestCase):
                 }
             writer = MemoryWriter(
                 model="qwen",
-                llm_client=_FakeStructuredClient(
-                    StructuredLLMResult(value=response)
-                ),
+                llm_client=_FakeStructuredClient(StructuredLLMResult(value=response)),
             )
 
             ops = writer.write(
@@ -505,8 +500,7 @@ class MemoryWriterResilienceTest(unittest.TestCase):
             )
             self.assertTrue(
                 all(
-                    skill.activation_reason
-                    == "independent_stage_support_threshold_met"
+                    skill.activation_reason == "independent_stage_support_threshold_met"
                     for skill in store.skills
                 )
             )
@@ -518,9 +512,7 @@ class MemoryWriterResilienceTest(unittest.TestCase):
 
             task_spec = SceneTaskSpec.model_validate(_evidence()["task_spec"])
             relation_context = StageRelationContext.model_validate(
-                _evidence(relation_subject_count=6)["stages"][0][
-                    "relation_context"
-                ]
+                _evidence(relation_subject_count=6)["stages"][0]["relation_context"]
             )
             pack = MemoryRetriever(store, max_skills=2).retrieve(
                 task_spec,
@@ -530,12 +522,15 @@ class MemoryWriterResilienceTest(unittest.TestCase):
             self.assertIn(skill.skill_name, pack.skill_names)
             bundle = build_memory_injection_bundle(
                 stage="furniture",
-                stage_brief=StageBrief(
+                stage_brief=accepting_brief(
+                    pack,
                     stage="furniture",
                     stage_objective="Build a grounded bedroom layout.",
                     recommended_skills=pack.skill_names,
                 ),
                 memory_pack=pack,
+                task_spec=task_spec,
+                relation_context=relation_context,
             )
 
         self.assertIn(skill.skill_name, bundle.prompt_delivered_skill_names)

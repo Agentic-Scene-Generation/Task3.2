@@ -18,9 +18,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from scenesmith.agent_utils.furniture_layout_planning import (
-    build_opening_aware_reservation_plan,
-)
+from scenesmith.scene_expert.memory.delivery import prepare_memory_delivery
 from scenesmith.scene_expert.schemas import (
     MemoryPack,
     SceneTaskSpec,
@@ -140,6 +138,7 @@ class StageContextBundle(BaseModel):
     last_hard_issues: list[str] = Field(default_factory=list)
     prompt_profile: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    memory_delivery: dict[str, Any] = Field(default_factory=dict)
 
     def to_llm_text(self, max_chars: int = 3200) -> str:
         """Return a concise human-readable context block for agent prompts."""
@@ -190,7 +189,12 @@ class StageContextBundle(BaseModel):
             )
         lines.append("=== End StageContextBundle ===")
         text = "\n".join(lines)
-        return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
+        text = text if len(text) <= max_chars else text[: max_chars - 3] + "..."
+        # Cross-task advice has its own whole-record budget. Never cut an action
+        # or precondition with the native compact-state character limit.
+        if self.agent_role == "designer" and self.memory_delivery.get("text"):
+            text += "\n\n" + str(self.memory_delivery["text"])
+        return text
 
     def save(self, path: Path) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -271,6 +275,10 @@ def build_scene_summary(scene: Any | None) -> str:
             parts.append(f"room_size={float(length):.2f}m x {float(width):.2f}m")
         openings = getattr(room_geometry, "openings", []) or []
         if openings:
+            from scenesmith.agent_utils.furniture_layout_planning import (
+                build_opening_aware_reservation_plan,
+            )
+
             opening_bits = []
             for idx, opening in enumerate(openings[:12]):
                 wall = getattr(opening, "wall_direction", None)
@@ -326,6 +334,10 @@ def build_stage_context_bundle(
                 continue
 
     if forbidden_zones is None and scene is not None:
+        from scenesmith.agent_utils.furniture_layout_planning import (
+            build_opening_aware_reservation_plan,
+        )
+
         reservation_plan = build_opening_aware_reservation_plan(scene)
         forbidden_zones = [
             ForbiddenZone(
@@ -364,6 +376,14 @@ def build_stage_context_bundle(
             "skill_names": memory_pack.skill_names,
         }
     prompt_text = _stringify_prompt(prompt)
+    memory_delivery = prepare_memory_delivery(
+        scene=scene,
+        stage=stage,
+        agent_role=agent_role,
+        event=event,
+        prompt=prompt_text,
+        last_hard_issues=last_hard_issues,
+    )
     return StageContextBundle(
         stage=stage,
         agent_role=agent_role,
@@ -389,6 +409,7 @@ def build_stage_context_bundle(
             "prompt_excerpt": compact_text(prompt_text, 1200),
         },
         metadata=metadata or {},
+        memory_delivery=memory_delivery,
     )
 
 
