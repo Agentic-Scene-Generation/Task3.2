@@ -20,6 +20,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from scenesmith.scene_expert.memory.evidence import (
+    resolve_constraint_evidence,
+    writer_prompt_evidence,
+)
 from scenesmith.scene_expert.memory.schemas import (
     FailureCase,
     FailureMemoryCandidate,
@@ -281,9 +285,7 @@ class MemoryWriter:
             full_report=full_report,
             evidence_payload=evidence,
         )
-        candidate_ops = self._dedupe_candidate_ops(
-            [*llm_candidate_ops, *bootstrap_ops]
-        )
+        candidate_ops = self._dedupe_candidate_ops([*llm_candidate_ops, *bootstrap_ops])
         promoted_ops = self._gate_and_enrich_ops(
             candidate_ops,
             full_report,
@@ -381,9 +383,7 @@ class MemoryWriter:
                 {
                     "structured_call_source": structured_call_source,
                     "source": (
-                        "deterministic_skill_bootstrap"
-                        if mutating_ops
-                        else "no_write"
+                        "deterministic_skill_bootstrap" if mutating_ops else "no_write"
                     ),
                     "degraded": True,
                 }
@@ -627,17 +627,26 @@ class MemoryWriter:
                             key: value
                             for key, value in relation.cardinality.items()
                             if key in {"orientation", "edge_frame"}
-                        }
+                        },
+                        "template_parameters": sorted(
+                            key
+                            for key in relation.cardinality
+                            if key not in {"orientation", "edge_frame"}
+                        ),
                     }
+                )
+                for relation in spatial_relations
+            ]
+            spatial_relations = [
+                relation.model_copy(
+                    update={"claim_hash": relation.current_claim_hash()}
                 )
                 for relation in spatial_relations
             ]
         relation_types = (
             self._clean_list(relation_types_override)
             if relation_types_override is not None
-            else self._unique(
-                relation.relation_type for relation in spatial_relations
-            )
+            else self._unique(relation.relation_type for relation in spatial_relations)
         )
         now = self._now()
         record = Skill(
@@ -828,9 +837,7 @@ class MemoryWriter:
                 )
                 deterministic_bootstrap = bool(
                     record.source == "deterministic"
-                    and record.activation_reason.startswith(
-                        "verified_stage_bootstrap"
-                    )
+                    and record.activation_reason.startswith("verified_stage_bootstrap")
                 )
                 procedure_valid = len(self._clean_list(record.procedure)) >= 2
                 active_eligible = bool(
@@ -1059,8 +1066,6 @@ class MemoryWriter:
     ) -> list[SpatialRelationMemory]:
         """Extract only relations already grounded in the intent/critic trace."""
         context = dict(stage_evidence.get("relation_context") or {})
-        report = self._stage_report(stage_evidence)
-        verified = bool(report.get("pass_stage"))
         output: list[SpatialRelationMemory] = []
         for constraint in context.get("hard_constraints", []) or []:
             if not isinstance(constraint, dict):
@@ -1126,19 +1131,30 @@ class MemoryWriter:
                     value = selector.get(key)
                     if value is not None:
                         cardinality[f"{prefix}_{key}"] = value
+            status, observations = resolve_constraint_evidence(
+                constraint, stage_evidence
+            )
+            verified = status == "verified_pass"
             output.append(
                 SpatialRelationMemory(
                     relation_type=relation_type,
                     subject_role=self._selector_label(subject),
                     target_role=self._selector_label(target),
                     cardinality=cardinality,
-                    evidence_source=("critic" if report else "task_contract"),
+                    evidence_source=(
+                        "deterministic" if observations else "task_contract"
+                    ),
                     evidence_ref=constraint_id,
                     geometry_verified=verified,
-                    confidence=0.85 if verified else 0.6,
+                    confidence=0.85 if verified else 0.5,
+                    verification_status=status,
+                    verification_evidence=observations,
                 )
             )
-        return output
+        return [
+            relation.model_copy(update={"claim_hash": relation.current_claim_hash()})
+            for relation in output
+        ]
 
     def _relation_types(self, stage_evidence: dict[str, Any]) -> list[str]:
         return self._unique(
@@ -1343,7 +1359,7 @@ class MemoryWriter:
     ) -> str:
         payload = {
             "trace_summary": trace_summary,
-            "evidence": evidence_payload,
+            "evidence": writer_prompt_evidence(evidence_payload),
             "final_report": full_report.model_dump(),
             "related_existing_memory": related_old_memory,
         }

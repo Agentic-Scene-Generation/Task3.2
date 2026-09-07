@@ -212,6 +212,15 @@ def test_canonical_bundle_does_not_repeat_memory_directives() -> None:
         success_case_ids=["success_1"],
         failure_case_ids=["failure_1"],
         skill_names=["align_student_seating"],
+        selections=[
+            RetrievedMemorySelection(
+                memory_id="success_1",
+                memory_type="success",
+                rank=1,
+                injected_text=success,
+                placement_text="Reference relation: chair faces desk.",
+            ),
+        ],
     )
     bundle = build_memory_injection_bundle(
         stage="furniture",

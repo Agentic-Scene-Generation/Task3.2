@@ -81,3 +81,39 @@ def test_relation_satisfaction_uses_only_evaluated_deterministic_relations() -> 
         "chair_faces_desk",
         "desk_near_wall",
     ]
+    observations = report["constraint_evidence"]
+    assert [row["constraint_id"] for row in observations] == ["faces_1", "near_1"]
+    assert [row["label"] for row in observations] == ["pass", "fail"]
+    assert all(row["constraint_hash"] and row["result_hash"] for row in observations)
+
+
+def test_unknown_constraint_evidence_is_preserved_without_changing_scores() -> None:
+    constraint = {
+        "constraint_id": "c",
+        "relation": "faces",
+        "stage": "furniture",
+        "strength": "hard",
+    }
+    payload = {
+        "results": [
+            {
+                "check_id": "pass",
+                "label": "pass",
+                "scoring_tier": "core",
+                "evidence": {"intent_constraint": constraint},
+            },
+            {
+                "check_id": "unknown",
+                "label": "unknown",
+                "scoring_tier": "auxiliary",
+                "evidence": {"intent_constraint": constraint},
+            },
+        ]
+    }
+    report = _deterministic_hard_check_report(payload, "furniture")
+    assert report["relation_satisfaction"] == 1.0
+    assert report["evaluated_check_ids"] == ["pass"]
+    assert [item["label"] for item in report["constraint_evidence"]] == [
+        "pass",
+        "unknown",
+    ]

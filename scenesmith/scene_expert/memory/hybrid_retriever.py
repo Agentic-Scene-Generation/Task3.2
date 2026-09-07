@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import tempfile
 import time
 
 from pathlib import Path
@@ -12,10 +13,10 @@ from typing import Any
 
 import numpy as np
 
+from scenesmith.scene_expert.memory.contracts import selection_from_record
 from scenesmith.scene_expert.memory.embedding import SceneMemoryEmbedder
 from scenesmith.scene_expert.memory.index import NumpyMemoryIndex
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
-from scenesmith.scene_expert.memory.skill_policy import evaluate_skill_for_task
 from scenesmith.scene_expert.memory.scoring import (
     HybridScoreWeights,
     hybrid_score,
@@ -24,8 +25,12 @@ from scenesmith.scene_expert.memory.scoring import (
     record_room_compatible,
     task_required_objects,
 )
+from scenesmith.scene_expert.memory.skill_policy import evaluate_skill_for_task
 from scenesmith.scene_expert.memory.store import FastMemoryStore
-from scenesmith.scene_expert.memory.text_builder import build_embedding_text
+from scenesmith.scene_expert.memory.text_builder import (
+    EMBEDDING_TEXT_VERSION,
+    build_embedding_text,
+)
 from scenesmith.scene_expert.schemas import (
     MemoryPack,
     RetrievedMemorySelection,
@@ -66,6 +71,20 @@ class HybridMemoryRetriever:
         self._store = store
         self._memory_dir = Path(memory_dir)
         self._index_dir = Path(index_dir) if index_dir else self._memory_dir / "indexes"
+        if store.read_only and (
+            self._index_dir.resolve() == self._memory_dir.resolve()
+            or self._memory_dir.resolve() in self._index_dir.resolve().parents
+        ):
+            # Format upgrades rebuild derived vectors, never a frozen bank.
+            cache_key = hashlib.sha256(
+                str(self._memory_dir.resolve()).encode()
+            ).hexdigest()[:20]
+            self._index_dir = (
+                Path(tempfile.gettempdir())
+                / "scenesmith-memory-index"
+                / cache_key
+                / EMBEDDING_TEXT_VERSION
+            )
         self._embedder = embedder
         self._max_success = max_success
         self._max_failure = max_failure
@@ -252,26 +271,15 @@ class HybridMemoryRetriever:
         )
         for memory_type, scored_records, filename in specs:
             for rank, (score, record) in enumerate(scored_records, start=1):
-                memory_id = _record_id(record)
-                if isinstance(record, SuccessCase):
-                    injected_text = record.to_positive_guidance()
-                elif isinstance(record, FailureCase):
-                    injected_text = record.to_negative_constraint()
-                else:
-                    injected_text = record.to_procedure_text()
                 rows.append(
-                    RetrievedMemorySelection(
-                        memory_id=memory_id,
-                        memory_type=memory_type,
+                    selection_from_record(
+                        record,
                         rank=rank,
                         score=round(float(score), 6),
                         score_components={"hybrid_total": round(float(score), 6)},
-                        source_path=str((self._memory_dir / filename).resolve()),
-                        source_task_ids=source_task_ids.get(memory_id, []),
-                        source_run_ids=source_run_ids.get(memory_id, []),
+                        memory_dir=self._memory_dir,
                         bank_id=self._store.bank_id,
                         bank_revision=self._store.revision,
-                        injected_text=injected_text,
                     )
                 )
         return rows
@@ -562,6 +570,8 @@ class HybridMemoryRetriever:
         if indexed_ids != record_ids:
             return False
         manifest = index.manifest or {}
+        if manifest.get("embedding_text_version") != EMBEDDING_TEXT_VERSION:
+            return False
         indexed_bank_id = str(manifest.get("memory_bank_id", ""))
         indexed_revision = manifest.get("memory_bank_revision")
         indexed_type_revision = manifest.get("memory_type_revision")
@@ -712,6 +722,7 @@ class HybridMemoryRetriever:
             stages=stages,
             memory_types=memory_types,
             embedder=self._embedder,
+            read_only_memory=self._store.read_only,
         )
 
     def _record_timing(
@@ -851,7 +862,7 @@ def _records_fingerprint(records: list[MemoryRecord]) -> str:
         {
             "memory_id": _record_id(record),
             "status": record.status,
-            "embedding_text": record.embedding_text or build_embedding_text(record),
+            "embedding_text": build_embedding_text(record),
             "quality_score": record.quality_score,
             "confidence": record.confidence,
         }

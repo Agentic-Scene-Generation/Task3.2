@@ -9,6 +9,9 @@ scores, provenance, or promotion status.
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -29,6 +32,23 @@ class MemorySourceProvenance(BaseModel):
     prompt_fingerprint: str = ""
     evidence_refs: list[str] = Field(default_factory=list)
     critic_source: str = ""
+
+
+class MemoryCheckEvidence(BaseModel):
+    """One exact-constraint observation copied from the native critic result."""
+
+    constraint_id: str
+    check_id: str
+    stage: str
+    label: str
+    evaluation_state: str = ""
+    scoring_tier: str = "unknown"
+    source: Literal["main_deterministic_critic"] = "main_deterministic_critic"
+    result_hash: str
+    constraint_hash: str
+    scene_state_path: str = ""
+    metric: str = ""
+    observations: dict[str, Any] = Field(default_factory=dict)
 
 
 class SpatialRelationMemory(BaseModel):
@@ -52,6 +72,66 @@ class SpatialRelationMemory(BaseModel):
     evidence_ref: str = ""
     geometry_verified: bool = False
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    verification_status: Literal[
+        "unknown", "requirement_only", "verified_pass", "verified_fail", "inconclusive"
+    ] = "unknown"
+    verification_evidence: list[MemoryCheckEvidence] = Field(default_factory=list)
+    template_parameters: list[str] = Field(default_factory=list)
+    claim_hash: str = ""
+
+    def current_claim_hash(self) -> str:
+        """Bind verification to these semantics, not a subsequently edited claim."""
+        claim = self.model_dump(
+            mode="json",
+            include={
+                "relation_type",
+                "subject_role",
+                "target_role",
+                "cardinality",
+                "normalized_offset",
+                "yaw_delta_deg",
+                "clearance_m",
+                "template_parameters",
+            },
+        )
+        return hashlib.sha256(
+            json.dumps(claim, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+
+    @property
+    def has_verified_geometry(self) -> bool:
+        """Legacy stage-wide flags alone never certify a spatial solution."""
+        return (
+            self.verification_status == "verified_pass"
+            and self.claim_hash == self.current_claim_hash()
+            and bool(self.verification_evidence)
+            and all(
+                item.constraint_id == self.evidence_ref
+                and bool(item.check_id and item.result_hash and item.constraint_hash)
+                and item.label == "pass"
+                and item.scoring_tier == "core"
+                and item.evaluation_state
+                not in {"unknown", "deferred", "not_applicable"}
+                for item in self.verification_evidence
+            )
+        )
+
+    @property
+    def has_verified_failure(self) -> bool:
+        """A failed observation also belongs only to the unchanged claim."""
+        return (
+            self.verification_status == "verified_fail"
+            and self.claim_hash == self.current_claim_hash()
+            and any(
+                item.constraint_id == self.evidence_ref
+                and bool(item.check_id and item.result_hash and item.constraint_hash)
+                and item.label == "fail"
+                and item.scoring_tier == "core"
+                and item.evaluation_state
+                not in {"unknown", "deferred", "not_applicable"}
+                for item in self.verification_evidence
+            )
+        )
 
     def to_guidance_text(self) -> str:
         """Render a compact designer-facing relation without inventing geometry."""
@@ -61,6 +141,18 @@ class SpatialRelationMemory(BaseModel):
             if value
         )
         parts = [endpoints or self.relation_type]
+        if self.cardinality:
+            parts.append(
+                "parameters="
+                + json.dumps(
+                    self.cardinality,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        if self.template_parameters:
+            parts.append("bind from current task=" + ",".join(self.template_parameters))
         if self.normalized_offset:
             parts.append(
                 "normalized offset="
@@ -76,6 +168,20 @@ class SpatialRelationMemory(BaseModel):
                     for key, value in sorted(self.clearance_m.items())
                 )
             )
+        evidence_label = (
+            "verified_pass"
+            if self.has_verified_geometry
+            else (
+                "verified_fail"
+                if self.has_verified_failure
+                else (
+                    "requirement_only"
+                    if self.evidence_source == "task_contract"
+                    else "unverified"
+                )
+            )
+        )
+        parts.append(f"evidence={evidence_label}")
         return "; ".join(parts)
 
 
@@ -153,9 +259,9 @@ class SuccessCase(MemoryRecordBase):
     placement_reference: list[str] = Field(
         default_factory=list,
         description=(
-            "Exact object placements that achieved these scores. "
+            "Legacy, scene-local placements retained for source auditing. "
             "One entry per object: 'object_id (name): x=..., y=..., yaw=...'. "
-            "Injected directly into the designer prompt as a spatial reference."
+            "Not injected as transferable geometry without a verified spatial relation."
         ),
     )
     scores: dict[str, float] = Field(default_factory=dict)
@@ -187,18 +293,23 @@ class SuccessCase(MemoryRecordBase):
         return "\n".join(lines)
 
     def to_placement_text(self) -> str:
-        """Format placement_reference as a designer-readable reference block."""
-        if not self.placement_reference and not self.spatial_relations:
+        """Render verified relations, never unframed legacy world coordinates."""
+        verified_relations = [
+            relation
+            for relation in self.spatial_relations
+            if relation.has_verified_geometry
+        ]
+        if not verified_relations:
             return ""
         score_str = ", ".join(f"{k}={v:.2f}" for k, v in self.scores.items())
         lines = [
             f"=== Reference Layout ({self.stage} / {self.room_type} / {self.style}) ===",
             f"Scores achieved: {score_str}",
-            "Grounded spatial references that produced these scores:",
+            "Verified spatial observations (not proof of causal benefit):",
         ]
-        for entry in self.placement_reference:
-            lines.append(f"  {entry}")
-        for relation in self.spatial_relations:
+        # Unframed legacy world coordinates remain in storage for audit. They
+        # are not a transferable, verified solution for a different room.
+        for relation in verified_relations:
             lines.append(f"  relation: {relation.to_guidance_text()}")
         lines.append(
             "Use this as a spatial reference. "
@@ -241,7 +352,11 @@ class FailureCase(MemoryRecordBase):
         return (
             f"[Avoid/{self.stage}] In {self.room_type}: {avoid_text}"
             + (f" — reason: {self.failure_reason}" if self.failure_reason else "")
-            + (f" — fix: {self.repair_action}" if self.repair_action else "")
+            + (
+                f" — {'verified fix' if self.repair_verified else 'unverified suggestion'}: {self.repair_action}"
+                if self.repair_action
+                else ""
+            )
             + (f" — check: {self.critic_check}" if self.critic_check else "")
         )
 
@@ -250,7 +365,8 @@ class FailureCase(MemoryRecordBase):
         avoid_text = self.negative_constraint or self.bad_pattern
         parts = [f"[Avoid/{self.stage}] {avoid_text}"]
         if self.repair_action:
-            parts.append(f"Fix: {self.repair_action}")
+            label = "Verified fix" if self.repair_verified else "Unverified suggestion"
+            parts.append(f"{label}: {self.repair_action}")
         if self.critic_check:
             parts.append(f"Check: {self.critic_check}")
         if self.spatial_relations:

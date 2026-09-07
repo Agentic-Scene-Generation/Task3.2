@@ -7,6 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from scenesmith.scene_expert.memory.contracts import selection_from_record
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
 from scenesmith.scene_expert.memory.scoring import (
     object_overlap,
@@ -93,7 +94,9 @@ class BudgetedMemoryRetriever:
         relation_context: StageRelationContext | None,
     ) -> MemoryPack:
         records = self._record_index()
-        selections_by_id = {row.memory_id: row for row in pack.selections}
+        selections_by_id = {
+            (row.memory_type, row.memory_id): row for row in pack.selections
+        }
         candidate_ids = {
             "success": list(pack.success_case_ids),
             "failure": list(pack.failure_case_ids),
@@ -109,13 +112,14 @@ class BudgetedMemoryRetriever:
         selected_text_keys: set[str] = set()
         consumed_chars = 0
         consumed_records = 0
+        admitted_rows: list[RetrievedMemorySelection] = []
 
         # Positive patterns and verified procedures establish a plan before the
         # single negative guard is admitted. This prevents a failure-heavy bank
         # from dominating the designer context.
         for memory_type in ("success", "skill", "failure"):
             for memory_id in candidate_ids[memory_type]:
-                row = selections_by_id.get(memory_id)
+                row = selections_by_id.get((memory_type, memory_id))
                 record = records.get((memory_type, memory_id))
                 reasons = self._rejection_reasons(
                     memory_type=memory_type,
@@ -124,17 +128,45 @@ class BudgetedMemoryRetriever:
                     stage=stage,
                     relation_context=relation_context,
                 )
+                if (memory_type, memory_id) in records and record is None:
+                    reasons = ["ambiguous_record_identity"]
+                if not memory_id.strip():
+                    reasons.append("empty_record_identity")
+                canonical = None
+                if record is not None:
+                    canonical = selection_from_record(
+                        record,
+                        rank=row.rank if row is not None else 1,
+                        memory_dir=self._store.memory_dir,
+                        bank_id=self._store.bank_id,
+                        bank_revision=self._store.revision,
+                        score=row.score if row is not None else None,
+                        score_components=(
+                            row.score_components if row is not None else {}
+                        ),
+                    )
+                    if (
+                        row is not None
+                        and row.content_hash
+                        and row.content_hash != canonical.content_hash
+                    ):
+                        reasons.append("source_content_changed")
                 if len(selected[memory_type]) >= limits[memory_type]:
                     reasons.append("type_budget_pruned")
                 if consumed_records >= max(0, self.policy.max_total_records):
                     reasons.append("record_budget_pruned")
-                text = str(row.injected_text if row is not None else "")
-                text_key = _normalized_text(text)
+                text = canonical.injected_text if canonical is not None else ""
+                layout = canonical.placement_text if canonical is not None else ""
+                if not text.strip():
+                    reasons.append("empty_payload")
+                # Punctuation can encode geometry (for example -1 versus +1).
+                # Lexical token normalization is not semantic deduplication.
+                text_key = " ".join((text + "\n" + layout).split()).casefold()
                 if text_key and text_key in selected_text_keys:
                     reasons.append("duplicate_content")
-                extra_chars = len(text)
-                if memory_type == "success" and not selected["success"]:
-                    extra_chars += len(pack.placement_reference)
+                # Account for the actual, selected record's complete content.
+                # Never charge or retain a different candidate's shared layout.
+                extra_chars = len(text) + len(layout) + (2 if layout else 0)
                 if consumed_chars + extra_chars > max(0, self.policy.max_total_chars):
                     reasons.append("prompt_budget_pruned")
                 if reasons:
@@ -143,6 +175,10 @@ class BudgetedMemoryRetriever:
                     )
                     continue
                 selected[memory_type].append(memory_id)
+                assert canonical is not None
+                admitted_rows.append(
+                    canonical.model_copy(update={"rank": len(selected[memory_type])})
+                )
                 consumed_records += 1
                 consumed_chars += extra_chars
                 if text_key:
@@ -151,59 +187,56 @@ class BudgetedMemoryRetriever:
                     self._decision(memory_id, memory_type, row, "selected", [])
                 )
 
-        selected_ids = {
-            memory_id for values in selected.values() for memory_id in values
-        }
-        selected_rows = [
-            row for row in pack.selections if row.memory_id in selected_ids
-        ]
-        ranks: dict[str, int] = {"success": 0, "failure": 0, "skill": 0}
-        reranked_rows: list[RetrievedMemorySelection] = []
-        for row in selected_rows:
-            ranks[row.memory_type] += 1
-            reranked_rows.append(
-                row.model_copy(update={"rank": ranks[row.memory_type]})
-            )
-
         success_ids = selected["success"]
         failure_ids = selected["failure"]
         skill_names = selected["skill"]
-        source_ids = selected_ids
+        # Legacy maps cannot express cross-bank ID collisions. Canonical rows
+        # always carry typed provenance; omit ambiguous keys from legacy maps.
+        id_counts = {
+            row.memory_id: sum(
+                other.memory_id == row.memory_id for other in admitted_rows
+            )
+            for row in admitted_rows
+        }
         skill_decisions = self._updated_skill_decisions(
             pack.skill_filter_decisions,
             selected=set(skill_names),
         )
         return pack.model_copy(
             update={
-                "success_hints": self._texts_for_ids(
-                    pack.success_hints, pack.success_case_ids, success_ids
-                ),
-                "failure_hints": self._texts_for_ids(
-                    pack.failure_hints, pack.failure_case_ids, failure_ids
-                ),
-                "skill_texts": self._texts_for_ids(
-                    pack.skill_texts, pack.skill_names, skill_names
-                ),
-                "placement_reference": (
-                    pack.placement_reference if success_ids else ""
-                ),
+                "success_hints": [
+                    row.injected_text
+                    for row in admitted_rows
+                    if row.memory_type == "success"
+                ],
+                "failure_hints": [
+                    row.injected_text
+                    for row in admitted_rows
+                    if row.memory_type == "failure"
+                ],
+                "skill_texts": [
+                    row.injected_text
+                    for row in admitted_rows
+                    if row.memory_type == "skill"
+                ],
+                "placement_reference": "",
                 "success_case_ids": success_ids,
                 "failure_case_ids": failure_ids,
                 "skill_names": skill_names,
                 "retrieved_source_task_ids": {
-                    key: value
-                    for key, value in pack.retrieved_source_task_ids.items()
-                    if key in source_ids
+                    row.memory_id: row.source_task_ids
+                    for row in admitted_rows
+                    if id_counts[row.memory_id] == 1
                 },
                 "retrieved_source_run_ids": {
-                    key: value
-                    for key, value in pack.retrieved_source_run_ids.items()
-                    if key in source_ids
+                    row.memory_id: row.source_run_ids
+                    for row in admitted_rows
+                    if id_counts[row.memory_id] == 1
                 },
-                "selections": reranked_rows,
+                "selections": admitted_rows,
                 "selection_decisions": decisions,
                 "selection_policy": {
-                    "schema_version": "sceneexpert.memory_injection_policy.v1",
+                    "schema_version": "sceneexpert.memory_injection_policy.v2",
                     "max_total_records": self.policy.max_total_records,
                     "max_success_cases": self.policy.max_success_cases,
                     "max_failure_cases": self.policy.max_failure_cases,
@@ -266,14 +299,16 @@ class BudgetedMemoryRetriever:
 
     def _record_index(
         self,
-    ) -> dict[tuple[str, str], SuccessCase | FailureCase | Skill]:
-        output: dict[tuple[str, str], SuccessCase | FailureCase | Skill] = {}
-        for record in self._store.active_success_cases:
-            output[("success", record.case_id)] = record
-        for record in self._store.active_failure_cases:
-            output[("failure", record.failure_id)] = record
-        for record in self._store.active_skills:
-            output[("skill", record.skill_name)] = record
+    ) -> dict[tuple[str, str], SuccessCase | FailureCase | Skill | None]:
+        output: dict[tuple[str, str], SuccessCase | FailureCase | Skill | None] = {}
+        for kind, field, records in (
+            ("success", "case_id", self._store.active_success_cases),
+            ("failure", "failure_id", self._store.active_failure_cases),
+            ("skill", "skill_name", self._store.active_skills),
+        ):
+            for record in records:
+                key = (kind, getattr(record, field))
+                output[key] = None if key in output else record
         return output
 
     @staticmethod
@@ -292,15 +327,6 @@ class BudgetedMemoryRetriever:
             retrieval_rank=row.rank if row is not None else 0,
             retrieval_score=row.score if row is not None else None,
         )
-
-    @staticmethod
-    def _texts_for_ids(
-        texts: list[str],
-        original_ids: list[str],
-        selected_ids: list[str],
-    ) -> list[str]:
-        by_id = dict(zip(original_ids, texts, strict=False))
-        return [by_id[memory_id] for memory_id in selected_ids if memory_id in by_id]
 
     @staticmethod
     def _updated_skill_decisions(

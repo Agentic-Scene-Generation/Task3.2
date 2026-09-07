@@ -35,7 +35,10 @@ from scenesmith.scene_expert.memory.embedding import (
 from scenesmith.scene_expert.memory.index import NumpyMemoryIndex
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
 from scenesmith.scene_expert.memory.store import FastMemoryStore
-from scenesmith.scene_expert.memory.text_builder import build_embedding_text
+from scenesmith.scene_expert.memory.text_builder import (
+    EMBEDDING_TEXT_VERSION,
+    build_embedding_text,
+)
 
 STAGES = ("floor_plan", "furniture", "wall_mounted", "ceiling_mounted", "manipuland")
 MEMORY_TYPES = ("success", "failure", "skill")
@@ -83,7 +86,7 @@ def _records_fingerprint(
         {
             "memory_id": _record_id(record),
             "status": record.status,
-            "embedding_text": record.embedding_text or build_embedding_text(record),
+            "embedding_text": build_embedding_text(record),
             "quality_score": record.quality_score,
             "confidence": record.confidence,
         }
@@ -162,6 +165,7 @@ def build_memory_indexes(
     memory_types: tuple[str, ...] = MEMORY_TYPES,
     dry_run: bool = False,
     embedder: SceneMemoryEmbedder | None = None,
+    read_only_memory: bool = False,
 ) -> list[dict[str, Any]]:
     """Build per-bank/per-stage memory indexes.
 
@@ -175,11 +179,18 @@ def build_memory_indexes(
 
     memory_dir = Path(memory_dir)
     index_dir = Path(index_dir) if index_dir is not None else memory_dir / "indexes"
+    if read_only_memory and (
+        index_dir.resolve() == memory_dir.resolve()
+        or memory_dir.resolve() in index_dir.resolve().parents
+    ):
+        raise ValueError(
+            "Read-only memory requires an index directory outside the bank"
+        )
     model_dir = resolve_memory_embedding_model_dir(
         str(embedding_model_dir) if embedding_model_dir else None
     )
 
-    store = FastMemoryStore(str(memory_dir))
+    store = FastMemoryStore(str(memory_dir), read_only=read_only_memory)
     banks = _records_by_type(store)
     source_files = _source_files(memory_dir)
     needs_embedder = any(
@@ -206,16 +217,14 @@ def build_memory_indexes(
                 for idx, record in enumerate(records)
                 if record.stage == stage
             ]
-            texts = [
-                record.embedding_text or build_embedding_text(record)
-                for _, record in stage_records
-            ]
+            texts = [build_embedding_text(record) for _, record in stage_records]
             vectors = _encode_texts(texts, embedder)
             metadata = [
                 _record_metadata(record, memory_type, idx)
                 for idx, record in stage_records
             ]
             manifest = {
+                "embedding_text_version": EMBEDDING_TEXT_VERSION,
                 "built_at": datetime.now(timezone.utc).isoformat(),
                 "embedding_model_id": embedding_model_id,
                 "embedding_model_dir": str(model_dir),
@@ -320,6 +329,11 @@ def parse_args() -> argparse.Namespace:
         help="Memory banks to index.",
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--read-only-memory",
+        action="store_true",
+        help="Do not modify an existing bank; requires an external --index-dir.",
+    )
     return parser.parse_args()
 
 
@@ -342,6 +356,7 @@ def main() -> None:
         stages=tuple(args.stages),
         memory_types=tuple(args.memory_types),
         dry_run=args.dry_run,
+        read_only_memory=args.read_only_memory,
     )
 
     action = "Would build" if args.dry_run else "Built"

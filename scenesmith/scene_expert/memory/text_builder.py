@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
 
 MemoryRecord = SuccessCase | FailureCase | Skill
+EMBEDDING_TEXT_VERSION = "memory-text.v2"
 
 
 def _clean(value: object) -> str:

@@ -18,6 +18,19 @@ from pathlib import Path
 
 import yaml
 
+from scenesmith.scene_expert.schemas import (
+    FullVerifyReport,
+    SceneTaskSpec,
+    StageBrief,
+    StageVerifyReport,
+    VerifyIssue,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.intent_contract import (
+    SUPPORT_READINESS_FAILURE_CODE,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_containment import (
+    ROOM_CONTAINMENT_FAILURE_CODE,
+)
 from scenesmith.scenebenchmark_critic.object_taxonomy import (
     canonical_object_category,
     categories_are_equivalent,
@@ -29,19 +42,6 @@ from scenesmith.scenebenchmark_critic.relation_registry import (
 )
 from scenesmith.scenebenchmark_critic.stage_ownership import (
     normalize_result_stage_ownership,
-)
-from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.intent_contract import (
-    SUPPORT_READINESS_FAILURE_CODE,
-)
-from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_containment import (
-    ROOM_CONTAINMENT_FAILURE_CODE,
-)
-from scenesmith.scene_expert.schemas import (
-    FullVerifyReport,
-    SceneTaskSpec,
-    StageBrief,
-    StageVerifyReport,
-    VerifyIssue,
 )
 
 console_logger = logging.getLogger(__name__)
@@ -382,13 +382,23 @@ def _deterministic_hard_check_report(
 ) -> dict[str, object]:
     """Summarize only actually evaluated, due hard constraints."""
 
+    from scenesmith.scene_expert.memory.evidence import constraint_observation
+
     evaluated: list[dict] = []
     relation_results: list[dict] = []
+    constraint_evidence: list[dict] = []
     for result in (payload or {}).get("results") or []:
         if not isinstance(result, dict) or not _result_is_due(result, stage):
             continue
         tier = str(result.get("scoring_tier") or "core").lower()
         constraint = _result_intent_constraint(result)
+        # Preserve individual labels, including unknown/degraded, for Memory.
+        # This is additive evidence only; existing scoring and gates below are
+        # unchanged. Unknown auxiliary checks must not disappear beside passes.
+        if constraint.get("constraint_id"):
+            constraint_evidence.append(
+                constraint_observation(result, constraint, stage)
+            )
         if tier != "core" or (
             constraint and str(constraint.get("strength") or "hard").lower() != "hard"
         ):
@@ -439,6 +449,7 @@ def _deterministic_hard_check_report(
         ],
         "relation_satisfaction": relation_satisfaction,
         "constraint_satisfaction_rate": relation_satisfaction,
+        "constraint_evidence": constraint_evidence,
     }
 
 

@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import re
 
-from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
+from scenesmith.scene_expert.memory.contracts import selection_from_record
 from scenesmith.scene_expert.memory.room_taxonomy import room_types_compatible
+from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
 from scenesmith.scene_expert.memory.skill_policy import evaluate_skill_for_task
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.schemas import (
@@ -218,19 +219,26 @@ class MemoryRetriever:
             ("failure", failure_ids, "failure_cases.jsonl"),
             ("skill", skill_names, "skills.jsonl"),
         )
+        records = {
+            **{
+                ("success", item.case_id): item
+                for item in self._store.active_success_cases
+            },
+            **{
+                ("failure", item.failure_id): item
+                for item in self._store.active_failure_cases
+            },
+            **{("skill", item.skill_name): item for item in self._store.active_skills},
+        }
         for memory_type, record_ids, filename in specs:
             for rank, memory_id in enumerate(record_ids, start=1):
                 rows.append(
-                    RetrievedMemorySelection(
-                        memory_id=memory_id,
-                        memory_type=memory_type,
+                    selection_from_record(
+                        records[(memory_type, memory_id)],
                         rank=rank,
-                        source_path=str((self._store.memory_dir / filename).resolve()),
-                        source_task_ids=source_task_ids.get(memory_id, []),
-                        source_run_ids=source_run_ids.get(memory_id, []),
+                        memory_dir=self._store.memory_dir,
                         bank_id=self._store.bank_id,
                         bank_revision=self._store.revision,
-                        injected_text=self._selection_text(memory_type, memory_id),
                     )
                 )
         return rows

@@ -353,6 +353,8 @@ class FastMemoryStore:
                 case.style.casefold(),
                 " ".join(sorted(x.casefold() for x in case.task_signature)),
                 " ".join(x.casefold() for x in case.successful_pattern),
+                " ".join(x.casefold() for x in case.positive_guidance),
+                FastMemoryStore._spatial_signature(case),
             ]
         )
 
@@ -366,12 +368,39 @@ class FastMemoryStore:
                 case.failure_type.casefold(),
                 case.bad_pattern.casefold(),
                 case.failure_reason.casefold(),
+                case.repair_action.casefold(),
+                FastMemoryStore._spatial_signature(case),
             ]
         )
 
     @staticmethod
     def _skill_signature(skill: Skill) -> str:
         return skill.semantic_signature or build_skill_semantic_signature(skill)
+
+    @staticmethod
+    def _spatial_signature(record: Any) -> str:
+        """Do not merge evidence for different spatial claims as one lesson."""
+        claims = {
+            json.dumps(
+                relation.model_dump(
+                    mode="json",
+                    include={
+                        "relation_type",
+                        "subject_role",
+                        "target_role",
+                        "cardinality",
+                        "normalized_offset",
+                        "yaw_delta_deg",
+                        "clearance_m",
+                        "template_parameters",
+                    },
+                ),
+                sort_keys=True,
+                ensure_ascii=False,
+            )
+            for relation in record.spatial_relations
+        }
+        return json.dumps(sorted(claims), ensure_ascii=False)
 
     def _rewrite(self, path: Path, records: list[BaseModel]) -> None:
         temporary = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
@@ -802,6 +831,15 @@ class FastMemoryStore:
             id_matches = identity(current) == incoming_id
             if not id_matches and signature(current) != incoming_signature:
                 continue
+            if signature(current) != incoming_signature or self._spatial_signature(
+                current
+            ) != self._spatial_signature(incoming):
+                # ADD may accumulate independent evidence for the same claim,
+                # not silently replace its meaning. Explicit UPDATE is separate.
+                console_logger.warning(
+                    "Refusing incompatible memory observation for %s", incoming_id
+                )
+                return False, True
             if (
                 id_matches
                 and incoming.source_run_id == current.source_run_id

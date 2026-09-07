@@ -13,9 +13,13 @@ def _normalized_skill_name(value: str) -> str:
     return "_".join(str(value or "").strip().casefold().replace("-", " ").split())
 
 
-def _compact(text: str, max_chars: int = 300) -> str:
-    compact = " ".join(str(text or "").strip().split())
-    return compact if len(compact) <= max_chars else compact[: max_chars - 3] + "..."
+def _compact(text: str) -> str:
+    """Normalize whitespace without truncating actions or safety conditions.
+
+    Admission enforces a whole-record budget before the planner sees memory.
+    A second blind character limit would corrupt that admitted payload.
+    """
+    return " ".join(str(text or "").strip().split())
 
 
 def _extend_unique(target: list[str], values: list[str]) -> list[str]:
