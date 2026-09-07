@@ -1,4 +1,4 @@
-# Fast Memory 评价与验收（v9 / v6）
+# Fast Memory 评价与验收（v9 / v7）
 
 本实现观察原生流程，不改动 main 的 Designer/Critic 算法、评分、阶段顺序、失败策略和物理处理。**记忆送达、出现相关动作、目标达到、配对增益是四件不同的事。** 不应把任何单项当作因果证明。
 
@@ -43,21 +43,16 @@ Skill utility 只有实际送达 + 相关动作 + 精确目标结果时才记录
 
 使用已同步的新代码和现有 `tmp/acp/` 文件。不开启预算或额外修复，不新增 Git 检查。
 
-运行侧先在两臂环境中设置真实且一致的资源声明：
+沿用 ACP 已有的模型、并发、共享检查点与 Memory 路径设置，不需要另填 GPU 型号或模型服务版本标签。新终端中直接运行：
 
 ```bash
 cd /mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2
 
-# 按实际 GPU/数量/并发配置填写；不填不阻止生成，但速度验收会标为未就绪。
-export SCENEEXPERT_EVAL_RESOURCE_CLASS="${EVAL_RESOURCE_CLASS:-}"
-# 对应实际模型权重版本、llama.cpp 构建和服务启动配置的稳定标识。
-export SCENEEXPERT_EVAL_SERVICE_DEPLOYMENT="${EVAL_DEPLOYMENT_FINGERPRINT:-}"
-# 可选：本次服务/容器实例标识，用于区分不同 localhost。
-export SCENEEXPERT_EVAL_SERVICE_INSTANCE="${EVAL_SERVICE_INSTANCE:-}"
-
-export PAIR_ID=full_memory_pair_sceneeval100_hard_qwen38_v5
-export ARM_ORDER=off_on
+PAIR_ID=full_memory_pair_sceneeval100_hard_qwen38_v5 ARM_ORDER=off_on \
 bash tmp/acp/acp_qwen38_full_memory_pair_off_reuse.sh
+
+# OFF 结束后；如果换了 ACP 作业，仍使用完全相同的 PAIR_ID。
+PAIR_ID=full_memory_pair_sceneeval100_hard_qwen38_v5 ARM_ORDER=off_on \
 bash tmp/acp/acp_qwen38_full_memory_pair_on_reuse.sh
 ```
 
@@ -66,6 +61,7 @@ bash tmp/acp/acp_qwen38_full_memory_pair_on_reuse.sh
 若 ON 以失败退出，旧 tmp wrapper 可能尚未运行配对汇总；可单独执行：
 
 ```bash
+PAIR_ID=full_memory_pair_sceneeval100_hard_qwen38_v5
 python -m scenesmith.scene_expert.paired_metrics \
   --baseline "outputs/critic_probe/${PAIR_ID}_memory_off" \
   --treatment "outputs/critic_probe/${PAIR_ID}_memory_on" \
@@ -82,7 +78,9 @@ python -m scenesmith.scene_expert.paired_metrics \
 
 还要求 `assignment_inventory_complete=true`。旧运行只有已启动 batch 的清单时，不能证明“全部分配任务均已纳入”；仍可查看描述性结果，但不允许用成功子集声称全任务收益。
 
-`speed_comparison_ready` 还要求全部 attempts 成本完整，以及非空且一致的资源/服务部署声明。hostname 相同不代表资源等价；这些标签是运行人员声明，不是硬件证明。
+`speed_comparison_ready` 要求自动记录的模型/配置/源码/软件身份与冻结输入一致、全部 attempts 成本完整；**不再要求** `SCENEEXPERT_EVAL_RESOURCE_CLASS` 或 `SCENEEXPERT_EVAL_SERVICE_DEPLOYMENT`。新 trace 不读取这两个环境变量，也不引入 GPU 探测、额外模型请求或运行前检查。
+
+硬件资源、后端部署与是否存在竞争负载由运行侧维持一致。报告明确标注 `hardware_equivalence_verified=false`，这是“未做硬件认证”，不是“硬件不一致”，不会阻止速度统计。旧结果的手填标签若存在明确矛盾，仍会提示并阻止速度结论；缺少标签记为 `runtime_resource_match=null`，不再视为不匹配。配置相同不代表资源条件已经自动核实，速度增益应在同卡、同模型服务、同资源分配、无其他竞争任务的前提下解释。
 
 看 `all_assigned_mean_time_delta_sec`、`all_assigned_total_time_delta_sec` 和完成/失败转移；共同完成子集上的 Critic 分差只能作为辅助。失败分类仍沿用 main，不把基础设施异常强行计为 Memory 负例。不更改 Critic 分数、不删除不利 case。
 

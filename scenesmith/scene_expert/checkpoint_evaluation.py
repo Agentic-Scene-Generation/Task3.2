@@ -259,7 +259,8 @@ def assess(manifest: dict, comparisons: list[dict]) -> dict:
         "all_assigned_cost_reduction_fraction": reduction,
         "completion_nonregression": no_regression,
         "causal_proof": False,
-        "limitations": "Small paired diagnostics are not population-level or continual-memory-learning proof. Local registration is auditable, not externally timestamp-attested.",
+        "hardware_equivalence_verified": False,
+        "limitations": "Small paired diagnostics are not population-level or continual-memory-learning proof. Local registration is auditable, not externally timestamp-attested. Cost conclusions assume operator-controlled equal resources, backend deployment and competing load; these hardware conditions are not automatically verified.",
     }
 
 

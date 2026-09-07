@@ -16,7 +16,7 @@ from typing import Any, Iterable
 from scenesmith.scene_expert.evaluation_costs import timestamp
 from scenesmith.scene_expert.experiment_identity import stable_source_bundle_hash
 
-SCHEMA_VERSION = "sceneexpert.paired_metrics.v6"
+SCHEMA_VERSION = "sceneexpert.paired_metrics.v7"
 PAIR_COLUMNS = (
     "baseline_final_trace_time_sec",
     "treatment_final_trace_time_sec",
@@ -188,6 +188,23 @@ def _benefit_signal(
     if slower and worse:
         return "slower_and_worse"
     return "mixed_or_tied"
+
+
+def _legacy_resource_labels_match(before: dict, after: dict) -> bool | None:
+    """Read old optional labels without demanding new operator configuration.
+
+    A missing label is unknown, not a mismatch. A recorded contradiction is
+    still surfaced. Even matching labels do not attest physical GPU equality.
+    """
+    left = before.get("runtime_identity") or {}
+    right = after.get("runtime_identity") or {}
+    comparisons = []
+    for key in ("resource_class", "service_deployment"):
+        a, b = str(left.get(key) or "").strip(), str(right.get(key) or "").strip()
+        comparisons.append(a == b if a and b else None)
+    if False in comparisons:
+        return False
+    return True if all(value is True for value in comparisons) else None
 
 
 def compare_run_metrics(
@@ -417,12 +434,7 @@ def compare_run_metrics(
                 )
                 and (before.get("runtime_identity") or {}).get("software")
                 == (after.get("runtime_identity") or {}).get("software"),
-                "runtime_resource_match": all(
-                    bool((before.get("runtime_identity") or {}).get(key))
-                    and (before.get("runtime_identity") or {}).get(key)
-                    == (after.get("runtime_identity") or {}).get(key)
-                    for key in ("resource_class", "service_deployment")
-                ),
+                "runtime_resource_match": _legacy_resource_labels_match(before, after),
                 "per_case_execution_identity_match": all(
                     bool(before.get(key)) and before.get(key) == after.get(key)
                     for key in ("control_signature", "source_bundle_hash")
@@ -656,12 +668,14 @@ def compare_run_metrics(
         and treatment_ready
     )
     speed_comparison_ready = outcome_comparison_ready and all(
-        row["all_attempt_cost_complete"] and row["runtime_resource_match"]
+        row["all_attempt_cost_complete"] and row["runtime_resource_match"] is not False
         for row in pairs
     )
+    if any(row["runtime_resource_match"] is False for row in pairs):
+        warnings.append("conflicting_legacy_runtime_resource_labels")
     if not speed_comparison_ready:
         warnings.append(
-            "speed_claim_blocked_missing_all_attempt_cost_or_runtime_controls"
+            "speed_comparison_blocked_invalid_identity_incomplete_cost_or_recorded_resource_conflict"
         )
     claim_status = "not_ready"
     if quality_delta_ready:
@@ -697,8 +711,10 @@ def compare_run_metrics(
         "outcome_comparison_ready": outcome_comparison_ready,
         "quality_delta_ready": quality_delta_ready,
         "speed_comparison_ready": speed_comparison_ready,
+        "hardware_equivalence_verified": False,
+        "resource_control_basis": "operator_managed_resources; recorded_model_config_source_and_software_checked",
         "gain_decision": "requires_preregistered_acceptance_and_balanced_repetition",
-        "interpretation": "All assigned cases are retained. Time uses all-attempt scene service time, not the last trace; completed-pair quality is auxiliary. Readiness is not proof of positive or causal benefit. Runtime labels are operator declarations, not verified hardware equivalence.",
+        "interpretation": "All assigned cases are retained. Time uses all-attempt scene service time, not the last trace; completed-pair quality is auxiliary. Readiness is not proof of positive or causal benefit. Model/config/source/software identities are checked from recorded artifacts. Equal resource allocation, backend deployment and absence of competing load are operator-controlled assumptions, not automatically verified hardware facts. No manual GPU or deployment labels are required.",
         "claim_status": claim_status,
         "identity_checks": identity_checks,
         "data_quality_warnings": sorted(set(warnings)),
@@ -845,7 +861,8 @@ def write_paired_metrics(
         f"- Speed comparison ready: `{metrics.get('speed_comparison_ready', False)}`",
         "- Time deltas use the full per-case attempt span, including retries; final-trace timing is auxiliary.",
         "- Readiness is not a positive-gain verdict. All assigned outcomes are retained; jointly completed quality is a selected subset.",
-        "- Runtime resource labels are operator declarations. Missing labels or costs block speed claims.",
+        "- No manual GPU/deployment labels are required. Recorded model/config/source/software identities and all-attempt costs remain mandatory.",
+        "- Hardware equivalence is not automatically verified. Interpret time differences under the operator-controlled same-resource, same-backend and no-competing-load assumption.",
         "",
         "## Paired KPIs",
         "",

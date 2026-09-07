@@ -262,10 +262,6 @@ class TraceLogger:
             "schema_version": "memory-runtime.v1",
             "hostname": socket.gethostname(),
             "pid": os.getpid(),
-            "resource_class": os.environ.get("SCENEEXPERT_EVAL_RESOURCE_CLASS", ""),
-            "service_deployment": os.environ.get(
-                "SCENEEXPERT_EVAL_SERVICE_DEPLOYMENT", ""
-            ),
             "service_instance": os.environ.get("SCENEEXPERT_EVAL_SERVICE_INSTANCE", ""),
             "arm_order": os.environ.get("SCENEEXPERT_EVAL_ARM_ORDER", ""),
             "scene_started_at": "",

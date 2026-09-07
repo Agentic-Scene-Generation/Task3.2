@@ -327,16 +327,58 @@ def test_pair_critical_identity_gates(tmp_path, fault):
     assert not compare_run_metrics(baseline, treatment)["comparison_ready"]
 
 
-def test_missing_runtime_declaration_blocks_speed_claim_not_scene_results():
+@pytest.mark.parametrize("missing_arm", ["baseline", "treatment", "both"])
+def test_manual_runtime_labels_are_not_required_for_speed_comparison(missing_arm):
     baseline = _run("cold", ready=True, time_sec=100, critic=0.8)
     treatment = _run("warm", ready=True, time_sec=80, critic=0.9)
-    treatment["scenes"][0]["runtime_identity"] = {
-        "hostname": "same-host",
-        "software": {"python": "test-runtime"},
-    }
+    for arm, metrics in (("baseline", baseline), ("treatment", treatment)):
+        if missing_arm in {arm, "both"}:
+            metrics["scenes"][0]["runtime_identity"] = {
+                "hostname": "same-host",
+                "software": {"python": "test-runtime"},
+            }
     result = compare_run_metrics(baseline, treatment)
     assert result["comparison_ready"]
-    assert not result["speed_comparison_ready"]
+    assert result["speed_comparison_ready"]
+    assert result["summary"]["all_assigned_total_time_delta_sec"] == -20
+    assert result["pairs"][0]["runtime_resource_match"] is None
+    assert result["hardware_equivalence_verified"] is False
+
+
+@pytest.mark.parametrize("field", ["resource_class", "service_deployment"])
+def test_recorded_resource_contradictions_still_block_speed_comparison(field):
+    baseline = _run("cold", ready=True, time_sec=100, critic=0.8)
+    treatment = _run("warm", ready=True, time_sec=80, critic=0.9)
+    treatment["scenes"][0]["runtime_identity"][field] = "actually-different"
+    result = compare_run_metrics(baseline, treatment)
+    assert result["comparison_ready"]
+    assert result["speed_comparison_ready"] is False
+    assert (
+        "conflicting_legacy_runtime_resource_labels" in result["data_quality_warnings"]
+    )
+
+
+@pytest.mark.parametrize("fault", ["model", "software", "cost", "config", "source"])
+def test_removing_manual_labels_preserves_objective_pair_gates(fault):
+    baseline = _run("cold", ready=True, time_sec=100, critic=0.8)
+    treatment = _run("warm", ready=True, time_sec=80, critic=0.9)
+    for metrics in (baseline, treatment):
+        metrics["scenes"][0]["runtime_identity"] = {
+            "software": {"python": "test-runtime"}
+        }
+    row = treatment["scenes"][0]
+    if fault == "model":
+        treatment["experiment_identity"]["models"] = ["different-model"]
+    elif fault == "software":
+        row["runtime_identity"]["software"] = {"python": "different-runtime"}
+    elif fault == "cost":
+        row["all_attempt_cost_complete"] = False
+    elif fault == "config":
+        row["control_signature"] = "different-config"
+    else:
+        row["source_bundle_hash"] = "different-source"
+    result = compare_run_metrics(baseline, treatment)
+    assert result["speed_comparison_ready"] is False
 
 
 def test_creation_requires_actual_new_object_state_not_free_text_role(tmp_path):
@@ -391,10 +433,12 @@ def test_runtime_captures_initial_status_without_git_requirement(tmp_path, monke
         {"status": "running", "updated_at": "2026-09-07T00:00:00Z"},
     )
     monkeypatch.setenv("SCENEEXPERT_EVAL_RESOURCE_CLASS", "test-gpu")
+    monkeypatch.setenv("SCENEEXPERT_EVAL_SERVICE_DEPLOYMENT", "old-placeholder")
     logger = TraceLogger(str(tmp_path), scene_index=0, prompt="Office")
     trace = json.loads(logger.save_partial().read_text(encoding="utf-8"))
     assert trace["runtime_identity"]["scene_started_at"] == "2026-09-07T00:00:00Z"
-    assert trace["runtime_identity"]["resource_class"] == "test-gpu"
+    assert "resource_class" not in trace["runtime_identity"]
+    assert "service_deployment" not in trace["runtime_identity"]
 
 
 def test_checkpoint_registration_and_file_tamper_detection(tmp_path):
