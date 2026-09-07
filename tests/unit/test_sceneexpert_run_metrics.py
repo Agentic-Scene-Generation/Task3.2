@@ -302,15 +302,15 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
     assert metrics["summary"]["critic_mean_score"] == 1.0
     assert metrics["summary"]["hard_constraint_pass_rate"] == 1.0
     assert metrics["summary"]["mean_relation_satisfaction"] == 0.9
-    assert metrics["summary"]["memory_injection_delivery_rate"] == 1.0
+    assert metrics["summary"]["memory_injection_delivery_rate"] == 0.0
     assert metrics["summary"]["generation_complete_rate"] == 0.5
     assert metrics["summary"]["required_satisfaction_rate"] == 1.0
     assert metrics["summary"]["mean_required_coverage"] == 1.0
     assert metrics["summary"]["quality_pass_rate"] == 1.0
     assert metrics["summary"]["required_first_instruction_delivery_rate"] == 1.0
     assert metrics["summary"]["optional_autonomy_preservation_rate"] == 1.0
-    assert metrics["summary"]["memory_cross_task_verified_scene_coverage"] == 0.5
-    assert metrics["memory_closed_loop_observed"] is True
+    assert metrics["summary"]["memory_cross_task_verified_scene_coverage"] == 0.0
+    assert metrics["memory_closed_loop_observed"] is False
     assert metrics["summary"]["task_compiler_llm_scenes"] == 1
     assert metrics["summary"]["global_planner_llm_stage_count"] == 1
     assert metrics["summary"]["brief_injection_verified_stage_count"] == 1
@@ -433,7 +433,7 @@ def test_recorded_failure_stays_out_of_quality_denominators(tmp_path) -> None:
 
     metrics = collect_run_metrics(output_root, process_exit_code=0)
 
-    assert metrics["schema_version"] == "sceneexpert.run_metrics.v8"
+    assert metrics["schema_version"] == "sceneexpert.run_metrics.v9"
     assert metrics["quality_comparison_ready"] is False
     assert metrics["summary"]["completed_scenes"] == 1
     assert metrics["summary"]["failed_scenes"] == 1

@@ -20,12 +20,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from scenesmith.scene_expert.evaluation_costs import collect_attempt_costs
 from scenesmith.scene_expert.experiment_identity import stable_source_bundle_hash
+from scenesmith.scene_expert.memory.usage import collect_memory_usage
 
 console_logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "sceneexpert.run_metrics.v8"
+SCHEMA_VERSION = "sceneexpert.run_metrics.v9"
 SCENE_COLUMNS = (
+    "all_attempt_time_sec",
+    "all_attempt_cost_complete",
+    "observed_attempt_time_lower_bound_sec",
+    "all_attempt_trace_time_sec",
+    "memory_payload_observed_count",
+    "memory_delivered_count",
+    "memory_action_observed_count",
+    "memory_target_verified_count",
     "run_id",
     "batch_id",
     "scene_index",
@@ -250,6 +260,61 @@ def _manifest_rows(output_root: Path, warnings: list[str]) -> list[dict[str, Any
                 f"unreadable_batch_manifest:{manifest}:{type(exc).__name__}"
             )
     return rows
+
+
+def _assigned_rows(
+    output_root: Path, warnings: list[str]
+) -> tuple[list[dict[str, Any]], bool]:
+    """Retain planned but unstarted scenes without trusting completed-only output."""
+    observed = _manifest_rows(output_root, warnings)
+    inventory = output_root / "assigned_cases.csv"
+    if not inventory.is_file():
+        warnings.append("assignment_inventory_missing:observed_batches_only")
+        return observed, False
+    planned: list[dict[str, Any]] = []
+    try:
+        with inventory.open("r", encoding="utf-8", newline="") as stream:
+            for raw in csv.DictReader(stream):
+                batch = str(raw.get("batch_id") or "")
+                index = int(raw["scene_index"])
+                if (
+                    not batch.startswith("batch_")
+                    or not batch[6:].isdigit()
+                    or index < 0
+                    or not raw.get("case_id")
+                ):
+                    raise ValueError("invalid assignment identity")
+                planned.append(
+                    {
+                        "batch_dir": output_root / "critic_on" / batch,
+                        "batch_id": batch,
+                        "scene_index": index,
+                        "scene_id": f"scene_{index:03d}",
+                        "case_id": str(raw["case_id"]),
+                        "prompt": str(raw.get("prompt") or ""),
+                    }
+                )
+    except (OSError, UnicodeError, csv.Error, ValueError, KeyError, TypeError) as exc:
+        warnings.append(f"assignment_inventory_unreadable:{type(exc).__name__}")
+        return observed, False
+
+    def identity(row: dict[str, Any]) -> tuple[str, int]:
+        return row["batch_id"], row["scene_index"]
+
+    by_location = {identity(row): row for row in planned}
+    valid = bool(planned) and len(by_location) == len(planned)
+    valid = valid and len({row["case_id"] for row in planned}) == len(planned)
+    valid = valid and len({identity(row) for row in observed}) == len(observed)
+    for row in observed:
+        expected = by_location.get(identity(row))
+        if expected is None:
+            planned.append(row)
+            valid = False
+        elif any(row[key] != expected[key] for key in ("case_id", "prompt")):
+            valid = False
+    if not valid:
+        warnings.append("assignment_inventory_invalid_or_batch_mismatch")
+    return planned, valid
 
 
 def _discover_rows(output_root: Path) -> list[dict[str, Any]]:
@@ -929,6 +994,75 @@ def _scene_metrics(
     row.update(_writer_metrics(scene_dir, trace, warnings))
     row.update(_repair_metrics(scene_dir, stages, warnings))
     row.update(_verification_metrics(stages))
+    costs = collect_attempt_costs(scene_dir, int(manifest_row["scene_index"]))
+    warnings.extend(costs["warnings"])
+    row["attempt_costs"] = costs
+    for key in (
+        "all_attempt_time_sec",
+        "all_attempt_cost_complete",
+        "observed_attempt_time_lower_bound_sec",
+        "all_attempt_trace_time_sec",
+    ):
+        row[key] = costs[key]
+    row["runtime_identity"] = trace.get("runtime_identity") or {}
+    usage_items = []
+    usage_warnings = []
+    checkpoints = {}
+    for attempt in costs["attempts"]:
+        attempt_dir = Path(attempt["scene_dir"])
+        activity_path = attempt_dir / "scene_expert/memory_activity.json"
+        activity = (
+            _read_json(activity_path, warnings) if activity_path.is_file() else {}
+        )
+        usage = collect_memory_usage(attempt_dir, activity)
+        usage_items.extend(
+            {**item, "scene_attempt": attempt["attempt"], "scene_dir": str(attempt_dir)}
+            for item in usage["items"]
+        )
+        usage_warnings.extend(usage["warnings"])
+        for stage, evidence in usage["initial_checkpoints"].items():
+            checkpoints.setdefault(stage, []).append(
+                {**evidence, "scene_attempt": attempt["attempt"]}
+            )
+    row["memory_usage"] = {
+        "schema_version": "memory-usage.v1",
+        "items": usage_items,
+        "warnings": usage_warnings,
+    }
+    row["checkpoint_stage"] = evaluation_contract.get("checkpoint_stage", "")
+    row["initial_checkpoints"] = checkpoints
+    warnings.extend(usage_warnings)
+    row["memory_prepared_stages"] = row["memory_injected_stages"]
+    # v9 no longer calls a prepared hash or source provenance delivery proof.
+    delivered = [item for item in usage_items if item["delivered"]]
+    row["memory_injected_stages"] = _unique(
+        item["stage"] for item in usage_items if item["payload_observed"]
+    )
+    row["memory_injection_verified_stages"] = _unique(
+        item["stage"] for item in delivered
+    )
+    current_task_id = (
+        "task_" + hashlib.sha256(row["prompt"].encode("utf-8")).hexdigest()[:16]
+    )
+    row["memory_cross_task_verified_stages"] = _unique(
+        item["stage"]
+        for item in delivered
+        if item["source_task_ids"]
+        and all(value != current_task_id for value in item["source_task_ids"])
+    )
+    for field, condition in (
+        ("payload_observed", "payload_observed"),
+        ("delivered", "delivered"),
+        ("action_observed", "action_observed"),
+        ("target_verified", "target_verified"),
+    ):
+        row[f"memory_{field}_count"] = sum(
+            item[condition] is True for item in usage_items
+        )
+        row[f"memory_{field}_unknown_count"] = sum(
+            item[condition] is None for item in usage_items
+        )
+    row["memory_accepted_count"] = sum(item["accepted"] for item in usage_items)
     return row
 
 
@@ -942,7 +1076,7 @@ def collect_run_metrics(
     root = Path(output_root).resolve()
     resolved_run_id = run_id or root.name
     warnings: list[str] = []
-    manifest_rows = _manifest_rows(root, warnings)
+    manifest_rows, assignment_inventory_complete = _assigned_rows(root, warnings)
     if not manifest_rows:
         warnings.append("no_critic_on_manifests:falling_back_to_scene_discovery")
         manifest_rows = _discover_rows(root)
@@ -1179,6 +1313,36 @@ def collect_run_metrics(
             ) + _as_int(count)
 
     summary = {
+        "all_attempt_cost_coverage": _rate(
+            sum(row["all_attempt_cost_complete"] for row in scene_rows), expected
+        ),
+        "all_assigned_attempt_time_sec": (
+            sum(row["all_attempt_time_sec"] for row in scene_rows)
+            if scene_rows
+            and all(row["all_attempt_cost_complete"] for row in scene_rows)
+            else None
+        ),
+        "memory_delivered_count": sum(
+            row["memory_delivered_count"] for row in scene_rows
+        ),
+        "memory_accepted_count": sum(
+            row["memory_accepted_count"] for row in scene_rows
+        ),
+        "memory_delivery_unknown_count": sum(
+            row["memory_delivered_unknown_count"] for row in scene_rows
+        ),
+        "memory_action_unknown_count": sum(
+            row["memory_action_observed_unknown_count"] for row in scene_rows
+        ),
+        "memory_target_unknown_count": sum(
+            row["memory_target_verified_unknown_count"] for row in scene_rows
+        ),
+        "memory_action_observed_count": sum(
+            row["memory_action_observed_count"] for row in scene_rows
+        ),
+        "memory_target_verified_count": sum(
+            row["memory_target_verified_count"] for row in scene_rows
+        ),
         "expected_scenes": expected,
         "completed_scenes": len(completed),
         "degraded_scenes": len(degraded),
@@ -1387,6 +1551,7 @@ def collect_run_metrics(
         "run_id": resolved_run_id,
         "output_root": str(root),
         "process_exit_code": process_exit_code,
+        "assignment_inventory_complete": assignment_inventory_complete,
         "quality_comparison_ready": quality_comparison_ready,
         "memory_closed_loop_observed": memory_closed_loop_observed,
         "experiment_identity": {
@@ -1488,6 +1653,15 @@ def _markdown(metrics: dict[str, Any]) -> str:
         "|---|---:|",
     ]
     for key in (
+        "all_attempt_cost_coverage",
+        "all_assigned_attempt_time_sec",
+        "memory_delivered_count",
+        "memory_accepted_count",
+        "memory_delivery_unknown_count",
+        "memory_action_unknown_count",
+        "memory_target_unknown_count",
+        "memory_action_observed_count",
+        "memory_target_verified_count",
         "expected_scenes",
         "completed_scenes",
         "degraded_scenes",
@@ -1605,6 +1779,29 @@ def write_run_metrics(metrics: dict[str, Any]) -> dict[str, str]:
         json.dumps(metrics, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
     )
     _atomic_write_text(run_md, _markdown(metrics))
+    for filename, field in (
+        ("memory_usage.json", "memory_usage"),
+        ("attempt_costs.json", "attempt_costs"),
+    ):
+        _atomic_write_text(
+            metrics_dir / filename,
+            json.dumps(
+                {
+                    "run_id": metrics.get("run_id"),
+                    "cases": [
+                        {
+                            "case_id": row.get("case_id"),
+                            "batch_id": row.get("batch_id"),
+                            **(row.get(field) or {}),
+                        }
+                        for row in metrics.get("scenes", [])
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
     _atomic_write_text(
         scene_jsonl,
         "".join(
@@ -1624,6 +1821,8 @@ def write_run_metrics(metrics: dict[str, Any]) -> dict[str, str]:
         "run_markdown": str(run_md),
         "scene_jsonl": str(scene_jsonl),
         "scene_csv": str(scene_csv),
+        "memory_usage": str(metrics_dir / "memory_usage.json"),
+        "attempt_costs": str(metrics_dir / "attempt_costs.json"),
     }
 
 

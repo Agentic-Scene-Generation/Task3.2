@@ -8,6 +8,7 @@ def _run(run_id: str, *, ready: bool, time_sec: float, critic: float) -> dict:
     arm = "memory_on" if treatment else "memory_off"
     return {
         "run_id": run_id,
+        "assignment_inventory_complete": True,
         "quality_comparison_ready": ready,
         "experiment_identity": {
             "experiment_names": ["ablation_5_qwen3_full"],
@@ -54,6 +55,20 @@ def _run(run_id: str, *, ready: bool, time_sec: float, critic: float) -> dict:
                 "quality_status": "passed" if ready else "degraded",
                 "required_coverage": critic,
                 "trace_time_sec": time_sec,
+                "control_signature": "stable-full-control-signature",
+                "source_bundle_hash": "stable-source-bundle",
+                "all_attempt_time_sec": time_sec,
+                "all_attempt_cost_complete": True,
+                "memory_usage": {"schema_version": "memory-usage.v1"},
+                "runtime_identity": {
+                    "software": {"python": "test-runtime"},
+                    "resource_class": "gpu-test",
+                    "service_deployment": "model-config-hash",
+                },
+                "checkpoint_stage": "furniture",
+                "initial_checkpoints": {
+                    "furniture": [{"fingerprint": "initial-state"}]
+                },
                 "critic_score": critic,
                 "sceneexpert_overall_score": critic - 0.1,
                 "hard_constraint_pass": True,

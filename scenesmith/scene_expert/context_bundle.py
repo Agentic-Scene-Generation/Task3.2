@@ -19,6 +19,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from scenesmith.scene_expert.memory.delivery import prepare_memory_delivery
+from scenesmith.scene_expert.memory.state import build_memory_scene_state
 from scenesmith.scene_expert.schemas import (
     MemoryPack,
     SceneTaskSpec,
@@ -139,6 +140,7 @@ class StageContextBundle(BaseModel):
     prompt_profile: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     memory_delivery: dict[str, Any] = Field(default_factory=dict)
+    decision_state: dict[str, Any] = Field(default_factory=dict)
 
     def to_llm_text(self, max_chars: int = 3200) -> str:
         """Return a concise human-readable context block for agent prompts."""
@@ -410,6 +412,7 @@ def build_stage_context_bundle(
         },
         metadata=metadata or {},
         memory_delivery=memory_delivery,
+        decision_state=build_memory_scene_state(scene),
     )
 
 

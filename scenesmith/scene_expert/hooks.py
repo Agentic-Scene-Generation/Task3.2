@@ -1215,6 +1215,7 @@ class SceneExpertHookRunner:
         verify_report: StageVerifyReport | None,
         repair_actions: list[RepairResult],
         scene_state_path: str,
+        scene: RoomScene | None = None,
     ) -> None:
         """Persist the critic outcome linked to the exact retrieved records."""
         try:
@@ -1223,6 +1224,9 @@ class SceneExpertHookRunner:
                 verify_report=verify_report,
                 repair_actions=repair_actions,
                 scene_state_path=scene_state_path,
+                current_scene_state=(
+                    build_memory_scene_state(scene) if scene is not None else None
+                ),
             )
             if isinstance(observations, list):
                 pending = list(getattr(self, "_pending_skill_observations", []))
@@ -2175,6 +2179,7 @@ class SceneExpertHookRunner:
             verify_report=verify_report,
             repair_actions=repair_actions,
             scene_state_path=str(room_dir),
+            scene=scene,
         )
         trajectory_collector = getattr(self, "_trajectory_collector", None)
         if trajectory_collector is not None:
@@ -3476,6 +3481,7 @@ def build_hook_runner(
             "memory_read_only": bool(memory_store and memory_store.read_only),
             "shared_base_identity": shared_base_identity,
             "compiled_inputs_identity": compiled_inputs_identity,
+            "checkpoint_stage": str(pipeline_cfg.get("start_stage") or "floor_plan"),
         }
         if evaluation_requested
         else {}

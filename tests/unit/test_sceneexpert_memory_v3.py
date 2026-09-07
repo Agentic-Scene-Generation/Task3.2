@@ -308,6 +308,8 @@ def test_memory_activity_links_selection_injection_and_outcome() -> None:
     assert stage["injection"]["selected_memory_ids"] == ["success_1"]
     assert stage["utility_observations"][0]["outcome"] == "unknown"
     assert stage["utility_observations"][0]["stage_passed"] is True
-    assert stage["utility_observations"][0]["injected"] is True
+    assert (
+        stage["utility_observations"][0]["injected"] is False
+    )  # Preparation is not request evidence.
     assert stage["utility_observations"][0]["task_id"] == "task_current"
     assert stage["utility_observations"][0]["run_id"] == "run_current"

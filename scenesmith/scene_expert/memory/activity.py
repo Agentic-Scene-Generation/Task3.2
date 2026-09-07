@@ -7,10 +7,12 @@ import os
 import re
 import time
 
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from scenesmith.scene_expert.memory.schemas import MemoryUtilityObservation
+from scenesmith.scene_expert.memory.usage import collect_memory_usage
 from scenesmith.scene_expert.schemas import (
     MemoryInjectionBundle,
     MemoryPack,
@@ -63,7 +65,14 @@ class MemoryActivityLogger:
         execution_evidence: StageExecutionEvidence,
     ) -> None:
         """Record every retrieval choice and the exact downstream injection."""
-        stage_entry = self._payload["stages"].setdefault(stage, {})
+        previous = self._payload["stages"].get(stage)
+        if previous:
+            self._payload.setdefault("stage_attempt_history", []).append(
+                {"stage": stage, "entry": deepcopy(previous)}
+            )
+        stage_entry = self._payload["stages"][stage] = {
+            "prepared_at_epoch": time.time()
+        }
         stage_entry.update(
             {
                 "retrieval": memory_pack.model_dump(mode="json"),
@@ -86,6 +95,7 @@ class MemoryActivityLogger:
         verify_report: StageVerifyReport | None,
         repair_actions: list[Any],
         scene_state_path: str,
+        current_scene_state: dict | None = None,
     ) -> list[MemoryUtilityObservation]:
         """Attach the authoritative critic result to the selected memory."""
         stage_entry = self._payload["stages"].setdefault(stage, {})
@@ -146,6 +156,8 @@ class MemoryActivityLogger:
         stage_entry.update(
             {
                 "scene_state_path": scene_state_path,
+                "post_scene_state": current_scene_state or {},
+                "finished_at_epoch": time.time(),
                 "verify_report": (
                     verify_report.model_dump(mode="json")
                     if verify_report is not None
@@ -164,6 +176,42 @@ class MemoryActivityLogger:
                 ],
             }
         )
+        # Reconcile at a completed request boundary, not from a pre-stage marker.
+        usage = collect_memory_usage(
+            self._output_dir.parent, self._payload, stage_filter=stage
+        )
+        stage_entry["decision_usage"] = usage
+        by_identity = {
+            (row["memory_type"], row["memory_id"]): row for row in usage["items"]
+        }
+        if injection.get("schema_version") == "memory-context.v1":
+            for observation in observations:
+                row = by_identity.get(
+                    (observation.memory_type, observation.memory_id), {}
+                )
+                observation.injected = bool(row.get("delivered"))
+                observation.prompt_delivered = observation.injected
+                observation.planner_selected = bool(row.get("accepted"))
+                observation.action_observed = row.get("action_observed")
+                observation.target_verified = row.get("target_verified")
+                observation.decision_evidence_refs = [
+                    request["payload_ref"] for request in row.get("requests", [])
+                ]
+                observation.outcome = "unknown"
+                observation.outcome_basis = "no_verified_related_action"
+                if (
+                    row.get("action_observed") is True
+                    and row.get("target_verified") is not None
+                ):
+                    observation.outcome = (
+                        "positive" if row["target_verified"] else "negative"
+                    )
+                    observation.outcome_basis = (
+                        "related_action_and_exact_target_outcome_not_causal"
+                    )
+            stage_entry["utility_observations"] = [
+                row.model_dump(mode="json") for row in observations
+            ]
         self._save()
         return observations
 

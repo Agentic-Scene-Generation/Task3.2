@@ -140,6 +140,7 @@ run_arm() {
     SCENEEXPERT_EVAL_PAIR_ID="$PAIR_ID" \
     SCENEEXPERT_EVAL_DIMENSION=fast_memory_retrieval \
     SCENEEXPERT_EVAL_ARM="$arm" \
+    SCENEEXPERT_EVAL_ARM_ORDER="$ARM_ORDER" \
     SCENEEXPERT_EVAL_REQUIRE_FROZEN_MEMORY=true \
     SCENEEXPERT_EVAL_COMPILED_INPUTS_DIR="$COMPILED_INPUTS_DIR" \
     bash "$FULL_REUSE_LAUNCHER"
@@ -160,14 +161,20 @@ generate_pair_metrics() {
 
 case "$PAIR_ACTION" in
   both)
+    off_rc=0
+    on_rc=0
     if [[ "$ARM_ORDER" == "off_on" ]]; then
-      run_arm memory_off false "$BASELINE_RUN_ID"
-      run_arm memory_on true "$TREATMENT_RUN_ID"
+      run_arm memory_off false "$BASELINE_RUN_ID" || off_rc=$?
+      run_arm memory_on true "$TREATMENT_RUN_ID" || on_rc=$?
     else
-      run_arm memory_on true "$TREATMENT_RUN_ID"
-      run_arm memory_off false "$BASELINE_RUN_ID"
+      run_arm memory_on true "$TREATMENT_RUN_ID" || on_rc=$?
+      run_arm memory_off false "$BASELINE_RUN_ID" || off_rc=$?
     fi
     generate_pair_metrics
+    if (( off_rc != 0 || on_rc != 0 )); then
+      echo "WARNING: pair retained failed arms: memory_off=$off_rc memory_on=$on_rc" >&2
+      exit 1
+    fi
     ;;
   memory_off)
     run_arm memory_off false "$BASELINE_RUN_ID"

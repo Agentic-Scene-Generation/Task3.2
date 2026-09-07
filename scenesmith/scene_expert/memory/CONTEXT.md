@@ -85,9 +85,10 @@ Under each scene's `scene_expert` directory:
 Pre-stage `designer_prompt_contains_memory` can now be false because delivery
 happens later. Do not interpret that old aggregate as retrieval being off or
 use the prepared `prompt_delivered_skill_names` list as observed application.
-Decision evidence and aggregate reconciliation, all-attempt costs, and paired
-benefit evaluation are the separate third commit. This change does not prove
-positive scene-generation gains or claim full server validation.
+Request-level reconciliation and all-attempt costs now live in
+[EVALUATION.md](EVALUATION.md). Use the v9 metrics and per-item decision_usage,
+not the pre-stage flag, for delivery auditing. These engineering checks do not
+prove positive scene-generation gains or constitute full server validation.
 
 ## Checks
 

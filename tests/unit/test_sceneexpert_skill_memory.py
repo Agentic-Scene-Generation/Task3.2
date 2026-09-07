@@ -312,9 +312,9 @@ def test_skill_funnel_labels_relevant_hard_failure_without_causal_claim() -> Non
     observation = observations[0]
     assert observation.retrieved
     assert observation.planner_selected
-    assert observation.prompt_delivered
-    assert observation.outcome == "negative"
-    assert observation.outcome_basis == "relevant_hard_failure_after_skill_delivery"
+    assert not observation.prompt_delivered
+    assert observation.outcome == "unknown"
+    assert observation.outcome_basis == "no_verified_related_action"
 
 
 def test_only_independent_skill_evidence_refines_and_repeated_harm_quarantines() -> (

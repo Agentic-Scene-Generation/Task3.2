@@ -209,6 +209,9 @@ class MemoryUtilityObservation(BaseModel):
     retrieved: bool = True
     planner_selected: bool = False
     prompt_delivered: bool = False
+    action_observed: bool | None = None
+    target_verified: bool | None = None
+    decision_evidence_refs: list[str] = Field(default_factory=list)
     stage_passed: bool | None = None
     quality_delta: float | None = None
     latency_delta_sec: float | None = None

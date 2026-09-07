@@ -11,10 +11,13 @@ import hashlib
 import json
 import logging
 import os
+import platform
 import shutil
+import socket
 import subprocess
 import time
 
+from importlib import metadata
 from pathlib import Path
 from typing import Iterable
 
@@ -133,6 +136,20 @@ def collect_code_provenance(
     provenance["dirty"] = bool(status) if revision else None
 
     resolved_source_paths = list(source_paths)
+    if source_paths is _DEFAULT_CODE_PROVENANCE_PATHS:
+        # Imported helpers and prompt/config changes are experiment inputs too.
+        # No Git worktree is required to hash their actual source bytes.
+        for directory, extensions in (
+            ("scenesmith", {".py", ".yaml", ".yml"}),
+            ("configurations", {".yaml", ".yml"}),
+            ("scripts", {".py", ".sh"}),
+        ):
+            resolved_source_paths.extend(
+                path.relative_to(root).as_posix()
+                for path in (root / directory).rglob("*")
+                if path.is_file() and path.suffix in extensions
+            )
+        resolved_source_paths = sorted(set(resolved_source_paths))
     entrypoint = str(os.environ.get("ACP_ENTRYPOINT") or "").strip()
     if entrypoint:
         try:
@@ -241,6 +258,51 @@ class TraceLogger:
         }
         self._stage_entries: list[StageTraceEntry] = []
         self._start_time = time.time()
+        self._runtime_identity = {
+            "schema_version": "memory-runtime.v1",
+            "hostname": socket.gethostname(),
+            "pid": os.getpid(),
+            "resource_class": os.environ.get("SCENEEXPERT_EVAL_RESOURCE_CLASS", ""),
+            "service_deployment": os.environ.get(
+                "SCENEEXPERT_EVAL_SERVICE_DEPLOYMENT", ""
+            ),
+            "service_instance": os.environ.get("SCENEEXPERT_EVAL_SERVICE_INSTANCE", ""),
+            "arm_order": os.environ.get("SCENEEXPERT_EVAL_ARM_ORDER", ""),
+            "scene_started_at": "",
+            "checkpoint_plan_hash": "",
+            "software": {"python": platform.python_version()},
+        }
+        for package in ("openai", "openai-agents", "drake", "bpy", "numpy", "zvec"):
+            try:
+                self._runtime_identity["software"][package] = metadata.version(package)
+            except (metadata.PackageNotFoundError, OSError, ValueError):
+                self._runtime_identity["software"][package] = "unavailable"
+        plan_path = os.environ.get("SCENEEXPERT_EVAL_CHECKPOINT_PLAN", "")
+        if plan_path:
+            try:
+                from scenesmith.scene_expert.checkpoint_evaluation import verify
+
+                plan = json.loads(Path(plan_path).read_text(encoding="utf-8"))
+                errors = verify(plan)
+                self._runtime_identity["checkpoint_plan_errors"] = errors
+                if not errors:
+                    self._runtime_identity["checkpoint_plan_hash"] = plan[
+                        "manifest_hash"
+                    ]
+            except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+                self._runtime_identity["checkpoint_plan_errors"] = [type(exc).__name__]
+        try:
+            status = json.loads(
+                (self._output_dir / self._scene_id / "scene_status.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            if status.get("status") == "running":
+                self._runtime_identity["scene_started_at"] = status.get(
+                    "updated_at", ""
+                )
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass  # Unknown timing is reported as unknown, never inferred from mtime.
         self._full_report: FullVerifyReport | None = None
         self._exports: dict = {}
         self._task_compiler: dict = {}
@@ -465,6 +527,7 @@ class TraceLogger:
             "task_spec": self._task_spec,
             "model": model,
             "total_time_sec": round(time.time() - self._start_time, 1),
+            "runtime_identity": self._runtime_identity,
             "stages": [entry.model_dump() for entry in self._stage_entries],
             "final_report": full_report.model_dump(),
             "exports": exports,
@@ -495,6 +558,7 @@ class TraceLogger:
             "intent_compiler": self._intent_compiler,
             "task_spec": self._task_spec,
             "total_time_sec": round(time.time() - self._start_time, 1),
+            "runtime_identity": self._runtime_identity,
             "stages": [entry.model_dump() for entry in self._stage_entries],
         }
         path = self._trace_debug_dir / f"{self._trace_id}_partial.json"

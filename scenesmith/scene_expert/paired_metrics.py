@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import statistics
@@ -12,10 +13,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from scenesmith.scene_expert.evaluation_costs import timestamp
 from scenesmith.scene_expert.experiment_identity import stable_source_bundle_hash
 
-SCHEMA_VERSION = "sceneexpert.paired_metrics.v5"
+SCHEMA_VERSION = "sceneexpert.paired_metrics.v6"
 PAIR_COLUMNS = (
+    "baseline_final_trace_time_sec",
+    "treatment_final_trace_time_sec",
+    "runtime_resource_match",
+    "all_attempt_cost_complete",
     "case_id",
     "prompt_match",
     "shared_base_match",
@@ -71,7 +77,8 @@ def _number(value: Any) -> float | None:
     if value is None or value == "":
         return None
     try:
-        return float(value)
+        number = float(value)
+        return number if math.isfinite(number) else None
     except (TypeError, ValueError):
         return None
 
@@ -323,11 +330,19 @@ def compare_run_metrics(
     prompt_mismatch = False
     shared_base_mismatch = False
     compiled_input_mismatch = False
-    for case_id in sorted(baseline_cases & treatment_cases):
-        before = baseline_rows[case_id]
-        after = treatment_rows[case_id]
-        before_time = _number(before.get("trace_time_sec"))
-        after_time = _number(after.get("trace_time_sec"))
+    for case_id in sorted(baseline_cases | treatment_cases):
+        before = baseline_rows.get(case_id, {})
+        after = treatment_rows.get(case_id, {})
+        before_time = (
+            _number(before.get("all_attempt_time_sec"))
+            if before.get("all_attempt_cost_complete") is True
+            else None
+        )
+        after_time = (
+            _number(after.get("all_attempt_time_sec"))
+            if after.get("all_attempt_cost_complete") is True
+            else None
+        )
         before_critic = _number(before.get("critic_score"))
         after_critic = _number(after.get("critic_score"))
         before_wrapper = _number(before.get("sceneexpert_overall_score"))
@@ -374,6 +389,72 @@ def compare_run_metrics(
         pairs.append(
             {
                 "case_id": case_id,
+                "task_id": "task_"
+                + hashlib.sha256(
+                    str(before.get("prompt") or "").encode("utf-8")
+                ).hexdigest()[:16],
+                "fixed_input_identity": {
+                    "shared_base_fingerprint": before.get("shared_base_fingerprint"),
+                    "task_spec_fingerprint": before.get("task_spec_fingerprint"),
+                    "intent_contract_fingerprint": before.get(
+                        "intent_contract_fingerprint"
+                    ),
+                    "decision_state_fingerprint": next(
+                        iter(
+                            (before.get("initial_checkpoints") or {}).get(
+                                before.get("checkpoint_stage"), []
+                            )
+                        ),
+                        {},
+                    ).get("fingerprint"),
+                },
+                "baseline_final_trace_time_sec": _number(before.get("trace_time_sec")),
+                "treatment_final_trace_time_sec": _number(after.get("trace_time_sec")),
+                "all_attempt_cost_complete": before_time is not None
+                and after_time is not None,
+                "runtime_software_match": bool(
+                    (before.get("runtime_identity") or {}).get("software")
+                )
+                and (before.get("runtime_identity") or {}).get("software")
+                == (after.get("runtime_identity") or {}).get("software"),
+                "runtime_resource_match": all(
+                    bool((before.get("runtime_identity") or {}).get(key))
+                    and (before.get("runtime_identity") or {}).get(key)
+                    == (after.get("runtime_identity") or {}).get(key)
+                    for key in ("resource_class", "service_deployment")
+                ),
+                "per_case_execution_identity_match": all(
+                    bool(before.get(key)) and before.get(key) == after.get(key)
+                    for key in ("control_signature", "source_bundle_hash")
+                ),
+                "decision_checkpoint_match": bool(before.get("checkpoint_stage"))
+                and before.get("checkpoint_stage") == after.get("checkpoint_stage")
+                and bool(
+                    (before.get("initial_checkpoints") or {}).get(
+                        before.get("checkpoint_stage")
+                    )
+                )
+                and {
+                    item.get("fingerprint")
+                    for item in (before.get("initial_checkpoints") or {}).get(
+                        before.get("checkpoint_stage"), []
+                    )
+                }
+                == {
+                    item.get("fingerprint")
+                    for item in (after.get("initial_checkpoints") or {}).get(
+                        after.get("checkpoint_stage"), []
+                    )
+                }
+                and len(
+                    {
+                        item.get("fingerprint")
+                        for item in (before.get("initial_checkpoints") or {}).get(
+                            before.get("checkpoint_stage"), []
+                        )
+                    }
+                )
+                == 1,
                 "prompt_match": prompt_match,
                 "shared_base_match": shared_base_match,
                 "compiled_input_match": compiled_input_match,
@@ -457,6 +538,17 @@ def compare_run_metrics(
     )
     if compiled_input_mismatch:
         warnings.append("compiled_input_fingerprint_mismatch")
+    identity_checks["decision_checkpoint.per_case_fingerprint"] = bool(pairs) and all(
+        row["decision_checkpoint_match"] for row in pairs
+    )
+    identity_checks["execution.per_case_identity"] = bool(pairs) and all(
+        row["per_case_execution_identity_match"] for row in pairs
+    )
+    identity_checks["execution.runtime_software"] = bool(pairs) and all(
+        row["runtime_software_match"] for row in pairs
+    )
+    if not identity_checks["decision_checkpoint.per_case_fingerprint"]:
+        warnings.append("initial_decision_checkpoint_missing_or_mismatched")
 
     baseline_ready = bool(baseline.get("quality_comparison_ready"))
     treatment_ready = bool(treatment.get("quality_comparison_ready"))
@@ -501,6 +593,19 @@ def compare_run_metrics(
         warnings.append("baseline_memory_delivery_not_isolated")
     if not treatment_delivery_observed:
         warnings.append("treatment_memory_delivery_not_observed")
+    evidence_protocol = all(
+        (row.get("memory_usage") or {}).get("schema_version") == "memory-usage.v1"
+        for row in [*baseline_rows.values(), *treatment_rows.values()]
+    )
+    identity_checks["memory_delivery.request_evidence_protocol"] = evidence_protocol
+    identity_checks["assignment.complete_inventory"] = (
+        baseline.get("assignment_inventory_complete") is True
+        and treatment.get("assignment_inventory_complete") is True
+    )
+    if not identity_checks["assignment.complete_inventory"]:
+        warnings.append("assigned_case_inventory_missing_or_invalid")
+    if not evidence_protocol:
+        warnings.append("legacy_memory_delivery_requires_request_evidence_recollection")
     required_identity_keys = {
         "control_signatures",
         "models",
@@ -517,16 +622,25 @@ def compare_run_metrics(
         "evaluation_contract.task_spec_fingerprints",
         "evaluation_contract.intent_contract_fingerprints",
         "shared_base.per_case_fingerprint",
+        "decision_checkpoint.per_case_fingerprint",
+        "execution.per_case_identity",
+        "execution.runtime_software",
         "compiled_inputs.per_case_fingerprint",
         "component_flags.baseline_memory_off_full",
         "component_flags.treatment_memory_on_full",
         "memory_delivery.baseline_isolated",
         "memory_delivery.treatment_cross_task_injected",
+        "memory_delivery.request_evidence_protocol",
+        "assignment.complete_inventory",
     }
     outcome_comparison_ready = bool(
         pairs
         and baseline_cases == treatment_cases
         and not prompt_mismatch
+        and not any(
+            "duplicate_case_id" in warning or "scene_missing_case_id" in warning
+            for warning in warnings
+        )
         and all(identity_checks.get(key, False) for key in required_identity_keys)
     )
     completed_pairs = [
@@ -541,24 +655,75 @@ def compare_run_metrics(
         and baseline_ready
         and treatment_ready
     )
+    speed_comparison_ready = outcome_comparison_ready and all(
+        row["all_attempt_cost_complete"] and row["runtime_resource_match"]
+        for row in pairs
+    )
+    if not speed_comparison_ready:
+        warnings.append(
+            "speed_claim_blocked_missing_all_attempt_cost_or_runtime_controls"
+        )
     claim_status = "not_ready"
     if quality_delta_ready:
         claim_status = "paired_quality_and_outcomes_ready"
     elif outcome_comparison_ready:
         claim_status = "paired_outcomes_ready_with_partial_quality"
+    runtime_rows = [
+        (row.get("runtime_identity") or {})
+        for row in [*baseline_rows.values(), *treatment_rows.values()]
+    ]
+    plan_hashes = {row.get("checkpoint_plan_hash") for row in runtime_rows}
     return {
         "schema_version": SCHEMA_VERSION,
+        "checkpoint_plan_hash": (
+            next(iter(plan_hashes)) if len(plan_hashes) == 1 else None
+        ),
+        "earliest_scene_started_at": min(
+            (
+                str(row.get("scene_started_at"))
+                for row in runtime_rows
+                if timestamp(row.get("scene_started_at", "")) is not None
+            ),
+            key=lambda value: timestamp(value),
+            default="",
+        ),
+        "arm_orders": sorted(
+            {str(row.get("arm_order")) for row in runtime_rows if row.get("arm_order")}
+        ),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "baseline_run_id": str(baseline.get("run_id") or ""),
         "treatment_run_id": str(treatment.get("run_id") or ""),
         "comparison_ready": outcome_comparison_ready,
         "outcome_comparison_ready": outcome_comparison_ready,
         "quality_delta_ready": quality_delta_ready,
+        "speed_comparison_ready": speed_comparison_ready,
+        "gain_decision": "requires_preregistered_acceptance_and_balanced_repetition",
+        "interpretation": "All assigned cases are retained. Time uses all-attempt scene service time, not the last trace; completed-pair quality is auxiliary. Readiness is not proof of positive or causal benefit. Runtime labels are operator declarations, not verified hardware equivalence.",
         "claim_status": claim_status,
         "identity_checks": identity_checks,
         "data_quality_warnings": sorted(set(warnings)),
         "summary": {
             "paired_cases": len(pairs),
+            "baseline_assigned_cases": len(baseline_cases),
+            "treatment_assigned_cases": len(treatment_cases),
+            "all_assigned_mean_time_delta_sec": (
+                _mean(row["time_delta_sec"] for row in pairs)
+                if speed_comparison_ready
+                else None
+            ),
+            "all_assigned_total_time_delta_sec": (
+                round(sum(row["time_delta_sec"] for row in pairs), 6)
+                if speed_comparison_ready
+                else None
+            ),
+            "baseline_failed_or_incomplete_cases": sum(
+                not _is_completed(str(row.get("status") or ""))
+                for row in baseline_rows.values()
+            ),
+            "treatment_failed_or_incomplete_cases": sum(
+                not _is_completed(str(row.get("status") or ""))
+                for row in treatment_rows.values()
+            ),
             "completed_pairs": len(completed_pairs),
             "rescued_cases": sum(
                 row["outcome_transition"] == "rescued" for row in pairs
@@ -677,6 +842,10 @@ def write_paired_metrics(
         f"- Treatment: `{metrics['treatment_run_id']}`",
         f"- Comparison ready: `{str(metrics['comparison_ready']).lower()}`",
         f"- Claim status: `{metrics['claim_status']}`",
+        f"- Speed comparison ready: `{metrics.get('speed_comparison_ready', False)}`",
+        "- Time deltas use the full per-case attempt span, including retries; final-trace timing is auxiliary.",
+        "- Readiness is not a positive-gain verdict. All assigned outcomes are retained; jointly completed quality is a selected subset.",
+        "- Runtime resource labels are operator declarations. Missing labels or costs block speed claims.",
         "",
         "## Paired KPIs",
         "",
