@@ -1212,6 +1212,35 @@ def test_planner_terminal_child_failure_skips_no_mutation_recovery(monkeypatch) 
     assert run.await_count == 1
 
 
+@pytest.mark.parametrize(
+    ("root_error_type", "expected_retryable"),
+    [("MaxTurnsExceeded", True), ("UnknownAgentError", False)],
+)
+def test_planner_child_failure_uses_exact_retryable_root_types(
+    root_error_type: str, expected_retryable: bool
+) -> None:
+    agent = _ReviewPlannerAgent()
+    agent._planner_designer_workflow_calls = 1
+    agent._planner_successful_designer_mutations = 0
+    agent._stage_execution_attempt = 2
+
+    failure = agent._planner_child_failure(
+        {
+            "operation": "request_initial_design",
+            "child_agent": "designer",
+            "error_type": root_error_type,
+            "error": "Max turns (20) exceeded",
+            "recovered": False,
+        }
+    )
+
+    assert failure.reason == "child_failure"
+    assert failure.stage == "furniture"
+    assert failure.root_error_type == root_error_type
+    assert failure.retryable is expected_retryable
+    assert failure.stage_execution_attempt == 2
+
+
 def test_planner_no_mutation_recovery_reports_called_workflow(monkeypatch) -> None:
     agent = _ReviewPlannerAgent()
     agent._planner_successful_designer_mutations = 0

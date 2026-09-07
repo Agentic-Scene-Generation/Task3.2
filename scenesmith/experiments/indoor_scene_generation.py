@@ -39,6 +39,7 @@ from scenesmith.agent_utils.physical_feasibility import (
     apply_physical_feasibility_postprocessing,
 )
 from scenesmith.agent_utils.room import AgentType, ObjectType, RoomScene
+from scenesmith.agent_utils.scene_analyzer import VLMResponseFormatError
 from scenesmith.agent_utils.sceneeval_exporter import (
     SceneEvalExportConfig,
     SceneEvalExporter,
@@ -124,6 +125,9 @@ _TRANSIENT_RUNTIME_ERROR_TYPES = frozenset(
         "APIConnectionError",
         "ConnectionError",
     }
+)
+_RETRYABLE_SCENE_CHILD_ROOT_ERROR_TYPES = _TRANSIENT_RUNTIME_ERROR_TYPES.union(
+    {"MaxTurnsExceeded"}
 )
 
 
@@ -506,6 +510,14 @@ def _scene_failure_record(error: Exception, *, attempt: int) -> dict[str, Any]:
             "compiler_attempts": len(attempts) if isinstance(attempts, list) else 0,
             "compiler_schema_version": str(trace.get("schema_version") or ""),
         }
+    elif isinstance(error, VLMResponseFormatError):
+        stage = error.stage
+        reason = error.reason
+        retryable = True
+        provenance = {
+            "analysis_attempts": error.attempts,
+            "response_preview": error.response_preview,
+        }
     elif isinstance(error, PlannerStageFailure):
         reason = error.reason
         operation = error.operation
@@ -813,6 +825,12 @@ def _is_retryable_scene_failure(
         "worker_process_failure",
     ):
         return True
+    if failure_key == (
+        "scene_runtime_failure",
+        "VLMResponseFormatError",
+        "invalid_model_response",
+    ):
+        return failure["stage"] == "manipuland"
     return bool(
         failure_key
         == (
@@ -820,7 +838,7 @@ def _is_retryable_scene_failure(
             "PlannerStageFailure",
             "child_failure",
         )
-        and failure["root_error_type"] in _TRANSIENT_RUNTIME_ERROR_TYPES
+        and failure["root_error_type"] in _RETRYABLE_SCENE_CHILD_ROOT_ERROR_TYPES
     )
 
 
