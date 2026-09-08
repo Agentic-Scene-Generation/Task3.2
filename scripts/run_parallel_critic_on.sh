@@ -337,6 +337,10 @@ QUALITY_FAILURE_POLICY="${QUALITY_FAILURE_POLICY:-degraded}"
 # A typed scene-local failure remains visible in artifacts and metrics but does
 # not block critic-probe batches. Shared-base generation overrides this to strict.
 SCENE_FAILURE_POLICY="${SCENE_FAILURE_POLICY:-record}"
+# Stream active Chat Completions so the HTTP read timeout measures idle time,
+# not the total duration of a long llama.cpp generation. The client wrapper
+# assembles the chunks back into the standard non-streaming response contract.
+SCENEEXPERT_CHAT_COMPLETIONS_STREAM="${SCENEEXPERT_CHAT_COMPLETIONS_STREAM:-true}"
 BRANCH_FROM_SHARED_BASE="${BRANCH_FROM_SHARED_BASE:-false}"
 SHARED_BASE_STOP_STAGE="${SHARED_BASE_STOP_STAGE:-floor_plan}"
 SHARED_BASE_ROOT="${SHARED_BASE_ROOT:-}"
@@ -675,6 +679,10 @@ if [[ "$SCENE_FAILURE_POLICY" != "strict" && "$SCENE_FAILURE_POLICY" != "record"
     echo "ERROR: SCENE_FAILURE_POLICY must be strict or record" >&2
     exit 1
 fi
+if ! SCENEEXPERT_CHAT_COMPLETIONS_STREAM="$(normalize_bool "$SCENEEXPERT_CHAT_COMPLETIONS_STREAM")"; then
+    echo "ERROR: SCENEEXPERT_CHAT_COMPLETIONS_STREAM must be true or false" >&2
+    exit 1
+fi
 if ! CRITIC_PROBE_RENDER_FINAL_VIEWS="$(normalize_bool "$CRITIC_PROBE_RENDER_FINAL_VIEWS")"; then
     echo "ERROR: CRITIC_PROBE_RENDER_FINAL_VIEWS must be true or false" >&2
     exit 1
@@ -1002,6 +1010,7 @@ export SCENEEXPERT_DISABLE_BWRAP="$DISABLE_BWRAP"
 export SCENEEXPERT_SKIP_MAIN_BPY_IMPORT="$SKIP_MAIN_BPY_IMPORT"
 export FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS
 export QUALITY_FAILURE_POLICY SCENE_FAILURE_POLICY
+export SCENEEXPERT_CHAT_COMPLETIONS_STREAM
 export HSSD_RETRIEVAL_BACKEND HSSD_RENDERED_ASSET_CHOICE
 export HSSD_ZVEC_COLLECTION_PATH
 export CONVEX_MAX_OMP_THREADS SCENEEXPERT_OMP_NUM_THREADS
@@ -1099,6 +1108,7 @@ echo "final-view parallelism: $CRITIC_PROBE_FINAL_VIEW_PARALLELISM"
 echo "fail unresolved furniture hard constraints: $FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS"
 echo "quality failure policy: $QUALITY_FAILURE_POLICY"
 echo "critic-on scene failure policy: $SCENE_FAILURE_POLICY (shared-base: strict)"
+echo "Chat Completions streaming: $SCENEEXPERT_CHAT_COMPLETIONS_STREAM"
 echo "HSSD retrieval: backend=$HSSD_RETRIEVAL_BACKEND rendered_asset_choice=$HSSD_RENDERED_ASSET_CHOICE"
 if [ "$HSSD_RETRIEVAL_BACKEND" = "embedding" ]; then
     if [ -z "$HSSD_ZVEC_COLLECTION_PATH" ]; then
