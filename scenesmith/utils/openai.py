@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import time
 
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from io import BytesIO
@@ -17,7 +18,7 @@ from typing import Any, AsyncIterator
 
 import numpy as np
 
-from openai import AsyncOpenAI, OpenAI
+from openai import APIConnectionError, AsyncOpenAI, Omit, OpenAI
 from PIL import Image
 
 from scenesmith.agent_utils.thinking import openrouter_extra_body
@@ -133,6 +134,26 @@ def should_use_reasoning_stream() -> bool:
         return False
     # "auto" mode: could add model-specific detection here
     return False
+
+
+def should_use_chat_completions_stream() -> bool:
+    """Return whether non-streaming Chat Completions should use SSE transport.
+
+    The library default stays disabled so unrelated callers retain their
+    existing transport contract. Operational runners can opt in with
+    SCENEEXPERT_CHAT_COMPLETIONS_STREAM. Invalid values fail before a request
+    is sent instead of silently selecting the wrong timeout behavior.
+    """
+    raw_value = os.environ.get("SCENEEXPERT_CHAT_COMPLETIONS_STREAM", "false")
+    normalized = raw_value.strip().lower()
+    if normalized in ("true", "1", "yes", "y", "on"):
+        return True
+    if normalized in ("false", "0", "no", "n", "off", ""):
+        return False
+    raise ValueError(
+        "SCENEEXPERT_CHAT_COMPLETIONS_STREAM must be true or false; "
+        f"got {raw_value!r}"
+    )
 
 
 @dataclass(frozen=True)
@@ -793,7 +814,7 @@ def _assemble_stream_response(stream: Any) -> Any:
     accumulator = _ChatStreamAccumulator()
     for chunk in stream:
         accumulator.consume(chunk)
-    return accumulator.build()
+    return _build_completed_stream_response(accumulator, stream)
 
 
 async def _assemble_async_stream_response(stream: Any) -> Any:
@@ -801,16 +822,112 @@ async def _assemble_async_stream_response(stream: Any) -> Any:
     accumulator = _ChatStreamAccumulator()
     async for chunk in stream:
         accumulator.consume(chunk)
+    return _build_completed_stream_response(accumulator, stream)
+
+
+def _build_completed_stream_response(
+    accumulator: _ChatStreamAccumulator,
+    stream: Any,
+) -> Any:
+    """Reject a clean-but-incomplete SSE body instead of returning partial data."""
+    if accumulator.finish_reason is None:
+        message = "Chat Completions stream ended before a finish_reason was received"
+        response = getattr(stream, "response", None)
+        request = getattr(response, "request", None)
+        if request is not None:
+            raise APIConnectionError(message=message, request=request)
+        raise RuntimeError(message)
     return accumulator.build()
 
 
-def _enable_reasoning_stream_options(kwargs: dict[str, Any]) -> None:
+def _enable_stream_usage_options(kwargs: dict[str, Any]) -> None:
     """Request usage in the final chunk while preserving caller options."""
     stream_options = kwargs.get("stream_options")
     if isinstance(stream_options, dict):
         kwargs["stream_options"] = {**stream_options, "include_usage": True}
     else:
         kwargs["stream_options"] = {"include_usage": True}
+
+
+def _named_function_tool_choice(choice: Any) -> str:
+    """Validate and return a standard named function tool choice."""
+    if not isinstance(choice, Mapping) or set(choice) != {"type", "function"}:
+        raise ValueError(
+            "tool_choice object must have exactly 'type' and 'function' fields"
+        )
+    function = choice.get("function")
+    if choice.get("type") != "function" or not isinstance(function, Mapping):
+        raise ValueError(
+            "tool_choice object must select a function with a non-empty name"
+        )
+    if set(function) != {"name"}:
+        raise ValueError(
+            "tool_choice.function must have exactly one non-empty 'name' field"
+        )
+    name = function.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(
+            "tool_choice.function must have exactly one non-empty 'name' field"
+        )
+    return name
+
+
+def _normalize_named_tool_choice(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Map a named function choice to llama.cpp-compatible equivalent kwargs.
+
+    Current llama.cpp accepts only string tool choices. Restricting the tools
+    to the uniquely selected function and sending ``required`` preserves the
+    standard named-function semantics without mutating caller-owned payloads.
+    """
+    choice = kwargs.get("tool_choice")
+    if choice is None or isinstance(choice, (str, Omit)):
+        return kwargs
+
+    name = _named_function_tool_choice(choice)
+    tools = kwargs.get("tools")
+    if not isinstance(tools, (list, tuple)):
+        raise ValueError(
+            f"named tool_choice {name!r} requires a concrete tools sequence"
+        )
+
+    matches = [
+        tool
+        for tool in tools
+        if isinstance(tool, Mapping)
+        and tool.get("type") == "function"
+        and isinstance(tool.get("function"), Mapping)
+        and tool["function"].get("name") == name
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"named tool_choice {name!r} must match exactly one function tool; "
+            f"found {len(matches)}"
+        )
+
+    normalized = dict(kwargs)
+    normalized["tools"] = [matches[0]]
+    normalized["tool_choice"] = "required"
+    return normalized
+
+
+def _forced_chat_completions_stream_reason(
+    kwargs: dict[str, Any],
+    *,
+    capture_online: bool,
+) -> str | None:
+    """Return the policy that requires an assembled stream, if any."""
+    if kwargs.get("stream") is True:
+        return None
+    if should_use_chat_completions_stream():
+        return "SCENEEXPERT_CHAT_COMPLETIONS_STREAM=true"
+    if (
+        should_use_reasoning_stream()
+        and reasoning_persistence_enabled()
+        and reasoning_persistence_provider() == "openrouter"
+        and capture_online
+    ):
+        return "SCENEEXPERT_REASONING_STREAM=true"
+    return None
 
 
 def _transient_stream_retry_delays() -> tuple[float, ...]:
@@ -917,22 +1034,20 @@ class _SyncCompletionsWrapper:
         self._capture_online = capture_online
 
     def create(self, *args: Any, **kwargs: Any) -> Any:
+        kwargs = _normalize_named_tool_choice(kwargs)
         routed_extra_body = openrouter_extra_body(kwargs.get("extra_body"))
         if routed_extra_body or "extra_body" in kwargs:
             kwargs["extra_body"] = routed_extra_body
-        force_stream = (
-            should_use_reasoning_stream()
-            and kwargs.get("stream") is not True
-            and reasoning_persistence_enabled()
-            and reasoning_persistence_provider() == "openrouter"
-            and self._capture_online
+        stream_reason = _forced_chat_completions_stream_reason(
+            kwargs,
+            capture_online=self._capture_online,
         )
-        if force_stream:
+        if stream_reason is not None:
             kwargs["stream"] = True
-            _enable_reasoning_stream_options(kwargs)
+            _enable_stream_usage_options(kwargs)
             console_logger.debug(
-                "Forcing stream=True for reasoning extraction "
-                "(SCENEEXPERT_REASONING_STREAM=true)"
+                "Forcing stream=True and assembling ChatCompletion (%s)",
+                stream_reason,
             )
             retry_delays = _transient_stream_retry_delays()
             max_attempts = len(retry_delays) + 1
@@ -942,9 +1057,8 @@ class _SyncCompletionsWrapper:
                     response = _assemble_stream_response(stream)
                     break
                 except Exception as exc:
-                    if (
-                        attempt >= len(retry_delays)
-                        or not _is_transient_stream_error(exc)
+                    if attempt >= len(retry_delays) or not _is_transient_stream_error(
+                        exc
                     ):
                         raise
                     delay = retry_delays[attempt]
@@ -983,22 +1097,20 @@ class _AsyncCompletionsWrapper:
         self._capture_online = capture_online
 
     async def create(self, *args: Any, **kwargs: Any) -> Any:
+        kwargs = _normalize_named_tool_choice(kwargs)
         routed_extra_body = openrouter_extra_body(kwargs.get("extra_body"))
         if routed_extra_body or "extra_body" in kwargs:
             kwargs["extra_body"] = routed_extra_body
-        force_stream = (
-            should_use_reasoning_stream()
-            and kwargs.get("stream") is not True
-            and reasoning_persistence_enabled()
-            and reasoning_persistence_provider() == "openrouter"
-            and self._capture_online
+        stream_reason = _forced_chat_completions_stream_reason(
+            kwargs,
+            capture_online=self._capture_online,
         )
-        if force_stream:
+        if stream_reason is not None:
             kwargs["stream"] = True
-            _enable_reasoning_stream_options(kwargs)
+            _enable_stream_usage_options(kwargs)
             console_logger.debug(
-                "Forcing async stream=True for reasoning extraction "
-                "(SCENEEXPERT_REASONING_STREAM=true)"
+                "Forcing async stream=True and assembling ChatCompletion (%s)",
+                stream_reason,
             )
             retry_delays = _transient_stream_retry_delays()
             max_attempts = len(retry_delays) + 1
@@ -1008,9 +1120,8 @@ class _AsyncCompletionsWrapper:
                     response = await _assemble_async_stream_response(stream)
                     break
                 except Exception as exc:
-                    if (
-                        attempt >= len(retry_delays)
-                        or not _is_transient_stream_error(exc)
+                    if attempt >= len(retry_delays) or not _is_transient_stream_error(
+                        exc
                     ):
                         raise
                     delay = retry_delays[attempt]
