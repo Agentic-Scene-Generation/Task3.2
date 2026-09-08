@@ -81,6 +81,7 @@ You MUST output valid JSON matching this exact schema:
       "source_content_hash": "exact candidate content_hash",
       "decision": "accepted, adapted, or rejected",
       "reason": "why applicable to this current design problem or why rejected",
+      "source_relation_indices": [0],
       "bindings": [{"source_role": "source object role", "current_role": "current task or observed role", "object_ids": []}],
       "preconditions": ["conditions that must hold in this scene"],
       "actions": ["complete current-task design or repair procedure; preserve safety conditions"],
@@ -111,6 +112,18 @@ Guidelines:
   verified solution. Bind existing objects by exact current ID; leave IDs empty
   for a role still to be created. Do not invent objects, coordinates, axes or
   measured clearance. Preserve full skill preconditions/procedure/checks.
+- Source cases may include unrelated objects and whole-scene inventories.
+  Select only the source relation_index rows actually used by your advice in
+  source_relation_indices. Bind EVERY nonempty subject_role and target_role in
+  those rows, including wall/room anchors; do not bind unrelated source objects
+  merely to complete the source scene. Never copy unselected source relations
+  into actions, checks, or preconditions. Spatial candidates require at least
+  one selected row; use [] only when the candidate has no spatial relations.
+  Null is the legacy all-rows scope, not an automatic choice of relevant rows.
+  Example: a bedroom source includes (0) bed against_wall wall and (1) wardrobe
+  corner_of_room room. For bed anchoring alone select [0], bind bed to current
+  bed (IDs empty if not created), and wall to a real current wall ID or an
+  explicit current task anchor. Do NOT import wardrobe/corner placement.
 - An observed optional object is context, NOT a required asset. For template
   counts/groups use the exact current hard intent, never the source quantities.
   A suggestion cannot alter critic scoring, skip a stage, or suppress autonomy.
@@ -734,8 +747,9 @@ def _format_memory_for_prompt(memory_pack: MemoryPack) -> str:
                             if key not in {"verification_evidence", "geometry_verified"}
                         },
                         "verification_status": effective_relation_grade(relation),
+                        "relation_index": index,
                     }
-                    for relation in row.spatial_relations
+                    for index, relation in enumerate(row.spatial_relations)
                 ],
                 "applicability": row.applicability,
                 "evidence_warnings": row.evidence_warnings,

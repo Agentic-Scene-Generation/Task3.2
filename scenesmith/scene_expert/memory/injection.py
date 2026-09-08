@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+
+from collections import Counter
+
 from scenesmith.scene_expert.memory.adaptation import (
     conflicts_with_accepted,
     render_accepted_item,
@@ -18,6 +22,7 @@ from scenesmith.scene_expert.schemas import (
 
 MEMORY_START = "=== Accepted Cross-task Memory (advisory) ==="
 MEMORY_END = "=== End Accepted Cross-task Memory ==="
+logger = logging.getLogger(__name__)
 
 
 def format_accepted_memory(items: list[AcceptedMemoryItem]) -> str:
@@ -187,6 +192,20 @@ def build_memory_injection_bundle(
     skills = [
         item.source.memory_id for item in accepted if item.source.memory_type == "skill"
     ]
+    if pack.selections:
+        reason_counts = Counter(
+            reason for decision in decisions for reason in decision.get("reasons", [])
+        )
+        log = logger.warning if not accepted else logger.info
+        log(
+            "Memory adaptation [%s]: candidates=%d accepted=%d decisions=%d "
+            "rejection_reasons=%s (details: scene_expert/memory_activity.json)",
+            stage,
+            len(pack.selections),
+            len(accepted),
+            len(decisions),
+            dict(sorted(reason_counts.items())),
+        )
     return MemoryInjectionBundle(
         stage=stage,
         planner_stage_brief=stage_brief,

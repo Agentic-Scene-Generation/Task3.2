@@ -74,9 +74,21 @@ def _collect_attempt_costs(scene_dir: Path, scene_index: int) -> dict:
             else {}
         )
         trace = _trace(path, scene_index, warnings)
-        start = timestamp(
+        trace_start = timestamp(
             (trace.get("runtime_identity") or {}).get("scene_started_at", "")
         )
+        status_start = timestamp(status.get("started_at", ""))
+        start = status_start if status_start is not None else trace_start
+        if status.get("started_at") and status_start is None:
+            warnings.append(f"attempt_start_evidence_invalid:{path.name}")
+            start = None
+        if (
+            status_start is not None
+            and trace_start is not None
+            and abs(status_start - trace_start) > 0.001
+        ):
+            warnings.append(f"attempt_start_evidence_conflict:{path.name}")
+            start = None
         end = timestamp(status.get("updated_at", ""))
         terminal = status.get("status") in {
             "completed",
@@ -146,6 +158,11 @@ def _collect_attempt_costs(scene_dir: Path, scene_index: int) -> dict:
                 "error": status.get("error", ""),
                 "failure": status.get("failure") or {},
                 "started_at": start,
+                "start_time_source": (
+                    "unavailable"
+                    if start is None
+                    else "scene_status" if status_start is not None else "legacy_trace"
+                ),
                 "finished_at": end,
                 "end_to_end_sec": wall,
                 "trace_generation_sec": finite_number(trace.get("total_time_sec")),

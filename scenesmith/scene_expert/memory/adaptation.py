@@ -68,13 +68,52 @@ def source_conflicts(
     return reasons
 
 
+def scoped_relations(
+    source: RetrievedMemorySelection, choice: MemoryAdaptation
+) -> list[dict]:
+    """Select original evidence rows, never rewrite the source or its hash.
+
+    Legacy choices retain their original all-relations scope. Invalid scopes
+    fail closed in validation; an empty scope cannot bypass spatial guards.
+    """
+    indices = choice.source_relation_indices
+    if indices is None:
+        return source.spatial_relations
+    if len(set(indices)) != len(indices) or any(
+        type(i) is not int or not 0 <= i < len(source.spatial_relations)
+        for i in indices
+    ):
+        return []
+    return [source.spatial_relations[i] for i in indices]
+
+
+def relation_scope_reasons(
+    source: RetrievedMemorySelection, choice: MemoryAdaptation
+) -> list[str]:
+    """Require explicit nonempty, in-range scope when spatial evidence exists."""
+    indices = choice.source_relation_indices
+    if indices is None:
+        return []
+    reasons = []
+    if source.spatial_relations and not indices:
+        reasons.append("empty_spatial_scope")
+    if len(set(indices)) != len(indices):
+        reasons.append("duplicate_source_relation_index")
+    if any(
+        type(i) is not int or not 0 <= i < len(source.spatial_relations)
+        for i in indices
+    ):
+        reasons.append("unknown_source_relation_index")
+    return reasons
+
+
 def conflicts_with_accepted(
     source: RetrievedMemorySelection, accepted: list[AcceptedMemoryItem], stage: str
 ) -> bool:
     """Do not send incompatible spatial precedents in the same advice bundle."""
     rows = []
     for item in accepted:
-        for relation in item.source.spatial_relations:
+        for relation in scoped_relations(item.source, item.adaptation):
             cardinality = relation.get("cardinality") or {}
             row = {
                 key: value
@@ -140,7 +179,10 @@ def validate_adaptation(
     brief: StageBrief | None,
 ) -> list[str]:
     """Reject unsupported identities/bindings and explicit contract conflicts."""
-    reasons = source_conflicts(source, context)
+    # Keep the existing full-source hard-conflict guard. Scoping limits what
+    # must be bound/rendered; it is not permission to evade an intent conflict.
+    reasons = source_conflicts(source, context) + relation_scope_reasons(source, choice)
+    relations = scoped_relations(source, choice)
     if state.get("observation_error"):
         reasons.append("scene_observation_unavailable")
     if not source.content_hash or choice.source_content_hash != source.content_hash:
@@ -162,7 +204,7 @@ def validate_adaptation(
     objects = {row["object_id"]: row for row in state.get("objects", [])}
     source_roles = {
         str(row.get(key) or "")
-        for row in source.spatial_relations
+        for row in relations
         for key in ("subject_role", "target_role")
     } - {""}
     for binding in choice.bindings:
@@ -195,7 +237,7 @@ def validate_adaptation(
         reasons.append("missing_role_binding")
     # Parameterized templates must be bound to a current explicit contract; do
     # not substitute source counts or let the LLM invent new hard quantities.
-    for relation in source.spatial_relations:
+    for relation in relations:
         if relation.get("template_parameters"):
             candidates = _template_rows(relation, context)
             if not candidates:
@@ -209,20 +251,21 @@ def render_accepted_item(
     context: StageRelationContext | None,
 ) -> str:
     """Render adapted actions only; raw source advice/layout cannot reappear."""
-    grades = [effective_relation_grade(row) for row in source.spatial_relations]
+    relations = scoped_relations(source, choice)
+    grades = [effective_relation_grade(row) for row in relations]
     lines = [
         f"[Memory {source.memory_type}:{source.memory_id} / {choice.decision}]",
         "Source evidence grades: " + ", ".join(grades or ["legacy/unverified"]),
     ]
     if source.memory_type == "skill":
         lines.append(f"[Skill: {source.memory_id}]")
-    if source.spatial_relations:
+    if relations:
         lines.append(
             "Source relation semantics (advisory observations, not new requirements):"
         )
         lines.extend(
             "- " + SpatialRelationMemory.model_validate(row).to_guidance_text()
-            for row in source.spatial_relations
+            for row in relations
         )
     for binding in choice.bindings:
         lines.append(
@@ -236,16 +279,13 @@ def render_accepted_item(
         if values:
             lines.append(title + ":")
             lines.extend("- " + value.strip() for value in values if value.strip())
-    if (
-        any(row.get("template_parameters") for row in source.spatial_relations)
-        and context
-    ):
+    if any(row.get("template_parameters") for row in relations) and context:
         lines.append(
             "Bind template quantities from current intent, never source counts: "
             + json.dumps(
                 [
                     row
-                    for relation in source.spatial_relations
+                    for relation in relations
                     if relation.get("template_parameters")
                     for row in _template_rows(relation, context)
                 ],
@@ -267,7 +307,9 @@ def decision_applicability(
     context: StageRelationContext | None,
 ) -> list[str]:
     """Recheck cached advice against a changed scene; never call an LLM here."""
-    reasons = source_conflicts(item.source, context)
+    reasons = source_conflicts(item.source, context) + relation_scope_reasons(
+        item.source, item.adaptation
+    )
     if source_state.get("observation_error") or current_state.get("observation_error"):
         reasons.append("scene_observation_unavailable")
     if source_state.get("room") != current_state.get("room"):
@@ -288,7 +330,8 @@ def decision_applicability(
         terms = [b.current_role for b in item.adaptation.bindings]
         terms += [oid for b in item.adaptation.bindings for oid in b.object_ids]
         terms += [
-            str(row.get("relation_type") or "") for row in item.source.spatial_relations
+            str(row.get("relation_type") or "")
+            for row in scoped_relations(item.source, item.adaptation)
         ]
         if not terms:
             terms = item.adaptation.checks

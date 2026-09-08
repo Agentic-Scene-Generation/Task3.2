@@ -136,7 +136,19 @@ def related_mutations(
 
 def target_observations(item: dict, stage: str, stage_entry: dict) -> list[dict]:
     """Join current hard rows by semantics, then reuse per-constraint verification."""
-    source = item.get("source") or {}
+    # Older audit payloads may omit unrelated adaptation fields. Preserve that
+    # read compatibility, but never credit outcomes for unselected source rows.
+    relations = (item.get("source") or {}).get("spatial_relations", [])
+    indices = (item.get("adaptation") or {}).get("source_relation_indices")
+    if indices is not None:
+        if (
+            not isinstance(indices, list)
+            or (relations and not indices)
+            or any(type(i) is not int or not 0 <= i < len(relations) for i in indices)
+            or len(set(indices)) != len(indices)
+        ):
+            raise ValueError("Invalid accepted relation scope")
+        relations = [relations[i] for i in indices]
     context = stage_entry.get("relation_context") or {}
     results = []
     seen = set()
@@ -152,7 +164,7 @@ def target_observations(item: dict, stage: str, stage_entry: dict) -> list[dict]
                 str(row.get("target_role") or ""),
                 constraint,
             )
-            for row in source.get("spatial_relations", [])
+            for row in relations
         ):
             continue
         seen.add(constraint_id)
@@ -236,6 +248,13 @@ def _collect_memory_usage(
         if stage_filter and stage != stage_filter:
             continue
         injection = entry.get("injection") or {}
+        decisions: dict[tuple[str, str], list[dict]] = {}
+        for decision in injection.get("adaptation_decisions", []):
+            decision_key = (
+                str(decision.get("memory_type") or ""),
+                str(decision.get("memory_id") or ""),
+            )
+            decisions.setdefault(decision_key, []).append(decision)
         accepted = {
             (
                 str((item.get("source") or {}).get("memory_type")),
@@ -249,6 +268,17 @@ def _collect_memory_usage(
                 str(source.get("memory_id") or ""),
             )
             item = accepted.get(key)
+            evidence = decisions.get(key, [])
+            # Older exports may omit these decisions. Unknown is not a model
+            # rejection, and retrieval pre-filter reasons are a different step.
+            rejection_reasons = sorted(
+                {
+                    str(reason)
+                    for decision in evidence
+                    for reason in decision.get("reasons", [])
+                    if reason
+                }
+            )
             requests = []
             targets = target_observations(item, stage, entry) if item else []
             if item:
@@ -317,6 +347,9 @@ def _collect_memory_usage(
                     "source_task_ids": source.get("source_task_ids", []),
                     "retrieved": True,
                     "accepted": item is not None,
+                    "adaptation_decision_observed": bool(evidence),
+                    "adaptation_decisions": evidence,
+                    "adaptation_rejection_reasons": rejection_reasons,
                     "payload_observed": bool(requests),
                     "delivered": (
                         delivered

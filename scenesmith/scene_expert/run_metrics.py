@@ -125,6 +125,9 @@ SCENE_COLUMNS = (
     "memory_zero_result_events",
     "memory_selection_rejection_count",
     "memory_selection_rejection_reasons",
+    "memory_adaptation_rejection_count",
+    "memory_adaptation_rejection_reasons",
+    "memory_adaptation_decision_unknown_count",
     "memory_retrieval_time_sec",
     "memory_writer_status",
     "memory_writer_candidate_count",
@@ -1063,6 +1066,19 @@ def _scene_metrics(
             item[condition] is None for item in usage_items
         )
     row["memory_accepted_count"] = sum(item["accepted"] for item in usage_items)
+    adaptation_reasons: dict[str, int] = {}
+    for item in usage_items:
+        for reason in item["adaptation_rejection_reasons"]:
+            adaptation_reasons[reason] = adaptation_reasons.get(reason, 0) + 1
+    row["memory_adaptation_rejection_count"] = sum(
+        bool(item["adaptation_rejection_reasons"]) for item in usage_items
+    )
+    row["memory_adaptation_rejection_reasons"] = dict(
+        sorted(adaptation_reasons.items())
+    )
+    row["memory_adaptation_decision_unknown_count"] = sum(
+        not item["adaptation_decision_observed"] for item in usage_items
+    )
     return row
 
 
@@ -1300,7 +1316,12 @@ def collect_run_metrics(
     )
     skill_rejection_reasons: dict[str, int] = {}
     memory_selection_rejection_reasons: dict[str, int] = {}
+    memory_adaptation_rejection_reasons: dict[str, int] = {}
     for row in scene_rows:
+        for reason, count in row["memory_adaptation_rejection_reasons"].items():
+            memory_adaptation_rejection_reasons[reason] = (
+                memory_adaptation_rejection_reasons.get(reason, 0) + count
+            )
         for reason, count in row["skill_rejection_reasons"].items():
             reason_text = str(reason)
             skill_rejection_reasons[reason_text] = int(
@@ -1313,6 +1334,15 @@ def collect_run_metrics(
             ) + _as_int(count)
 
     summary = {
+        "memory_adaptation_rejection_count": sum(
+            row["memory_adaptation_rejection_count"] for row in scene_rows
+        ),
+        "memory_adaptation_rejection_reasons": dict(
+            sorted(memory_adaptation_rejection_reasons.items())
+        ),
+        "memory_adaptation_decision_unknown_count": sum(
+            row["memory_adaptation_decision_unknown_count"] for row in scene_rows
+        ),
         "all_attempt_cost_coverage": _rate(
             sum(row["all_attempt_cost_complete"] for row in scene_rows), expected
         ),
@@ -1657,6 +1687,9 @@ def _markdown(metrics: dict[str, Any]) -> str:
         "all_assigned_attempt_time_sec",
         "memory_delivered_count",
         "memory_accepted_count",
+        "memory_adaptation_rejection_count",
+        "memory_adaptation_rejection_reasons",
+        "memory_adaptation_decision_unknown_count",
         "memory_delivery_unknown_count",
         "memory_action_unknown_count",
         "memory_target_unknown_count",

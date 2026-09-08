@@ -2991,6 +2991,8 @@ def build_hook_runner(
     scene_id: int,
     output_dir: Path,
     cfg_dict: dict,
+    *,
+    scene_started_at: str = "",
 ) -> SceneExpertHookRunner | None:
     """Build a SceneExpertHookRunner from config.
 
@@ -3002,6 +3004,7 @@ def build_hook_runner(
         scene_id: Scene index.
         output_dir: Base experiment output directory.
         cfg_dict: Full Hydra config as plain dict.
+        scene_started_at: Worker start before checkpoint copying and compilation.
 
     Returns:
         Configured SceneExpertHookRunner, or None if disabled.
@@ -3511,6 +3514,7 @@ def build_hook_runner(
             component_flags=component_flags,
             memory_identity=memory_identity,
             evaluation_contract=evaluation_contract,
+            scene_started_at=scene_started_at,
         )
 
     trajectory_collector: TrajectoryCollector | None = None

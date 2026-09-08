@@ -6,7 +6,7 @@ type safety and easy JSON serialization across the pipeline.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -309,6 +309,9 @@ class MemoryAdaptation(BaseModel):
     source_content_hash: str
     decision: Literal["accepted", "adapted", "rejected"]
     reason: str = ""
+    source_relation_indices: list[Annotated[int, Field(strict=True, ge=0)]] | None = (
+        None  # Zero-based immutable source rows; legacy None means the entire source.
+    )
     bindings: list[MemoryRoleBinding] = Field(default_factory=list)
     preconditions: list[str] = Field(default_factory=list)
     actions: list[str] = Field(default_factory=list)

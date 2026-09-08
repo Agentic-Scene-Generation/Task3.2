@@ -223,6 +223,7 @@ class TraceLogger:
         component_flags: dict[str, bool] | None = None,
         memory_identity: dict[str, object] | None = None,
         evaluation_contract: dict[str, object] | None = None,
+        scene_started_at: str = "",
     ) -> None:
         self._output_dir = Path(output_dir)
         self._traces_dir = self._output_dir / "traces"
@@ -264,7 +265,7 @@ class TraceLogger:
             "pid": os.getpid(),
             "service_instance": os.environ.get("SCENEEXPERT_EVAL_SERVICE_INSTANCE", ""),
             "arm_order": os.environ.get("SCENEEXPERT_EVAL_ARM_ORDER", ""),
-            "scene_started_at": "",
+            "scene_started_at": scene_started_at,
             "checkpoint_plan_hash": "",
             "software": {"python": platform.python_version()},
         }
@@ -293,9 +294,13 @@ class TraceLogger:
                     encoding="utf-8"
                 )
             )
-            if status.get("status") == "running":
+            if not scene_started_at:
                 self._runtime_identity["scene_started_at"] = status.get(
-                    "updated_at", ""
+                    "started_at", ""
+                ) or (
+                    status.get("updated_at", "")
+                    if status.get("status") == "running"
+                    else ""
                 )
         except (OSError, ValueError, TypeError, AttributeError):
             pass  # Unknown timing is reported as unknown, never inferred from mtime.
