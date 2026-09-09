@@ -26,7 +26,7 @@
 - **交付包及本文**：`/data/task3_2/share_data/scenesmith/all_assets_style_v2_delivery_20260909/`；本文位于 `docs/ALL_ASSET_EMBEDDING_V2_ZH.md`。
 - 交付包 `queue/` 为完整输入和统计，`styles/` 为冻结风格 overlay 和来源统计，`evidence/` 为 GPU 一致性、全量索引验证和查询 smoke 证据，`ACTIVE_INDEX.json` 指向当前集合。
 - 独立运行时：`/data/250010098/asset_embedding_service_20260909/runtime/bin/python`。运行维护入口在同根 `README.md`、`gpu_tick.sh`；索引已完成，`GPU_COMPLETE` 阻止重复全量下发。
-- GitHub 目标：`Agentic-Scene-Generation/Task3.2` 的 `dev_yz_0910`，本地已从 `dev_hrk_week37` 的 `6039165a65772b041d92b56a592559968818150b` 新建；只提交代码、测试、规范和小型核验证据，不上传模型、图片、向量库或凭据。**本次 push 被 GitHub 拒绝：SSH 身份 Shphd3 无写权限，远程分支尚未创建。**取得该仓库写权限后在本地交付仓库执行 `git push -u origin dev_yz_0910`。本地仓库为 `/data/250010098/codex_communication/3_scenesmith_asset_relations/feedback/repos/Task3.2-dev-yz-0910`。
+- GitHub 已交付：`Agentic-Scene-Generation/Task3.2` 的 `dev_yz_0910`，从 `dev_hrk_week37` 的 `6039165a65772b041d92b56a592559968818150b` 新建，使用用户确认的 `K-Chronofox` 身份推送成功。此前默认 SSH 误选 Shphd3 导致拒绝，现已解决；未修改其他任务的全局认证配置。只提交代码、测试、规范和小型核验证据，不上传模型、图片、向量库或凭据。本地仓库为 `/data/250010098/codex_communication/3_scenesmith_asset_relations/feedback/repos/Task3.2-dev-yz-0910`。
 
 集合中的 mesh/image 仍引用原有本机绝对路径；交付包不是独立可搬迁的完整资产压缩包。搬到其他主机需挂载或显式重映射原始资产目录。没有覆盖旧正式 `hssd_zvec_collection`，也没有改场景生成默认配置。
 
