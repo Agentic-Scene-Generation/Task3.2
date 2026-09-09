@@ -85,7 +85,8 @@ You MUST output valid JSON matching this exact schema:
       "bindings": [{"source_role": "source object role", "current_role": "current task or observed role", "object_ids": []}],
       "preconditions": ["conditions that must hold in this scene"],
       "actions": ["complete current-task design or repair procedure; preserve safety conditions"],
-      "checks": ["how the designer checks the action against the current intent"]
+      "checks": ["how the designer checks the action against the current intent"],
+      "advice_checks": []
     }
   ],
   "recommended_skills": ["list of skill names from memory to apply, can be empty"],
@@ -112,6 +113,18 @@ Guidelines:
   verified solution. Bind existing objects by exact current ID; leave IDs empty
   for a role still to be created. Do not invent objects, coordinates, axes or
   measured clearance. Preserve full skill preconditions/procedure/checks.
+- Prefer methods that add a spatial decision or avoid a demonstrated mistake;
+  reject inventory/rule restatements as redundant_task_rule. Never force memory
+  use. A shared task goal is fine if the METHOD adds useful information.
+- For placement_experience candidates, include advice_checks with fields:
+  source_episode_id (exact catalog ID), metric (anchor_local_offset_m,
+  relative_yaw_deg, aabb_separation_m, or native_constraint), subject_role and
+  anchor_role (exact source names), constraint_id (empty for geometry).
+  Bind these roles as usual. Select at least one available source metric.
+  These are read-only observations, not desired numeric thresholds. AABB gaps
+  are not walkable clearance; transform yaw is not semantic front. Use
+  native_constraint only for a matching current spatial predicate supported by
+  the source native checks; never substitute a required-object count.
 - Source cases may include unrelated objects and whole-scene inventories.
   Select only the source relation_index rows actually used by your advice in
   source_relation_indices. Bind EVERY nonempty subject_role and target_role in
@@ -752,6 +765,28 @@ def _format_memory_for_prompt(memory_pack: MemoryPack) -> str:
                     for index, relation in enumerate(row.spatial_relations)
                 ],
                 "applicability": row.applicability,
+                "placement_experience": (
+                    {
+                        "procedure": row.placement_experience.get("procedure", []),
+                        "applicability": row.placement_experience.get(
+                            "applicability", []
+                        ),
+                        "episodes": [
+                            {
+                                "episode_id": e["episode_id"],
+                                "subject_role": e["subject"].get("name")
+                                or e["subject"].get("category"),
+                                "anchor_role": e["anchor"].get("name")
+                                or e["anchor"].get("category"),
+                                "measurements": e["measurements"],
+                                "native_checks": e.get("native_checks", []),
+                            }
+                            for e in row.placement_experience.get("episodes", [])
+                        ],
+                    }
+                    if row.placement_experience
+                    else {}
+                ),
                 "evidence_warnings": row.evidence_warnings,
             }
             for row in rows

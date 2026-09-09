@@ -6,6 +6,7 @@ import time
 
 from dataclasses import dataclass
 
+from scenesmith.scene_expert.memory.placement import object_role
 from scenesmith.scene_expert.memory.retriever import _tokenize
 from scenesmith.scene_expert.memory.room_taxonomy import room_types_compatible
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
@@ -68,6 +69,14 @@ def room_compatible(record_room: str, task_room: str) -> bool:
 
 
 def record_required_objects(record: MemoryRecord) -> list[str]:
+    if record.placement_experience is not None:
+        return list(
+            dict.fromkeys(
+                object_role(obj)
+                for e in record.placement_experience.episodes
+                for obj in (e.subject, e.anchor)
+            )
+        )
     if isinstance(record, SuccessCase):
         return record.required_objects or record.task_signature
     if isinstance(record, FailureCase):

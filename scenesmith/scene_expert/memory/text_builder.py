@@ -9,10 +9,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
+from scenesmith.scene_expert.memory.placement import experience_text
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
 
 MemoryRecord = SuccessCase | FailureCase | Skill
-EMBEDDING_TEXT_VERSION = "memory-text.v3"
+EMBEDDING_TEXT_VERSION = "memory-text.v4"
 
 
 def _clean(value: object) -> str:
@@ -156,6 +157,12 @@ def _build_skill_text(record: Skill) -> str:
 
 def build_embedding_text(record: MemoryRecord) -> str:
     """Build structured retrieval text for a memory record."""
+    if record.placement_experience is not None:
+        # Source inventories/scores/IDs remain metadata, not semantic features.
+        return (
+            f"stage={record.stage}\nroom_type={record.room_type}\n"
+            + experience_text(record.placement_experience)
+        )
     if isinstance(record, SuccessCase):
         return _build_success_text(record)
     if isinstance(record, FailureCase):

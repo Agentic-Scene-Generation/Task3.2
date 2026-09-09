@@ -24,12 +24,19 @@ from scenesmith.scene_expert.memory.evidence import (
     resolve_constraint_evidence,
     writer_prompt_evidence,
 )
+from scenesmith.scene_expert.memory.placement import (
+    inventory_only,
+    object_role,
+    valid_episode,
+)
 from scenesmith.scene_expert.memory.schemas import (
     FailureCase,
     FailureMemoryCandidate,
     MemorySourceProvenance,
     MemoryUpdateOp,
     MemoryWriterResponse,
+    PlacementEpisode,
+    PlacementExperience,
     Skill,
     SkillApplicability,
     SkillMemoryCandidate,
@@ -103,6 +110,18 @@ Rules:
   the failed stage itself. Deterministic code decides candidate versus active.
 - Prefer empty arrays with a clear noop_reason over weak, duplicate, or speculative memory.
 - Keep each lesson concise and useful for a different scene with similar requirements.
+- When placement_experience_catalog is supplied, each success/failure MUST select
+  one or two exact episode_ids from that catalog, and supply procedure (2-6 steps)
+  and applicability. An empty catalog means no new spatial success/failure, NOT
+  permission to restate the task. Required inventories remain metadata only.
+- Explain HOW to place/adjust relative to an anchor, not merely WHAT is required.
+  Include overlooked geometry, order-of-operations or a supported failure pattern.
+  A failure requires an exact failing native check for the selected object pair.
+- Treat relative offsets/yaws/AABB separation as observed source measurements,
+  never semantic front, walkable clearance, optimal values or universal thresholds.
+  Do not claim a repair worked: these final-stage episodes do not prove that.
+  Python binds observations; do not invent or rewrite measurements/evidence.
+- Optional assets and all stages may yield lessons when the catalog supports them.
 """
 
 
@@ -422,13 +441,22 @@ class MemoryWriter:
     ) -> list[MemoryUpdateOp]:
         context = self._canonical_context(evidence_payload, trace_summary)
         ops: list[MemoryUpdateOp] = []
+        self.last_trace["placement_candidate_decisions"] = []
         for candidate in response.success_cases:
             content = self._success_content(candidate, context, full_report)
+            if not self._bind_placement(
+                content, candidate, evidence_payload, failure=False
+            ):
+                continue
             ops.append(
                 MemoryUpdateOp(op="ADD", memory_type="success_case", content=content)
             )
         for candidate in response.failure_cases:
             content = self._failure_content(candidate, context)
+            if not self._bind_placement(
+                content, candidate, evidence_payload, failure=True
+            ):
+                continue
             ops.append(
                 MemoryUpdateOp(op="ADD", memory_type="failure_case", content=content)
             )
@@ -436,6 +464,100 @@ class MemoryWriter:
             content = self._skill_content(candidate, context, full_report)
             ops.append(MemoryUpdateOp(op="ADD", memory_type="skill", content=content))
         return ops
+
+    def _bind_placement(
+        self,
+        content: dict[str, Any],
+        candidate: Any,
+        evidence: dict[str, Any],
+        *,
+        failure: bool,
+    ) -> bool:
+        """Atomically bind a proposed method to exact observed episodes.
+
+        Legacy callers retain their old API. New runtime catalogs require explicit
+        evidence; missing or edited IDs cannot produce active fallback memories.
+        """
+        if "placement_experience_catalog" not in evidence:
+            return True
+        catalog = evidence["placement_experience_catalog"] or {}
+        by_id: dict[str, PlacementEpisode] = {}
+        for raw in catalog.get("episodes", []):
+            try:
+                episode = PlacementEpisode.model_validate(raw)
+            except (ValueError, TypeError):
+                continue
+            if valid_episode(episode):
+                by_id[episode.episode_id] = episode
+        ids = candidate.episode_ids
+        episodes = [by_id[key] for key in ids if key in by_id]
+        procedure = self._clean_list(candidate.procedure)
+        reasons = []
+        if not ids or len(ids) != len(set(ids)) or len(episodes) != len(ids):
+            reasons.append("missing_or_invalid_episode_binding")
+        if any(e.stage != candidate.stage for e in episodes):
+            reasons.append("episode_stage_mismatch")
+        if len(procedure) < 2 or not self._clean_list(candidate.applicability):
+            reasons.append("missing_procedure_or_applicability")
+        if inventory_only(procedure):
+            reasons.append("redundant_inventory_restatement")
+        if failure and not any(
+            check["status"] == "verified_fail"
+            for e in episodes
+            for check in e.native_checks
+        ):
+            reasons.append("no_exact_pair_failure_evidence")
+        if not failure and any(
+            check["status"] == "verified_fail"
+            for e in episodes
+            for check in e.native_checks
+        ):
+            reasons.append("selected_pair_has_verified_failure")
+        if not failure and any(e.stage_passed is not True for e in episodes):
+            reasons.append("selected_episode_stage_not_passed")
+        self.last_trace.setdefault("placement_candidate_decisions", []).append(
+            {
+                "stage": candidate.stage,
+                "episode_ids": ids,
+                "decision": "rejected" if reasons else "bound",
+                "reasons": reasons,
+            }
+        )
+        if reasons:
+            return False
+        experience = PlacementExperience(
+            procedure=procedure,
+            applicability=self._clean_list(candidate.applicability),
+            episodes=episodes,
+        )
+        content["placement_experience"] = experience.model_dump(mode="json")
+        if not failure:
+            # These scores describe the selected attempt, not another entry
+            # for the same stage that happened before a retry.
+            content["scores"] = episodes[0].stage_scores
+        content["spatial_relations"] = []
+        for episode in episodes:
+            relation = SpatialRelationMemory(
+                relation_type="observed_relative_pose",
+                subject_role=object_role(episode.subject),
+                target_role=object_role(episode.anchor),
+                evidence_source="scene_geometry",
+                evidence_ref=episode.episode_id,
+                verification_status="inconclusive",
+                confidence=0.5,
+            )
+            relation.claim_hash = relation.current_claim_hash()
+            content["spatial_relations"].append(relation.model_dump(mode="json"))
+        content["evidence_refs"] = sorted(
+            {ref for e in episodes for ref in e.evidence_refs if ref}
+        )
+        content["provenance"]["evidence_refs"] = content["evidence_refs"]
+        content["provenance"]["scene_state_path"] = episodes[0].evidence_refs[0]
+        if failure:
+            content["repair_verified"] = False
+            content["is_deterministic"] = True
+            content["scope"] = "object"
+        return True
 
     def _bootstrap_skill_ops(
         self,
@@ -727,6 +849,13 @@ class MemoryWriter:
                     continue
                 stage_evidence = self._stage_evidence(evidence, record.stage)
                 stage_passed = self._stage_passed(stage_evidence)
+                if record.placement_experience is not None:
+                    # A retried stage can have different outcomes in its trace.
+                    # Use the actual selected episode, never the first stage row.
+                    stage_passed = bool(record.placement_experience.episodes) and all(
+                        e.stage_passed is True and valid_episode(e)
+                        for e in record.placement_experience.episodes
+                    )
                 scene_success = bool(
                     full_report.pass_scene
                     and full_report.overall_score >= success_threshold
@@ -757,7 +886,9 @@ class MemoryWriter:
                             "source_scene_passed": False,
                             "confidence": min(float(record.confidence), 0.75),
                             "quality_score": self._mean_score(
-                                self._stage_scores(stage_evidence)
+                                record.scores
+                                if record.placement_experience
+                                else self._stage_scores(stage_evidence)
                             ),
                         }
                     )
@@ -777,7 +908,14 @@ class MemoryWriter:
                 if record is None:
                     continue
                 stage_evidence = self._stage_evidence(evidence, record.stage)
-                if has_structured_evidence:
+                if record.placement_experience is not None:
+                    repair_verified = False
+                    deterministic = any(
+                        row["status"] == "verified_fail"
+                        for episode in record.placement_experience.episodes
+                        for row in episode.native_checks
+                    )
+                elif has_structured_evidence:
                     repair_verified = self._repair_verified(stage_evidence)
                     deterministic = self._deterministic_failure_in_evidence(
                         stage_evidence
@@ -799,7 +937,9 @@ class MemoryWriter:
                         "is_deterministic": deterministic,
                         "scope": (
                             "stage"
-                            if deterministic and record.scope == "object"
+                            if deterministic
+                            and record.scope == "object"
+                            and record.placement_experience is None
                             else record.scope
                         ),
                         "confidence": 0.85,

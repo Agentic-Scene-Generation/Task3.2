@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 
+from scenesmith.scene_expert.memory.advisory import advice_check_reasons
 from scenesmith.scene_expert.memory.schemas import Skill, SpatialRelationMemory
 from scenesmith.scene_expert.memory.skill_policy import (
     _category_compatible,
@@ -182,6 +183,11 @@ def validate_adaptation(
     # Keep the existing full-source hard-conflict guard. Scoping limits what
     # must be bound/rendered; it is not permission to evade an intent conflict.
     reasons = source_conflicts(source, context) + relation_scope_reasons(source, choice)
+    reasons += advice_check_reasons(
+        source.model_dump(mode="json"),
+        choice.model_dump(mode="json"),
+        context.model_dump(mode="json") if context else {},
+    )
     relations = scoped_relations(source, choice)
     if state.get("observation_error"):
         reasons.append("scene_observation_unavailable")
@@ -259,6 +265,14 @@ def render_accepted_item(
     ]
     if source.memory_type == "skill":
         lines.append(f"[Skill: {source.memory_id}]")
+    if choice.advice_checks:
+        lines.append(
+            "Read-only spatial observations (not additional scoring criteria):"
+        )
+        lines.extend(
+            "- " + json.dumps(check.model_dump(mode="json"), ensure_ascii=False)
+            for check in choice.advice_checks
+        )
     if relations:
         lines.append(
             "Source relation semantics (advisory observations, not new requirements):"

@@ -16,6 +16,7 @@ import numpy as np
 from scenesmith.scene_expert.memory.contracts import selection_from_record
 from scenesmith.scene_expert.memory.embedding import SceneMemoryEmbedder
 from scenesmith.scene_expert.memory.index import NumpyMemoryIndex
+from scenesmith.scene_expert.memory.placement import experience_priority
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
 from scenesmith.scene_expert.memory.scoring import (
     HybridScoreWeights,
@@ -424,7 +425,7 @@ class HybridMemoryRetriever:
             )
             scored.append((score, record))
 
-        scored.sort(key=lambda x: x[0], reverse=True)
+        scored.sort(key=lambda x: (experience_priority(x[1]), x[0]), reverse=True)
         output = scored[:final_top_k]
         bank_timing["rerank_sec"] = time.perf_counter() - rerank_start
         bank_timing["accepted_count"] = len(scored)

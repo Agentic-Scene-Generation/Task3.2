@@ -9,6 +9,7 @@ from typing import Any
 
 from scenesmith.scene_expert.memory.adaptation import source_conflicts
 from scenesmith.scene_expert.memory.contracts import selection_from_record
+from scenesmith.scene_expert.memory.placement import experience_priority, inventory_only
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
 from scenesmith.scene_expert.memory.scoring import (
     object_overlap,
@@ -110,6 +111,14 @@ class BudgetedMemoryRetriever:
             "failure": list(pack.failure_case_ids),
             "skill": list(pack.skill_names),
         }
+        for kind, ids in candidate_ids.items():
+            ids.sort(
+                key=lambda key: (
+                    -experience_priority(records[(kind, key)])
+                    if records.get((kind, key)) is not None
+                    else 0
+                )
+            )
         limits = {
             "success": max(0, self.policy.max_success_cases),
             "failure": max(0, self.policy.max_failure_cases),
@@ -276,6 +285,14 @@ class BudgetedMemoryRetriever:
         reasons: list[str] = []
         if record.stage != stage:
             reasons.append("stage_mismatch")
+        if record.placement_experience is not None and not experience_priority(record):
+            reasons.append("invalid_placement_experience")
+        if isinstance(record, SuccessCase) and inventory_only(
+            record.positive_guidance or record.successful_pattern
+        ):
+            reasons.append("redundant_inventory_restatement")
+        if isinstance(record, Skill) and inventory_only(record.procedure):
+            reasons.append("redundant_inventory_restatement")
         if memory_type != "failure" or not isinstance(record, FailureCase):
             return reasons
         if self.policy.require_verified_failures and not (

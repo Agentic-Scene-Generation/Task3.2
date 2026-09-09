@@ -18,6 +18,7 @@ from scenesmith.scene_expert.evaluation_io import (
     read_object,
     read_rows,
 )
+from scenesmith.scene_expert.memory.advisory import observe_advice
 from scenesmith.scene_expert.memory.evidence import (
     evidence_hash,
     resolve_constraint_evidence,
@@ -337,6 +338,19 @@ def _collect_memory_usage(
                     else None
                 )
             )
+            contract_target_verified = target_verified
+            advice = observe_advice(item, stage, entry) if item else []
+            # Legacy hard-contract attainment is retained separately. It cannot
+            # certify free-form advice about clearance, orientation or procedure.
+            target_verified = (
+                True
+                if advice and all(row["status"] == "verified_pass" for row in advice)
+                else (
+                    False
+                    if any(row["status"] == "verified_fail" for row in advice)
+                    else None
+                )
+            )
             rows.append(
                 {
                     "stage": stage,
@@ -358,6 +372,17 @@ def _collect_memory_usage(
                     ),
                     "action_observed": True if delivered and actions else None,
                     "target_verified": target_verified,
+                    "contract_target_verified": contract_target_verified,
+                    "advice_observations": advice,
+                    "observed_related_mutation_count": len(actions),
+                    "delivered_design_request_count": sum(
+                        r["provider_completed"] for r in requests
+                    ),
+                    "delivered_repair_request_count": sum(
+                        r["provider_completed"]
+                        and r["event"] == "request_design_change"
+                        for r in requests
+                    ),
                     "first_critic_pass_round": None,
                     "requests": requests,
                     "target_observations": targets,

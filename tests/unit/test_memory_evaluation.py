@@ -160,7 +160,9 @@ def test_exact_payload_action_and_target_are_separate_and_auditable(tmp_path):
     activity, payload, _ = fixture(tmp_path)
     result = collect_memory_usage(tmp_path, activity)
     row = result["items"][0]
-    assert row["delivered"] and row["action_observed"] and row["target_verified"]
+    assert row["delivered"] and row["action_observed"]
+    assert row["contract_target_verified"] is True
+    assert row["target_verified"] is None  # No advice-specific predicate supplied.
     assert row["causal_benefit"] is None
     assert row["requests"][0]["related_mutations"][0]["tool_call_id"] == "call-1"
     assert (
@@ -414,7 +416,8 @@ def test_repeated_stage_history_preserves_prior_decision_and_target(tmp_path):
     # This payload is later than the archived stage; cannot credit it twice.
     assert not rows[0]["delivered"]
     assert rows[0]["target_verified"] is None
-    assert rows[1]["delivered"] and rows[1]["target_verified"]
+    assert rows[1]["delivered"] and rows[1]["contract_target_verified"]
+    assert rows[1]["target_verified"] is None
 
 
 def test_invalid_optional_evidence_does_not_raise(tmp_path):

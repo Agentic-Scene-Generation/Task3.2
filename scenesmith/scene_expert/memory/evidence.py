@@ -129,6 +129,84 @@ def writer_prompt_evidence(payload: dict) -> dict:
     input. The model sees outcomes/bindings; it does not assign verification.
     """
     projected = deepcopy(payload)
+    catalog = projected.get("placement_experience_catalog")
+    if isinstance(catalog, dict):
+        # Full immutable observations stay in runtime/debug artifacts. Show a
+        # bounded balanced catalog to the model, without assets/surface dumps.
+        groups: dict[str, dict[str, list[dict]]] = {}
+        for episode in catalog.get("episodes", []):
+            stage = str(episode.get("stage") or "")
+            kind = (
+                "failure"
+                if any(
+                    c.get("status") == "verified_fail"
+                    for c in episode.get("native_checks", [])
+                )
+                else "success" if episode.get("stage_passed") is True else "unknown"
+            )
+            groups.setdefault(stage, {}).setdefault(kind, []).append(episode)
+        selected = []
+        for buckets in groups.values():
+            count = 0
+            for index in range(4):
+                for kind in ("success", "failure", "unknown"):
+                    if count < 4 and len(buckets.get(kind, [])) > index:
+                        selected.append(buckets[kind][index])
+                        count += 1
+        compact = []
+        for episode in selected:
+            compact.append(
+                {
+                    key: episode.get(key)
+                    for key in (
+                        "episode_id",
+                        "stage",
+                        "measurements",
+                        "before_measurements",
+                        "observation_scope",
+                        "repair_verified",
+                        "stage_passed",
+                    )
+                }
+                | {
+                    "subject": {
+                        k: episode.get("subject", {}).get(k)
+                        for k in ("object_id", "name", "category")
+                    },
+                    "anchor": {
+                        k: episode.get("anchor", {}).get(k)
+                        for k in ("object_id", "name", "category")
+                    },
+                    "actions": [
+                        {
+                            key: value
+                            for key, value in action.items()
+                            if key != "arguments"
+                        }
+                        | {
+                            "arguments": (
+                                action.get("arguments")
+                                if len(json.dumps(action.get("arguments"), default=str))
+                                <= 512
+                                else None
+                            )
+                        }
+                        for action in episode.get("actions", [])[:3]
+                    ],
+                    "native_checks": [
+                        {
+                            "constraint_id": c["check"]["constraint_id"],
+                            "metric": c["check"]["metric"],
+                            "status": c["status"],
+                        }
+                        for c in episode.get("native_checks", [])
+                    ],
+                }
+            )
+        catalog["episodes"] = compact
+        catalog["prompt_projection"] = (
+            "max_four_episodes_per_stage; balance passing and failing attempts; full evidence retained outside prompt"
+        )
     for stage in projected.get("stages", []) or []:
         if not isinstance(stage, dict):
             continue

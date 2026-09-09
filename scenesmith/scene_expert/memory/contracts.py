@@ -11,6 +11,7 @@ import json
 
 from pathlib import Path
 
+from scenesmith.scene_expert.memory.placement import experience_text
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
 from scenesmith.scene_expert.schemas import RetrievedMemorySelection
 
@@ -74,6 +75,8 @@ def selection_from_record(
         if not any(step.strip() for step in record.procedure):
             text = ""
     warnings = []
+    if record.placement_experience is not None:
+        text, layout = experience_text(record.placement_experience), ""
     if not text:
         warnings.append("empty_payload")
     if any(not relation.has_verified_geometry for relation in record.spatial_relations):
@@ -108,6 +111,11 @@ def selection_from_record(
         applicability=(
             record.applicability.model_dump(mode="json")
             if isinstance(record, Skill)
+            else {}
+        ),
+        placement_experience=(
+            record.placement_experience.model_dump(mode="json")
+            if record.placement_experience is not None
             else {}
         ),
     )

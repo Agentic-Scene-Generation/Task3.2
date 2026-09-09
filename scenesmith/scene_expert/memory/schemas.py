@@ -220,6 +220,52 @@ class MemoryUtilityObservation(BaseModel):
     evidence_ref: str = ""
 
 
+class PlacementEpisode(BaseModel):
+    """One immutable observed object pair, not a universal placement rule."""
+
+    episode_id: str
+    stage: str
+    state_fingerprint: str
+    subject: dict[str, Any]
+    anchor: dict[str, Any]
+    measurements: dict[str, Any] = Field(default_factory=dict)
+    before_measurements: dict[str, Any] = Field(default_factory=dict)
+    actions: list[dict[str, Any]] = Field(default_factory=list)
+    native_checks: list[dict[str, Any]] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    observation_scope: str = "stage_attempt_final; intermediate states not inferred"
+    stage_passed: bool | None = None
+    stage_scores: dict[str, float] = Field(default_factory=dict)
+    repair_verified: bool = False
+
+    def content_hash(self) -> str:
+        """Hash observations including their exact provenance, excluding the ID."""
+        return hashlib.sha256(
+            json.dumps(
+                self.model_dump(mode="json", exclude={"episode_id"}),
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+
+class PlacementExperience(BaseModel):
+    """LLM procedure bound to observations by Python, with explicit limits."""
+
+    schema_version: str = "placement-experience.v1"
+    procedure: list[str] = Field(default_factory=list)
+    applicability: list[str] = Field(default_factory=list)
+    episodes: list[PlacementEpisode] = Field(default_factory=list)
+    limitations: list[str] = Field(
+        default_factory=lambda: [
+            "Observed transforms are not semantic front directions or universal thresholds.",
+            "Recompute geometry for current assets; never replay source IDs/world poses.",
+            "Stage success and associated actions do not establish causal repair benefit.",
+        ]
+    )
+
+
 class MemoryRecordBase(BaseModel):
     """Common lifecycle and provenance fields for every persisted record."""
 
@@ -240,6 +286,7 @@ class MemoryRecordBase(BaseModel):
     updated_at: str = ""
     provenance: MemorySourceProvenance = Field(default_factory=MemorySourceProvenance)
     spatial_relations: list[SpatialRelationMemory] = Field(default_factory=list)
+    placement_experience: PlacementExperience | None = None
 
 
 class SuccessCase(MemoryRecordBase):
@@ -473,6 +520,9 @@ class SuccessMemoryCandidate(BaseModel):
     stage: str = Field(min_length=1)
     successful_pattern: list[str] = Field(min_length=1)
     positive_guidance: list[str] = Field(default_factory=list)
+    episode_ids: list[str] = Field(default_factory=list, max_length=2)
+    procedure: list[str] = Field(default_factory=list, max_length=6)
+    applicability: list[str] = Field(default_factory=list, max_length=4)
 
 
 class FailureMemoryCandidate(BaseModel):
@@ -491,6 +541,9 @@ class FailureMemoryCandidate(BaseModel):
     is_deterministic: bool = False
     negative_constraint: str = ""
     critic_check: str = ""
+    episode_ids: list[str] = Field(default_factory=list, max_length=2)
+    procedure: list[str] = Field(default_factory=list, max_length=6)
+    applicability: list[str] = Field(default_factory=list, max_length=4)
 
 
 class SkillMemoryCandidate(BaseModel):

@@ -1227,6 +1227,7 @@ class SceneExpertHookRunner:
                 current_scene_state=(
                     build_memory_scene_state(scene) if scene is not None else None
                 ),
+                capture_placement=self._component_enabled("memory_writer"),
             )
             if isinstance(observations, list):
                 pending = list(getattr(self, "_pending_skill_observations", []))
@@ -2429,6 +2430,9 @@ class SceneExpertHookRunner:
                 }
             )
             evidence_payload["memory_lifecycle"] = lifecycle_payload
+            evidence_payload["placement_experience_catalog"] = (
+                self._memory_activity.placement_experience_catalog()
+            )
             ops = self._memory_writer.write(
                 trace_summary=trace_summary,
                 full_report=full_report,

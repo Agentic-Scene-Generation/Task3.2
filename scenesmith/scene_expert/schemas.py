@@ -122,6 +122,7 @@ class RetrievedMemorySelection(BaseModel):
     evidence_warnings: list[str] = Field(default_factory=list)
     spatial_relations: list[dict[str, Any]] = Field(default_factory=list)
     applicability: dict[str, Any] = Field(default_factory=dict)
+    placement_experience: dict[str, Any] = Field(default_factory=dict)
 
 
 class MemorySelectionDecision(BaseModel):
@@ -300,6 +301,22 @@ class MemoryRoleBinding(BaseModel):
     object_ids: list[str] = Field(default_factory=list)
 
 
+class MemoryAdviceCheck(BaseModel):
+    """Read-only advice observation. No model-invented pass thresholds."""
+
+    model_config = ConfigDict(extra="forbid")
+    source_episode_id: str
+    metric: Literal[
+        "anchor_local_offset_m",
+        "relative_yaw_deg",
+        "aabb_separation_m",
+        "native_constraint",
+    ]
+    subject_role: str
+    anchor_role: str
+    constraint_id: str = ""
+
+
 class MemoryAdaptation(BaseModel):
     """Planner-owned advice; identity/evidence are validated outside the LLM."""
 
@@ -316,6 +333,7 @@ class MemoryAdaptation(BaseModel):
     preconditions: list[str] = Field(default_factory=list)
     actions: list[str] = Field(default_factory=list)
     checks: list[str] = Field(default_factory=list)
+    advice_checks: list[MemoryAdviceCheck] = Field(default_factory=list, max_length=6)
 
 
 class AcceptedMemoryItem(BaseModel):

@@ -11,6 +11,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from scenesmith.scene_expert.memory.placement import collect_placement_episodes
 from scenesmith.scene_expert.memory.schemas import MemoryUtilityObservation
 from scenesmith.scene_expert.memory.usage import collect_memory_usage
 from scenesmith.scene_expert.schemas import (
@@ -96,6 +97,7 @@ class MemoryActivityLogger:
         repair_actions: list[Any],
         scene_state_path: str,
         current_scene_state: dict | None = None,
+        capture_placement: bool = True,
     ) -> list[MemoryUtilityObservation]:
         """Attach the authoritative critic result to the selected memory."""
         stage_entry = self._payload["stages"].setdefault(stage, {})
@@ -177,6 +179,22 @@ class MemoryActivityLogger:
             }
         )
         # Reconcile at a completed request boundary, not from a pre-stage marker.
+        capture_started = time.perf_counter()
+        try:
+            stage_entry["placement_episodes"] = (
+                collect_placement_episodes(self._output_dir.parent, stage, stage_entry)
+                if capture_placement
+                else {"episodes": [], "warnings": [], "disabled": True}
+            )
+        except Exception as exc:
+            # Observation failure cannot change native generation or fabricate data.
+            stage_entry["placement_episodes"] = {
+                "episodes": [],
+                "warnings": [f"capture_failed:{type(exc).__name__}"],
+            }
+        stage_entry["placement_capture_elapsed_sec"] = (
+            time.perf_counter() - capture_started
+        )
         usage = collect_memory_usage(
             self._output_dir.parent, self._payload, stage_filter=stage
         )
@@ -199,21 +217,42 @@ class MemoryActivityLogger:
                 ]
                 observation.outcome = "unknown"
                 observation.outcome_basis = "no_verified_related_action"
-                if (
-                    row.get("action_observed") is True
-                    and row.get("target_verified") is not None
-                ):
-                    observation.outcome = (
-                        "positive" if row["target_verified"] else "negative"
-                    )
+                if row.get("action_observed") is True:
+                    observation.outcome = "neutral"
                     observation.outcome_basis = (
-                        "related_action_and_exact_target_outcome_not_causal"
+                        "observed_action_not_attributable_utility"
                     )
             stage_entry["utility_observations"] = [
                 row.model_dump(mode="json") for row in observations
             ]
         self._save()
         return observations
+
+    def placement_experience_catalog(self) -> dict[str, Any]:
+        """Export exact episode content, not filesystem references or summaries."""
+        entries = [
+            row["entry"] for row in self._payload.get("stage_attempt_history", [])
+        ]
+        entries += list(self._payload["stages"].values())
+        return {
+            "schema_version": "placement-experience-catalog.v1",
+            "episodes": [
+                episode
+                for entry in entries
+                for episode in (entry.get("placement_episodes") or {}).get(
+                    "episodes", []
+                )
+            ],
+            "warnings": sorted(
+                {
+                    warning
+                    for entry in entries
+                    for warning in (entry.get("placement_episodes") or {}).get(
+                        "warnings", []
+                    )
+                }
+            ),
+        }
 
     @staticmethod
     def _classify_outcome(

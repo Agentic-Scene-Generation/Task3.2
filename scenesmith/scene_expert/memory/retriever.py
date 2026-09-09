@@ -9,6 +9,11 @@ from __future__ import annotations
 import re
 
 from scenesmith.scene_expert.memory.contracts import selection_from_record
+from scenesmith.scene_expert.memory.placement import (
+    experience_priority,
+    experience_text,
+    object_role,
+)
 from scenesmith.scene_expert.memory.room_taxonomy import room_types_compatible
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
 from scenesmith.scene_expert.memory.skill_policy import evaluate_skill_for_task
@@ -331,19 +336,31 @@ class MemoryRetriever:
             ):
                 continue
             case_object_tokens = set(
-                _tokenize(" ".join(case.required_objects or case.task_signature))
+                _tokenize(
+                    " ".join(
+                        [
+                            object_role(o)
+                            for e in case.placement_experience.episodes
+                            for o in (e.subject, e.anchor)
+                        ]
+                        if case.placement_experience
+                        else case.required_objects or case.task_signature
+                    )
+                )
             )
             if case_object_tokens and not (
                 required_tokens and case_object_tokens & required_tokens
             ):
                 continue
             candidate_tokens = _tokenize(
-                " ".join([case.room_type, case.style] + case.task_signature)
+                experience_text(case.placement_experience)
+                if case.placement_experience
+                else " ".join([case.room_type, case.style] + case.task_signature)
             )
             score = _keyword_score(query_tokens, candidate_tokens) * 1.5
             scored.append((score, case))
 
-        scored.sort(key=lambda x: x[0], reverse=True)
+        scored.sort(key=lambda x: (experience_priority(x[1]), x[0]), reverse=True)
         top = [(s, c) for s, c in scored[: self._max_success] if s > 0]
 
         hints = [case.to_hint_text() for _, case in top]
@@ -375,18 +392,30 @@ class MemoryRetriever:
                 case.room_type, task_spec.room_type
             ):
                 continue
-            case_object_tokens = set(_tokenize(case.object))
+            case_object_tokens = set(
+                _tokenize(
+                    " ".join(
+                        object_role(o)
+                        for e in case.placement_experience.episodes
+                        for o in (e.subject, e.anchor)
+                    )
+                    if case.placement_experience
+                    else case.object
+                )
+            )
             if case_object_tokens and not (case_object_tokens & task_object_tokens):
                 continue
             candidate_tokens = _tokenize(
-                " ".join(
+                experience_text(case.placement_experience)
+                if case.placement_experience
+                else " ".join(
                     [case.room_type, case.object, case.failure_type, case.bad_pattern]
                 )
             )
             score = _keyword_score(query_tokens, candidate_tokens) * 1.5
             scored.append((score, case))
 
-        scored.sort(key=lambda x: x[0], reverse=True)
+        scored.sort(key=lambda x: (experience_priority(x[1]), x[0]), reverse=True)
         top = [
             (score, case) for score, case in scored[: self._max_failure] if score > 0
         ]
