@@ -1,0 +1,38 @@
+{
+  "query": "A Scandinavian wooden chair for a dining room",
+  "real_gpu_text_embedding": true,
+  "read_only_full_collection_query": true,
+  "results": [
+    {
+      "score": 0.26838117837905884,
+      "asset_id": "3dfuture:88e7ddc5-aaf1-48c9-a967-765c1ad3cc85",
+      "name": "Dining Chair",
+      "image_paths": [
+        "/data/250010098/codex_communication/3_scenesmith_asset_relations/feedback/downloads/3D-FUTURE-WenjiaWang/extracted/3D-FUTURE-model/88e7ddc5-aaf1-48c9-a967-765c1ad3cc85/image.jpg"
+      ],
+      "asset_path": "/data/250010098/codex_communication/3_scenesmith_asset_relations/feedback/downloads/3D-FUTURE-WenjiaWang/extracted/3D-FUTURE-model/88e7ddc5-aaf1-48c9-a967-765c1ad3cc85/raw_model.obj",
+      "content": "Asset UID: 3dfuture:88e7ddc5-aaf1-48c9-a967-765c1ad3cc85. Source: 3dfuture. Category: Dining Chair. Verified styles: scandinavian."
+    },
+    {
+      "score": 0.27199792861938477,
+      "asset_id": "3dfuture:8314e676-c506-3017-b1d3-08d8b7625d85",
+      "name": "Dining Chair",
+      "image_paths": [
+        "/data/250010098/codex_communication/3_scenesmith_asset_relations/feedback/downloads/3D-FUTURE-WenjiaWang/extracted/3D-FUTURE-model/8314e676-c506-3017-b1d3-08d8b7625d85/image.jpg"
+      ],
+      "asset_path": "/data/250010098/codex_communication/3_scenesmith_asset_relations/feedback/downloads/3D-FUTURE-WenjiaWang/extracted/3D-FUTURE-model/8314e676-c506-3017-b1d3-08d8b7625d85/raw_model.obj",
+      "content": "Asset UID: 3dfuture:8314e676-c506-3017-b1d3-08d8b7625d85. Source: 3dfuture. Category: Dining Chair. Verified styles: scandinavian."
+    },
+    {
+      "score": 0.2772078514099121,
+      "asset_id": "3dfuture:1460b4ef-2317-347a-82d9-ae24ea0083be",
+      "name": "Dining Chair",
+      "image_paths": [
+        "/data/250010098/codex_communication/3_scenesmith_asset_relations/feedback/downloads/3D-FUTURE-WenjiaWang/extracted/3D-FUTURE-model/1460b4ef-2317-347a-82d9-ae24ea0083be/image.jpg"
+      ],
+      "asset_path": "/data/250010098/codex_communication/3_scenesmith_asset_relations/feedback/downloads/3D-FUTURE-WenjiaWang/extracted/3D-FUTURE-model/1460b4ef-2317-347a-82d9-ae24ea0083be/raw_model.obj",
+      "content": "Asset UID: 3dfuture:1460b4ef-2317-347a-82d9-ae24ea0083be. Source: 3dfuture. Category: Dining Chair. Verified styles: scandinavian."
+    }
+  ],
+  "quality_benchmark": false
+}
