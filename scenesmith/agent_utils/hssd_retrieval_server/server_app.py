@@ -10,12 +10,12 @@ import uuid
 from pathlib import Path
 from queue import Queue
 from threading import Thread
+from typing import Any
 
 import flask
 import numpy as np
 
-from scenesmith.agent_utils.clip_embeddings import warmup_clip_model
-from scenesmith.agent_utils.hssd_retrieval.retrieval import HssdRetriever
+from scenesmith.agent_utils.hssd_retrieval.all_assets_zvec import AllAssetsZvecRetriever
 from scenesmith.agent_utils.mesh_frame import gltf_y_up_dimensions_to_scene_z_up
 from scenesmith.agent_utils.retrieval_errors import FatalRetrievalError
 from scenesmith.agent_utils.scheduler import QueuedRequest, StrictRoundRobinScheduler
@@ -43,6 +43,7 @@ class HssdRetrievalApp(flask.Flask):
         hssd_zvec_collection_path: str | None = None,
         hssd_embedding_base_url: str | None = None,
         hssd_embedding_dimension: int = 2048,
+        hssd_all_assets_manifest_path: str | None = None,
         clip_device: str | None = None,
     ) -> None:
         """Initialize Flask app.
@@ -60,12 +61,14 @@ class HssdRetrievalApp(flask.Flask):
             hssd_zvec_collection_path: Path to the local Zvec collection.
             hssd_embedding_base_url: Base URL for the llama.cpp embeddings endpoint.
             hssd_embedding_dimension: Expected embedding dimension.
+            hssd_all_assets_manifest_path: JSONL manifest with audited source-unit
+                scales for the all-assets backend.
             clip_device: Target device for CLIP model (e.g., "cuda:0"). If None,
                 uses default (cuda if available, else cpu).
         """
         super().__init__("hssd_retrieval_server")
 
-        self._retriever: HssdRetriever | None = None
+        self._retriever: Any | None = None
 
         # Store HSSD config parameters for lazy initialization.
         self._hssd_data_path = hssd_data_path
@@ -75,6 +78,7 @@ class HssdRetrievalApp(flask.Flask):
         self._hssd_zvec_collection_path = hssd_zvec_collection_path
         self._hssd_embedding_base_url = hssd_embedding_base_url
         self._hssd_embedding_dimension = hssd_embedding_dimension
+        self._hssd_all_assets_manifest_path = hssd_all_assets_manifest_path
         self._clip_device = clip_device
         self._fatal_error: str | None = None
 
@@ -95,6 +99,8 @@ class HssdRetrievalApp(flask.Flask):
             start_time = time.time()
             self._get_retriever()
             if self._hssd_retrieval_backend == "clip":
+                from scenesmith.agent_utils.clip_embeddings import warmup_clip_model
+
                 warmup_clip_model(device=self._clip_device)
             load_time = time.time() - start_time
             console_logger.info(f"HSSD retriever preloaded in {load_time:.2f}s")
@@ -111,7 +117,7 @@ class HssdRetrievalApp(flask.Flask):
             methods=["POST"],
         )
 
-    def _get_retriever(self) -> HssdRetriever:
+    def _get_retriever(self) -> Any:
         """Get or create HSSD retriever (singleton per server process)."""
         if self._retriever is None:
             import os
@@ -137,6 +143,10 @@ class HssdRetrievalApp(flask.Flask):
             embedding_base_url = self._hssd_embedding_base_url or os.environ.get(
                 "HSSD_EMBEDDING_BASE_URL"
             )
+            all_assets_manifest_path = (
+                self._hssd_all_assets_manifest_path
+                or os.environ.get("HSSD_ALL_ASSETS_MANIFEST_PATH")
+            )
             embedding_dimension = int(
                 os.environ.get(
                     "HSSD_EMBEDDING_DIMENSION", str(self._hssd_embedding_dimension)
@@ -158,7 +168,7 @@ class HssdRetrievalApp(flask.Flask):
                 zvec_path = project_root / zvec_path
 
             zvec_config = None
-            if retrieval_backend == "embedding":
+            if retrieval_backend in {"embedding", "all_assets_embedding"}:
                 if zvec_path is None or embedding_base_url is None:
                     raise ValueError(
                         "Embedding backend requires Zvec collection path and "
@@ -168,7 +178,23 @@ class HssdRetrievalApp(flask.Flask):
                     collection_path=zvec_path,
                     base_url=embedding_base_url,
                     embedding_dimension=embedding_dimension,
+                    all_assets_manifest_path=(
+                        Path(all_assets_manifest_path)
+                        if all_assets_manifest_path
+                        else None
+                    ),
                 )
+
+            if retrieval_backend == "all_assets_embedding":
+                assert zvec_config is not None
+                if zvec_config.all_assets_manifest_path is None:
+                    raise ValueError(
+                        "all_assets_embedding requires " "HSSD_ALL_ASSETS_MANIFEST_PATH"
+                    )
+                self._retriever = AllAssetsZvecRetriever(
+                    config=zvec_config, top_k=self._hssd_top_k
+                )
+                return self._retriever
 
             config = HssdConfig(
                 data_path=data_path,
@@ -178,6 +204,8 @@ class HssdRetrievalApp(flask.Flask):
                 object_type_mapping=None,  # Will use defaults from __post_init__
                 zvec=zvec_config,
             )
+            from scenesmith.agent_utils.hssd_retrieval.retrieval import HssdRetriever
+
             self._retriever = HssdRetriever(
                 config=config, clip_device=self._clip_device
             )
@@ -317,8 +345,12 @@ class HssdRetrievalApp(flask.Flask):
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # Derive category from HSSD config mapping.
-        category = retriever.config.object_type_mapping.get(
-            request.object_type.upper(), "unknown"
+        category = (
+            "all_assets"
+            if self._hssd_retrieval_backend == "all_assets_embedding"
+            else retriever.config.object_type_mapping.get(
+                request.object_type.upper(), "unknown"
+            )
         )
 
         results: list[HssdRetrievalResult] = []

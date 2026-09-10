@@ -70,7 +70,7 @@ def parse_arguments() -> argparse.Namespace:
         "--hssd-retrieval-backend",
         type=str,
         default="clip",
-        choices=["clip", "embedding"],
+        choices=["clip", "embedding", "all_assets_embedding"],
         help="Semantic retrieval backend to use (default: %(default)s).",
     )
     parser.add_argument(
@@ -96,6 +96,12 @@ def parse_arguments() -> argparse.Namespace:
         type=int,
         default=2048,
         help="Expected embedding dimension for embedding retrieval.",
+    )
+    parser.add_argument(
+        "--hssd-all-assets-manifest-path",
+        type=str,
+        default=None,
+        help="JSONL manifest with all-assets mesh unit scales.",
     )
 
     return parser.parse_args()
@@ -149,6 +155,7 @@ def main() -> int:
             hssd_zvec_collection_path=args.hssd_zvec_collection_path,
             hssd_embedding_base_url=args.hssd_embedding_base_url,
             hssd_embedding_dimension=args.hssd_embedding_dimension,
+            hssd_all_assets_manifest_path=args.hssd_all_assets_manifest_path,
         )
         server.start()
 
