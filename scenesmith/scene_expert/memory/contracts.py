@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 
 from scenesmith.scene_expert.memory.placement import experience_text
+from scenesmith.scene_expert.memory.placement_methods import methods_valid
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
 from scenesmith.scene_expert.schemas import RetrievedMemorySelection
 
@@ -77,6 +78,19 @@ def selection_from_record(
     warnings = []
     if record.placement_experience is not None:
         text, layout = experience_text(record.placement_experience), ""
+        if (
+            not record.placement_experience.method_steps
+            and record.placement_experience.schema_version != "placement-experience.v2"
+        ):
+            warnings.append("legacy_method_step_binding_unavailable")
+        elif not methods_valid(record.placement_experience):
+            text = ""
+            warnings.append("invalid_method_step_contract")
+        elif any(
+            s.binding == "legacy_shared_refs"
+            for s in record.placement_experience.method_steps
+        ):
+            warnings.append("legacy_shared_step_references")
     if not text:
         warnings.append("empty_payload")
     if any(not relation.has_verified_geometry for relation in record.spatial_relations):

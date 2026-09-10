@@ -26,6 +26,10 @@ from scenesmith.scene_expert.memory.placement import (
     object_role,
     valid_episode,
 )
+from scenesmith.scene_expert.memory.placement_methods import (
+    bind_method_steps,
+    critic_catalog,
+)
 from scenesmith.scene_expert.memory.schemas import (
     FailureCase,
     FailureMemoryCandidate,
@@ -113,10 +117,10 @@ Rules:
   the failed stage itself. Deterministic code decides candidate versus active.
 - Prefer empty arrays with a clear noop_reason over weak, duplicate, or speculative memory.
 - Keep each lesson concise and useful for a different scene with similar requirements.
-- Return at most three candidates total to leave enough output space for complete JSON.
+- Return at most two candidates total to leave enough output space for complete JSON.
 - When placement_experience_catalog is supplied, each success/failure MUST select
-  one or two exact episode_ids from that catalog, and supply procedure (2-6 steps)
-  and applicability. An empty catalog means no new spatial success/failure, NOT
+  exact episode_ids from that catalog through method_steps and supply
+  applicability. An empty catalog means no new spatial success/failure, NOT
   permission to restate the task. Required inventories remain metadata only.
 - Explain HOW to place/adjust relative to an anchor, not merely WHAT is required.
   Include overlooked geometry, order-of-operations or a supported failure pattern.
@@ -126,6 +130,21 @@ Rules:
   Do not claim a repair worked: these final-stage episodes do not prove that.
   Python binds observations; do not invent or rewrite measurements/evidence.
 - Optional assets and all stages may yield lessons when the catalog supports them.
+- For spatial candidates, return method_steps (2-4 steps), each with instruction,
+  episode_ids and critic_refs. Bind EACH step to its own exact visible sources.
+  The union can span multiple pairs: bed-wall and bed-nightstand are distinct.
+  Root episode_ids/procedure may be empty; code derives the canonical procedure
+  and complete source union from method_steps. Do not put IDs in successful_pattern.
+- Instructions describe HOW to adapt, not fixed targets. Do not write numeric
+  constants, source object IDs, absolute source poses or guarantees in instructions.
+  Python preserves exact measurements as source observations; cite critic_refs
+  for opinions and suggestions. Critic wording is not a universal physical law.
+  All methods remain transfer hypotheses until tested in a different scene.
+- Example step (replace placeholders with exact visible IDs):
+  {"instruction":"Inspect the bed footprint and recompute its gap to the wall.",
+   "episode_ids":["<bed-wall episode>"],"critic_refs":[]}
+  A lighting step may cite the exact reading-zone critic paragraph; never claim
+  a fixed light spacing guarantees non-overlapping light pools in other rooms.
 """
 
 
@@ -557,15 +576,38 @@ class MemoryWriter:
                 continue
             if valid_episode(episode):
                 by_id[episode.episode_id] = episode
-        ids = candidate.episode_ids
+        quotes = {q.evidence_id: q for q in critic_catalog(evidence)}
+        steps, step_decisions = bind_method_steps(
+            candidate,
+            by_id,
+            quotes,
+            visible_episodes=getattr(self, "_visible_episode_ids", None),
+            visible_quotes=getattr(self, "_visible_critic_ids", None),
+        )
+        self.last_trace.setdefault("placement_method_decisions", []).append(
+            {"stage": candidate.stage, "steps": step_decisions}
+        )
+        ids = list(dict.fromkeys(i for step in steps for i in step.episode_ids))
+        # A critic-only hypothesis still needs a valid stage-local spatial source.
+        if not ids:
+            ids = candidate.episode_ids
         episodes = [by_id[key] for key in ids if key in by_id]
-        procedure = self._clean_list(candidate.procedure)
+        refs = list(dict.fromkeys(i for step in steps for i in step.critic_refs))
+        procedure = [step.instruction for step in steps]
         reasons = []
         visible = getattr(self, "_visible_episode_ids", None)
         if visible is not None and any(eid not in visible for eid in ids):
             reasons.append("episode_not_in_model_input")
         if not ids or len(ids) != len(set(ids)) or len(episodes) != len(ids):
             reasons.append("missing_or_invalid_episode_binding")
+        if (
+            len(
+                {e.state_fingerprint for e in episodes}
+                | {quotes[i].state_fingerprint for i in refs}
+            )
+            > 1
+        ):
+            reasons.append("method_snapshot_mismatch")
         if any(e.stage != candidate.stage for e in episodes):
             reasons.append("episode_stage_mismatch")
         if len(procedure) < 2 or not self._clean_list(candidate.applicability):
@@ -597,11 +639,25 @@ class MemoryWriter:
         if reasons:
             return False
         experience = PlacementExperience(
+            schema_version="placement-experience.v2",
             procedure=procedure,
             applicability=self._clean_list(candidate.applicability),
             episodes=episodes,
+            method_steps=steps,
+            critic_advice=[quotes[i] for i in refs],
         )
         content["placement_experience"] = experience.model_dump(mode="json")
+        # One canonical method owns all reader/embedding paths. Unbound model
+        # summaries cannot reappear through positive_guidance or legacy hints.
+        if not failure:
+            content["successful_pattern"] = list(procedure)
+            content["positive_guidance"] = list(procedure)
+        else:
+            content["repair_action"] = " ".join(procedure)
+            content["negative_constraint"] = "Transfer hypothesis: " + " ".join(
+                procedure
+            )
+            content["repair_verified"] = False
         if not failure:
             # These scores describe the selected attempt, not another entry
             # for the same stage that happened before a retry.
@@ -621,6 +677,7 @@ class MemoryWriter:
             content["spatial_relations"].append(relation.model_dump(mode="json"))
         content["evidence_refs"] = sorted(
             {ref for e in episodes for ref in e.evidence_refs if ref}
+            | {f"writer-critic:{i}" for i in refs}
         )
         content["provenance"]["evidence_refs"] = content["evidence_refs"]
         content["provenance"]["scene_state_path"] = episodes[0].evidence_refs[0]
@@ -1609,6 +1666,7 @@ class MemoryWriter:
         self._visible_episode_ids = (
             set(metadata["selected_episode_ids"]) if metadata["has_catalog"] else None
         )
+        self._visible_critic_ids = set(metadata.get("selected_critic_ids", []))
         if not hasattr(self, "_prompt_attempts"):
             self._prompt_attempts = []
         self._prompt_attempts.append(metadata)

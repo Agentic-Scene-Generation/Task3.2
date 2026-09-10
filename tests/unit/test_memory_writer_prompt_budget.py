@@ -147,8 +147,9 @@ def test_context_retry_reduces_bytes_without_increasing_output_or_downgrading():
 
 def test_writer_context_recovery_and_full_input_archive(tmp_path):
     evidence = evidence_with_catalog(tmp_path)
-    evidence["stages"][0]["verify_report"]["critique_summary"] = (
-        "A complete sentence." * 150
+    evidence["stages"][0]["verify_report"]["critique_summary"] = "\n\n".join(
+        f"Observation {i}: " + "The chair is placed beside the table. " * 20
+        for i in range(8)
     )
     fake = _FakeOpenAI(
         [

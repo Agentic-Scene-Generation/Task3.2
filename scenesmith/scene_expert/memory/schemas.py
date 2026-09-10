@@ -250,6 +250,46 @@ class PlacementEpisode(BaseModel):
         ).hexdigest()
 
 
+class CriticAdviceEvidence(BaseModel):
+    """An exact source-report excerpt, not a deterministic spatial verdict."""
+
+    evidence_id: str
+    stage: str
+    stage_entry_index: int
+    trace_id: str
+    report_hash: str
+    source: str
+    quote: str
+    state_fingerprint: str = ""
+    # Names mentioned in the quote and present in source observations. They
+    # permit current-role binding, not inference of a measured spatial pair.
+    object_roles: list[str] = Field(default_factory=list)
+
+    def content_hash(self) -> str:
+        """Bind the unchanged quote to its report, stage and trace."""
+        return hashlib.sha256(
+            json.dumps(
+                self.model_dump(mode="json", exclude={"evidence_id"}),
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+
+class PlacementMethodStep(BaseModel):
+    """A transfer hypothesis with explicit source links, never proven benefit."""
+
+    instruction: str
+    episode_ids: list[str] = Field(default_factory=list)
+    critic_refs: list[str] = Field(default_factory=list)
+    binding: Literal["explicit", "legacy_shared_refs"] = "explicit"
+    evidence_kinds: list[Literal["source_observation", "critic_advice"]] = Field(
+        default_factory=list
+    )
+    verification_status: Literal["transfer_unverified"] = "transfer_unverified"
+
+
 class PlacementExperience(BaseModel):
     """LLM procedure bound to observations by Python, with explicit limits."""
 
@@ -257,6 +297,8 @@ class PlacementExperience(BaseModel):
     procedure: list[str] = Field(default_factory=list)
     applicability: list[str] = Field(default_factory=list)
     episodes: list[PlacementEpisode] = Field(default_factory=list)
+    method_steps: list[PlacementMethodStep] = Field(default_factory=list)
+    critic_advice: list[CriticAdviceEvidence] = Field(default_factory=list)
     limitations: list[str] = Field(
         default_factory=lambda: [
             "Observed transforms are not semantic front directions or universal thresholds.",
@@ -512,6 +554,16 @@ class MemoryUpdateOp(BaseModel):
     target_id: str = ""  # for UPDATE: the case_id / skill_name to update
 
 
+class PlacementMethodCandidate(BaseModel):
+    """Compact model-selected method; evidence and verification remain code-owned."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    instruction: str = Field(min_length=1, max_length=600)
+    episode_ids: list[str] = Field(default_factory=list, max_length=2)
+    critic_refs: list[str] = Field(default_factory=list, max_length=2)
+
+
 class SuccessMemoryCandidate(BaseModel):
     """Small, strict LLM output for one reusable successful pattern."""
 
@@ -523,6 +575,9 @@ class SuccessMemoryCandidate(BaseModel):
     episode_ids: list[str] = Field(default_factory=list, max_length=2)
     procedure: list[str] = Field(default_factory=list, max_length=6)
     applicability: list[str] = Field(default_factory=list, max_length=4)
+    method_steps: list[PlacementMethodCandidate] = Field(
+        default_factory=list, max_length=6
+    )
 
 
 class FailureMemoryCandidate(BaseModel):
@@ -544,6 +599,9 @@ class FailureMemoryCandidate(BaseModel):
     episode_ids: list[str] = Field(default_factory=list, max_length=2)
     procedure: list[str] = Field(default_factory=list, max_length=6)
     applicability: list[str] = Field(default_factory=list, max_length=4)
+    method_steps: list[PlacementMethodCandidate] = Field(
+        default_factory=list, max_length=6
+    )
 
 
 class SkillMemoryCandidate(BaseModel):

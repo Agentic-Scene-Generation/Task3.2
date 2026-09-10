@@ -322,18 +322,51 @@ def collect_placement_episodes(scene_dir: Path, stage: str, entry: dict) -> dict
 
 def experience_text(experience: PlacementExperience) -> str:
     """Render transferable procedure and measured precedents, without source IDs."""
+    from scenesmith.scene_expert.memory.placement_methods import methods_valid
+
     lines = ["Spatial placement experience (advisory, not task requirements):"]
     lines.extend("Applicable when: " + value for value in experience.applicability)
-    lines.extend(f"{i}. {step}" for i, step in enumerate(experience.procedure, 1))
+    if (
+        experience.method_steps
+        or experience.schema_version == "placement-experience.v2"
+    ):
+        if not methods_valid(experience):
+            return "Spatial method unavailable: invalid per-step source contract."
+        by_id = {e.episode_id: e for e in experience.episodes}
+        quote_labels = {
+            q.evidence_id: i for i, q in enumerate(experience.critic_advice, 1)
+        }
+        lines.append(
+            "Transfer hypotheses (not verified outcomes or fixed target values):"
+        )
+        for i, step in enumerate(experience.method_steps, 1):
+            sources = [
+                object_role(by_id[e].subject)
+                + " relative to "
+                + object_role(by_id[e].anchor)
+                for e in step.episode_ids
+            ] + [f"critic excerpt {quote_labels[q]}" for q in step.critic_refs]
+            lines.append(
+                f"{i}. {step.instruction} [sources: {'; '.join(sources)}; {step.binding}]"
+            )
+    else:
+        lines.append(
+            "Legacy unverified hypotheses: step-level source binding unavailable; do not copy source constants."
+        )
+        lines.extend(f"{i}. {step}" for i, step in enumerate(experience.procedure, 1))
     for episode in experience.episodes:
         lines.append(
-            f"Observed {object_role(episode.subject)} relative to {object_role(episode.anchor)}: "
+            f"Source observation only — {object_role(episode.subject)} relative to {object_role(episode.anchor)}: "
             + json.dumps(episode.measurements, sort_keys=True)
         )
         labels = sorted({row["status"] for row in episode.native_checks})
         lines.append(
             "Native checks for this source pair: "
             + (", ".join(labels) or "unavailable; observed layout only")
+        )
+    for i, quote in enumerate(experience.critic_advice, 1):
+        lines.append(
+            f"Critic excerpt {i} (source-scene opinion; numeric values are NOT transfer thresholds):\n{quote.quote}"
         )
     lines.extend("Limit: " + value for value in experience.limitations)
     return "\n".join(lines)
@@ -348,7 +381,20 @@ def experience_priority(record: Any) -> int:
         and experience.episodes
         and all(valid_episode(e) for e in experience.episodes)
     ):
-        return 2
+        from scenesmith.scene_expert.memory.placement_methods import methods_valid
+
+        if methods_valid(experience):
+            return (
+                2
+                if all(s.binding == "explicit" for s in experience.method_steps)
+                else 1
+            )
+        return (
+            1
+            if not experience.method_steps
+            and experience.schema_version != "placement-experience.v2"
+            else 0
+        )
     return 0
 
 

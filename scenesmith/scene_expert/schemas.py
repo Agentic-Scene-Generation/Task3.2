@@ -329,6 +329,9 @@ class MemoryAdaptation(BaseModel):
     source_relation_indices: list[Annotated[int, Field(strict=True, ge=0)]] | None = (
         None  # Zero-based immutable source rows; legacy None means the entire source.
     )
+    source_method_step_indices: (
+        list[Annotated[int, Field(strict=True, ge=0)]] | None
+    ) = None  # Legacy None keeps all steps; a subset must retain its own sources.
     bindings: list[MemoryRoleBinding] = Field(default_factory=list)
     preconditions: list[str] = Field(default_factory=list)
     actions: list[str] = Field(default_factory=list)

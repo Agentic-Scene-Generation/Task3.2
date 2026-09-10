@@ -10,7 +10,15 @@ import json
 import re
 
 from scenesmith.scene_expert.memory.advisory import advice_check_reasons
-from scenesmith.scene_expert.memory.schemas import Skill, SpatialRelationMemory
+from scenesmith.scene_expert.memory.placement_methods import (
+    instruction_reasons,
+    methods_valid,
+)
+from scenesmith.scene_expert.memory.schemas import (
+    PlacementExperience,
+    Skill,
+    SpatialRelationMemory,
+)
 from scenesmith.scene_expert.memory.skill_policy import (
     _category_compatible,
     _endpoints_match,
@@ -189,6 +197,67 @@ def validate_adaptation(
         context.model_dump(mode="json") if context else {},
     )
     relations = scoped_relations(source, choice)
+    quoted_roles: set[str] = set()
+    if (
+        source.placement_experience.get("method_steps")
+        or source.placement_experience.get("schema_version")
+        == "placement-experience.v2"
+    ):
+        try:
+            experience = PlacementExperience.model_validate(source.placement_experience)
+        except (ValueError, TypeError):
+            return list(dict.fromkeys([*reasons, "invalid_method_step_contract"]))
+        if not methods_valid(experience):
+            reasons.append("invalid_method_step_contract")
+        indices = choice.source_method_step_indices
+        indices = (
+            list(range(len(experience.method_steps))) if indices is None else indices
+        )
+        if (
+            not indices
+            or len(set(indices)) != len(indices)
+            or any(
+                type(i) is not int or not 0 <= i < len(experience.method_steps)
+                for i in indices
+            )
+        ):
+            reasons.append("invalid_source_method_scope")
+        else:
+            scoped_ids = {r.get("evidence_ref") for r in relations}
+            if any(
+                set(experience.method_steps[i].episode_ids) - scoped_ids
+                for i in indices
+            ):
+                reasons.append("method_step_source_outside_relation_scope")
+            quote_ids = {
+                ref for i in indices for ref in experience.method_steps[i].critic_refs
+            }
+            quoted_roles = {
+                role
+                for quote in experience.critic_advice
+                if quote.evidence_id in quote_ids
+                for role in quote.object_roles
+            }
+        # IDs such as chair_1 are legitimate current bindings, not copied source
+        # distances. Ignore only exact IDs actually present in the current state.
+        current_ids = {
+            str(o.get("object_id"))
+            for o in state.get("objects", [])
+            if o.get("object_id")
+        }
+
+        def without_current_ids(text: str) -> str:
+            for oid in sorted(current_ids, key=len, reverse=True):
+                text = re.sub(
+                    r"(?<!\w)" + re.escape(oid) + r"(?!\w)", "current asset", text
+                )
+            return text
+
+        if any(
+            instruction_reasons(without_current_ids(s))
+            for s in [*choice.actions, *choice.checks, *choice.preconditions]
+        ):
+            reasons.append("unverified_memory_target_or_guarantee")
     if state.get("observation_error"):
         reasons.append("scene_observation_unavailable")
     if not source.content_hash or choice.source_content_hash != source.content_hash:
@@ -221,7 +290,8 @@ def validate_adaptation(
         ):
             reasons.append("unbound_current_role")
         if source_roles and not any(
-            _category_compatible(binding.source_role, role) for role in source_roles
+            _category_compatible(binding.source_role, role)
+            for role in source_roles | quoted_roles
         ):
             reasons.append("unknown_source_role")
         for object_id in binding.object_ids:
@@ -265,6 +335,21 @@ def render_accepted_item(
     ]
     if source.memory_type == "skill":
         lines.append(f"[Skill: {source.memory_id}]")
+    if source.placement_experience:
+        lines.append(
+            "Transfer hypotheses only: source observations and critic opinions do not prove this method works here. Recompute using current assets; do not impose source constants as requirements."
+        )
+        if source.placement_experience.get("method_steps"):
+            indices = choice.source_method_step_indices
+            indices = (
+                list(range(len(source.placement_experience["method_steps"])))
+                if indices is None
+                else indices
+            )
+            lines.append(
+                "Selected source method steps (zero-based): "
+                + ", ".join(map(str, indices))
+            )
     if choice.advice_checks:
         lines.append(
             "Read-only spatial observations (not additional scoring criteria):"

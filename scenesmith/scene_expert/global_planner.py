@@ -125,6 +125,14 @@ Guidelines:
   are not walkable clearance; transform yaw is not semantic front. Use
   native_constraint only for a matching current spatial predicate supported by
   the source native checks; never substitute a required-object count.
+- Spatial method_steps are transfer_unverified hypotheses. Keep their episode
+  and critic sources distinct: a critic excerpt is a source-scene opinion, not
+  a deterministic result. Use the relevant step and its source pairs together.
+  Never turn source measurements or quoted thresholds into fixed action/check
+  constants or guarantees. Describe how to recompute for current assets instead.
+  Set source_method_step_indices to the relevant zero-based method steps and
+  retain ALL of those steps' episode references in source_relation_indices.
+  Unrelated steps may be excluded. Null means all method steps, not automatic filtering.
 - Source cases may include unrelated objects and whole-scene inventories.
   Select only the source relation_index rows actually used by your advice in
   source_relation_indices. Bind EVERY nonempty subject_role and target_role in
@@ -768,6 +776,12 @@ def _format_memory_for_prompt(memory_pack: MemoryPack) -> str:
                 "placement_experience": (
                     {
                         "procedure": row.placement_experience.get("procedure", []),
+                        "method_steps": row.placement_experience.get(
+                            "method_steps", []
+                        ),
+                        "critic_advice": row.placement_experience.get(
+                            "critic_advice", []
+                        ),
                         "applicability": row.placement_experience.get(
                             "applicability", []
                         ),

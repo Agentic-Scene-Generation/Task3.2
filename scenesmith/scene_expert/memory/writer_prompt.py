@@ -14,11 +14,14 @@ from typing import Any
 
 from scenesmith.scene_expert.memory.evidence import evidence_hash
 from scenesmith.scene_expert.memory.placement import valid_episode
+from scenesmith.scene_expert.memory.placement_methods import critic_catalog
 from scenesmith.scene_expert.memory.schemas import PlacementEpisode
 
 INSTRUCTION = (
     "Extract concise reusable spatial methods from these observations. "
-    "Return at most three candidates total. Select only visible episode_ids. "
+    "Return at most two candidates total. Bind each method_steps item to visible "
+    "episode_ids and/or critic_refs. Keep numeric values only in source evidence, "
+    "not in transferred instructions. Select only visible episode_ids. "
     "Stage reports and episode-specific outcomes are authoritative, not task "
     "inventories or retrieved advice. Omitted evidence is unknown, not passing. "
     "A passing episode from a degraded scene permits only stage-local success. "
@@ -207,10 +210,38 @@ def build_writer_prompt(
                 reason = "input_byte_budget"
             omitted.append({"episode_id": episode.episode_id, "reason": reason})
 
+    # Quote references are bound to original full reports, not copied model prose.
+    selected_critic_ids = []
+    if has_catalog:
+        projected["critic_evidence_catalog"] = []
+        quote_groups: dict[str, list] = defaultdict(list)
+        for quote in critic_catalog(evidence):
+            if counts[quote.stage]:
+                quote_groups[quote.stage].append(quote)
+        # Give later stages a chance to contribute advice, just like geometry.
+        quotes = [
+            group[i]
+            for i in range(max(map(len, quote_groups.values()), default=0))
+            for group in quote_groups.values()
+            if i < len(group)
+        ]
+        for quote in quotes:
+            projected["critic_evidence_catalog"].append(quote.model_dump(mode="json"))
+            if size() <= max_user_bytes:
+                selected_critic_ids.append(quote.evidence_id)
+            else:
+                projected["critic_evidence_catalog"].pop()
+                omitted.append(
+                    {"critic_ref": quote.evidence_id, "reason": "input_byte_budget"}
+                )
+        if not selected_critic_ids:
+            del projected["critic_evidence_catalog"]
     # Secondary narrative cannot crowd out exact spatial evidence. Whitelist:
     # no source-file hash list, full memory packs, planner prompts or raw states.
     for destination, report in stage_details:
         for key in ("critique_summary", "issues", "repair_suggestions"):
+            if has_catalog and key == "critique_summary":
+                continue  # Exact, indexed excerpts already accompany spatial input.
             if key not in report:
                 continue
             destination[key] = _small(report[key], 4096)
@@ -225,13 +256,14 @@ def build_writer_prompt(
             if size() > max_user_bytes:
                 del payload[key]
     metadata = {
-        "schema_version": "memory-writer-prompt.v1",
+        "schema_version": "memory-writer-prompt.v2",
         "source_evidence_sha256": evidence_hash(evidence),
         "source_evidence_bytes": byte_size(evidence),
         "max_user_bytes": max_user_bytes,
         "user_bytes": size(),
         "eligible_episode_ids": eligible_ids,
         "selected_episode_ids": selected_ids,
+        "selected_critic_ids": selected_critic_ids,
         "omissions": omitted,
         "has_catalog": has_catalog,
     }
