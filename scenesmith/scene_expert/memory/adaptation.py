@@ -104,7 +104,16 @@ def relation_scope_reasons(
     if indices is None:
         return []
     reasons = []
-    if source.spatial_relations and not indices:
+    steps = source.placement_experience.get("method_steps") or []
+    selected = choice.source_method_step_indices
+    advice_only = bool(selected) and all(
+        type(i) is int
+        and 0 <= i < len(steps)
+        and not steps[i].get("episode_ids")
+        and steps[i].get("critic_refs")
+        for i in selected
+    )
+    if source.spatial_relations and not indices and not advice_only:
         reasons.append("empty_spatial_scope")
     if len(set(indices)) != len(indices):
         reasons.append("duplicate_source_relation_index")

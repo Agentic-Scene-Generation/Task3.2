@@ -13,11 +13,19 @@ from collections import Counter
 from typing import Any
 
 from scenesmith.scene_expert.memory.evidence import evidence_hash
+from scenesmith.scene_expert.memory.placement_scope import (
+    aliases as _scope_aliases,
+    mentions as _scope_mentions,
+    intended_metric,
+    pair_scope_matches,
+    source_metric,
+)
 from scenesmith.scene_expert.memory.schemas import (
     CriticAdviceEvidence,
     PlacementEpisode,
     PlacementMethodCandidate,
     PlacementMethodStep,
+    PlacementRelationEvidence,
 )
 
 
@@ -93,7 +101,7 @@ def instruction_reasons(text: str) -> list[str]:
     ):
         reasons.append("numeric_target_in_method")
     if re.search(
-        r"\b(guarantee\w*|always|optimal|universally)\b|\b(to ensure|will prevent|proven improvement|verified repair)\b|保证|必然|最优",
+        r"\b(guarantee\w*|always|optimal|universally)\b|\b(will prevent|proven improvement|verified repair)\b|必然|最优",
         text,
         re.I,
     ):
@@ -102,37 +110,11 @@ def instruction_reasons(text: str) -> list[str]:
 
 
 def _aliases(obj: dict) -> set[str]:
-    name = re.sub(
-        r"_\d+$", "", str(obj.get("name") or obj.get("category") or "")
-    ).lower()
-    name = re.sub(r"[_\-]+", " ", name).strip()
-    aliases = {name} - {""}
-    # Stable generic endpoints; this is a small scope guard, not a new taxonomy.
-    for word in (
-        "wall",
-        "bed",
-        "nightstand",
-        "chair",
-        "table",
-        "shelf",
-        "bookshelf",
-        "lamp",
-        "mirror",
-    ):
-        if word in name.split():
-            aliases.add(word)
-    if obj.get("object_type") == "ceiling_mounted":
-        aliases.update(("fixture", "light"))
-    return aliases
+    return _scope_aliases(obj)
 
 
 def _mentions(text: str, aliases: set[str]) -> set[str]:
-    normalized = text.lower().replace("_", " ")
-    return {
-        a
-        for a in aliases
-        if re.search(r"(?<!\w)" + re.escape(a) + r"(?:s)?(?!\w)", normalized)
-    }
+    return _scope_mentions(text, aliases)
 
 
 def bind_method_steps(
@@ -205,12 +187,61 @@ def bind_method_steps(
             reasons.append("uncited_object_roles:" + ",".join(sorted(missing)))
         if text.casefold() in seen:
             reasons.append("duplicate_method_step")
+        # Invalid identities remain hard failures. Valid but unrelated geometry
+        # may be omitted when an exact critic quote supports an advisory step.
+        warnings, relations = [], []
+        declarations = getattr(proposal, "relations", [])
+        if declarations and {r.episode_id for r in declarations} != set(ids):
+            reasons.append("relation_episode_union_mismatch")
+        for episode in bound:
+            declared = [r for r in declarations if r.episode_id == episode.episode_id]
+            metric = intended_metric(text)
+            if declarations:
+                if len(declared) != 1:
+                    reasons.append("missing_or_duplicate_relation_binding")
+                    continue
+                relation = declared[0]
+                if (relation.subject_id, relation.anchor_id) != (
+                    episode.subject.get("object_id"),
+                    episode.anchor.get("object_id"),
+                ):
+                    reasons.append("relation_instance_mismatch")
+                    continue
+                if metric != "pair_observation" and relation.metric != metric:
+                    reasons.append("relation_metric_mismatch")
+                    continue
+                metric = relation.metric
+            if not pair_scope_matches(text, episode):
+                warnings.append("unrelated_step_pair:" + episode.episode_id)
+                continue
+            value = source_metric(episode, metric)
+            if metric != "pair_observation" and value is None:
+                warnings.append("unavailable_step_metric:" + episode.episode_id)
+                continue
+            relations.append(
+                PlacementRelationEvidence(
+                    episode_id=episode.episode_id,
+                    subject_id=episode.subject["object_id"],
+                    anchor_id=episode.anchor["object_id"],
+                    metric=metric,
+                    value=value,
+                )
+            )
+        kept_ids = [r.episode_id for r in relations]
+        if ids and not kept_ids and not cited:
+            reasons.append("no_supported_step_relation_or_advice")
         decisions.append(
             {
                 "step_index": index,
                 "instruction": text,
                 "episode_ids": ids,
                 "critic_refs": refs,
+                "accepted_episode_ids": kept_ids,
+                "relation_bindings": [r.model_dump(mode="json") for r in relations],
+                "warnings": warnings,
+                "evidence_scope": (
+                    "source_observation" if kept_ids else "critic_advice_only"
+                ),
                 "decision": "rejected" if reasons else "bound_hypothesis",
                 "reasons": reasons,
             }
@@ -221,11 +252,13 @@ def bind_method_steps(
         accepted.append(
             PlacementMethodStep(
                 instruction=text,
-                episode_ids=ids,
+                episode_ids=kept_ids,
                 critic_refs=refs,
                 binding="explicit" if explicit else "legacy_shared_refs",
-                evidence_kinds=(["source_observation"] if ids else [])
+                evidence_kinds=(["source_observation"] if kept_ids else [])
                 + (["critic_advice"] if refs else []),
+                relation_binding_version=1,
+                relation_bindings=relations,
             )
         )
     return accepted, decisions
@@ -260,6 +293,41 @@ def methods_valid(experience: Any) -> bool:
         return False
     if any(q.evidence_id != q.content_hash() for q in quotes.values()):
         return False
+    context_ids = experience.source_context_episode_ids
+    method_ids = {i for s in experience.method_steps for i in s.episode_ids}
+    if (
+        len(context_ids) != len(set(context_ids))
+        or set(context_ids) - episodes.keys()
+        or set(context_ids) & method_ids
+    ):
+        return False
+    for step in experience.method_steps:
+        if any(
+            not pair_scope_matches(step.instruction, episodes[i])
+            for i in step.episode_ids
+            if i in episodes
+        ):
+            return False
+        if step.relation_binding_version == 1:
+            if [r.episode_id for r in step.relation_bindings] != step.episode_ids:
+                return False
+            for r in step.relation_bindings:
+                e = episodes.get(r.episode_id)
+                if e is None or (r.subject_id, r.anchor_id) != (
+                    e.subject.get("object_id"),
+                    e.anchor.get("object_id"),
+                ):
+                    return False
+                metric = intended_metric(step.instruction)
+                if metric != "pair_observation" and metric != r.metric:
+                    return False
+                value = source_metric(e, r.metric)
+                if (
+                    r.metric != "pair_observation" and value is None
+                ) or r.value != value:
+                    return False
+        elif step.relation_bindings:
+            return False
     if any(
         len(s.episode_ids) != len(set(s.episode_ids))
         or len(s.critic_refs) != len(set(s.critic_refs))

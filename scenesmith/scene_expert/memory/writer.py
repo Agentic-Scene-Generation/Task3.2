@@ -130,11 +130,19 @@ Rules:
   Do not claim a repair worked: these final-stage episodes do not prove that.
   Python binds observations; do not invent or rewrite measurements/evidence.
 - Optional assets and all stages may yield lessons when the catalog supports them.
-- For spatial candidates, return method_steps (2-4 steps), each with instruction,
+- For spatial candidates, return method_steps (1-4 substantive steps), each with instruction,
   episode_ids and critic_refs. Bind EACH step to its own exact visible sources.
   The union can span multiple pairs: bed-wall and bed-nightstand are distinct.
   Root episode_ids/procedure may be empty; code derives the canonical procedure
   and complete source union from method_steps. Do not put IDs in successful_pattern.
+- For each measured pair supply relations: episode_id, subject_id, anchor_id,
+  metric (pair_observation, aabb_separation_m, anchor_local_offset_m,
+  relative_yaw_deg, or bbox_center_distance_m). IDs must match that exact episode.
+  Fixture-fixture spacing needs TWO distinct fixtures, never fixture-wall pairs.
+  Center distance is not AABB separation, navigable clearance or light overlap.
+  If only critic text supports a step, use critic_refs, empty episode_ids/relations;
+  root episode_ids may supply same-stage context only; Python can otherwise bind
+  visible same-snapshot stage context from the cited report. Do not add filler steps.
 - Instructions describe HOW to adapt, not fixed targets. Do not write numeric
   constants, source object IDs, absolute source poses or guarantees in instructions.
   Python preserves exact measurements as source observations; cite critic_refs
@@ -588,11 +596,33 @@ class MemoryWriter:
             {"stage": candidate.stage, "steps": step_decisions}
         )
         ids = list(dict.fromkeys(i for step in steps for i in step.episode_ids))
+        method_ids = set(ids)
         # A critic-only hypothesis still needs a valid stage-local spatial source.
         if not ids:
-            ids = candidate.episode_ids
+            ids = candidate.episode_ids or list(
+                dict.fromkeys(
+                    i for step in candidate.method_steps for i in step.episode_ids
+                )
+            )
         episodes = [by_id[key] for key in ids if key in by_id]
         refs = list(dict.fromkeys(i for step in steps for i in step.critic_refs))
+        if not ids and refs:
+            # Choose context, never a replacement method pair. The report and
+            # observation must be from the same visible stage/snapshot.
+            states = {quotes[i].state_fingerprint for i in refs}
+            visible_context = getattr(self, "_visible_episode_ids", None)
+            ids = (
+                sorted(
+                    e.episode_id
+                    for e in by_id.values()
+                    if e.stage == candidate.stage
+                    and e.state_fingerprint in states
+                    and (visible_context is None or e.episode_id in visible_context)
+                )[:1]
+                if len(states) == 1
+                else []
+            )
+            episodes = [by_id[i] for i in ids]
         procedure = [step.instruction for step in steps]
         reasons = []
         visible = getattr(self, "_visible_episode_ids", None)
@@ -610,13 +640,16 @@ class MemoryWriter:
             reasons.append("method_snapshot_mismatch")
         if any(e.stage != candidate.stage for e in episodes):
             reasons.append("episode_stage_mismatch")
-        if len(procedure) < 2 or not self._clean_list(candidate.applicability):
-            reasons.append("missing_procedure_or_applicability")
+        if not procedure:
+            reasons.append("no_supported_method_steps")
+        if not self._clean_list(candidate.applicability):
+            reasons.append("missing_applicability")
         if inventory_only(procedure):
             reasons.append("redundant_inventory_restatement")
         if failure and not any(
             check["status"] == "verified_fail"
             for e in episodes
+            if e.episode_id in method_ids
             for check in e.native_checks
         ):
             reasons.append("no_exact_pair_failure_evidence")
@@ -632,6 +665,8 @@ class MemoryWriter:
             {
                 "stage": candidate.stage,
                 "episode_ids": ids,
+                "method_episode_ids": sorted(method_ids),
+                "source_context_episode_ids": [i for i in ids if i not in method_ids],
                 "decision": "rejected" if reasons else "bound",
                 "reasons": reasons,
             }
@@ -645,6 +680,7 @@ class MemoryWriter:
             episodes=episodes,
             method_steps=steps,
             critic_advice=[quotes[i] for i in refs],
+            source_context_episode_ids=[i for i in ids if i not in method_ids],
         )
         content["placement_experience"] = experience.model_dump(mode="json")
         # One canonical method owns all reader/embedding paths. Unbound model
@@ -664,6 +700,8 @@ class MemoryWriter:
             content["scores"] = episodes[0].stage_scores
         content["spatial_relations"] = []
         for episode in episodes:
+            if episode.episode_id not in method_ids:
+                continue
             relation = SpatialRelationMemory(
                 relation_type="observed_relative_pose",
                 subject_role=object_role(episode.subject),

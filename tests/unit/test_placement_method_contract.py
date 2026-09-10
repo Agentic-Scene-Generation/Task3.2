@@ -132,8 +132,12 @@ def test_mentioning_wall_without_citing_wall_does_not_borrow_stage_success():
     evidence, episodes = source()
     c = candidate(episodes)
     c.method_steps[0].episode_ids = [episodes[1].episode_id]
-    ok, _, writer = bind(evidence, c)
-    assert not ok
+    ok, content, writer = bind(evidence, c)
+    # Reject the unsupported wall step, not the independent bedside method.
+    assert ok
+    assert content["placement_experience"]["procedure"] == [
+        c.method_steps[1].instruction
+    ]
     decisions = writer.last_trace["placement_method_decisions"][0]["steps"]
     assert any("uncited_object_roles:wall" in r for r in decisions[0]["reasons"])
 

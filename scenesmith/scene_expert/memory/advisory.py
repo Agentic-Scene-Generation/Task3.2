@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from scenesmith.scene_expert.memory.evidence import resolve_constraint_evidence
 from scenesmith.scene_expert.memory.placement import (
     check_object_ids,
@@ -11,6 +13,7 @@ from scenesmith.scene_expert.memory.placement import (
     valid_state,
 )
 from scenesmith.scene_expert.memory.schemas import PlacementEpisode
+from scenesmith.scene_expert.memory.placement_scope import source_metric
 from scenesmith.scene_expert.memory.skill_policy import _category_compatible, _relation
 
 
@@ -38,9 +41,26 @@ def advice_check_reasons(source: dict, choice: dict, context: dict) -> list[str]
         else [relations[i] for i in indices if 0 <= i < len(relations)]
     )
     allowed = {row.get("evidence_ref") for row in scoped}
+    steps = experience.get("method_steps", [])
+    selected = choice.get("source_method_step_indices")
+    selected = list(range(len(steps))) if selected is None else selected
+    selected_steps = [
+        steps[i] for i in selected if type(i) is int and 0 <= i < len(steps)
+    ]
+    # Source-stage context is not an invitation to measure unrelated geometry.
+    if steps:
+        allowed &= {i for s in selected_steps for i in s.get("episode_ids", [])}
+    expected = {
+        (r["episode_id"], r["metric"])
+        for s in selected_steps
+        for r in s.get("relation_bindings", [])
+        if r["metric"] != "pair_observation"
+    }
     checks = choice.get("advice_checks") or []
-    if not checks:
+    if not checks and (allowed or not selected_steps):
         reasons.append("missing_advice_observation")
+    if expected - {(c.get("source_episode_id"), c.get("metric")) for c in checks}:
+        reasons.append("missing_method_metric_observation")
     for check in checks:
         episode = episodes.get(check.get("source_episode_id"))
         if episode is None or episode.episode_id not in allowed:
@@ -73,7 +93,7 @@ def advice_check_reasons(source: dict, choice: dict, context: dict) -> list[str]
                 for c in episode.native_checks
             ):
                 reasons.append("unmatched_native_advice_predicate")
-        elif check.get("metric") not in episode.measurements:
+        elif source_metric(episode, check.get("metric")) is None:
             reasons.append("unobserved_source_metric")
         elif check.get("constraint_id"):
             reasons.append("geometry_observation_cannot_borrow_constraint_pass")
@@ -122,6 +142,15 @@ def observe_advice(item: dict, stage: str, entry: dict) -> list[dict]:
     post = entry.get("post_scene_state") or {}
     pre = (entry.get("injection") or {}).get("current_scene_state") or {}
     result = []
+    if not checks and source.get("placement_experience"):
+        return [
+            {
+                "status": "unknown",
+                "reason": "critic_advice_only_no_geometric_verdict",
+                "quality_gain": None,
+                "causal_gain": None,
+            }
+        ]
     for check in checks:
         row = {**check, "status": "unknown", "quality_gain": None, "causal_gain": None}
         result.append(row)
@@ -170,12 +199,18 @@ def observe_advice(item: dict, stage: str, entry: dict) -> list[dict]:
                 row["reason"] = "native_predicate_or_object_evidence_unavailable"
             continue
         measured = pair_measurements(subject, anchor)
-        if metric not in measured:
+        if metric == "bbox_center_distance_m":
+            measured[metric] = source_metric(
+                SimpleNamespace(subject=subject, anchor=anchor), metric
+            )
+        if metric not in measured or measured[metric] is None:
             row["reason"] = "metric_unavailable"
             continue
         row.update(
             status="measured",
-            source_value=episode["measurements"].get(metric),
+            source_value=source_metric(
+                PlacementEpisode.model_validate(episode), metric
+            ),
             after_value=measured[metric],
             before_value=None,
             before_checkpoint="pre_stage",
@@ -192,6 +227,14 @@ def observe_advice(item: dict, stage: str, entry: dict) -> list[dict]:
                     before_objects[subject["object_id"]],
                     before_objects[anchor["object_id"]],
                 ).get(metric)
+                if metric == "bbox_center_distance_m":
+                    before = source_metric(
+                        SimpleNamespace(
+                            subject=before_objects[subject["object_id"]],
+                            anchor=before_objects[anchor["object_id"]],
+                        ),
+                        metric,
+                    )
                 row["before_value"] = before
                 if before is not None:
                     after = measured[metric]

@@ -118,7 +118,7 @@ Guidelines:
   use. A shared task goal is fine if the METHOD adds useful information.
 - For placement_experience candidates, include advice_checks with fields:
   source_episode_id (exact catalog ID), metric (anchor_local_offset_m,
-  relative_yaw_deg, aabb_separation_m, or native_constraint), subject_role and
+  relative_yaw_deg, aabb_separation_m, bbox_center_distance_m, or native_constraint), subject_role and
   anchor_role (exact source names), constraint_id (empty for geometry).
   Bind these roles as usual. Select at least one available source metric.
   These are read-only observations, not desired numeric thresholds. AABB gaps
@@ -132,6 +132,12 @@ Guidelines:
   constants or guarantees. Describe how to recompute for current assets instead.
   Set source_method_step_indices to the relevant zero-based method steps and
   retain ALL of those steps' episode references in source_relation_indices.
+  For relation_bindings, observe each declared metric on its exact source pair;
+  do not substitute a wall gap for fixture spacing or AABB gap for center distance.
+  bbox_center_distance_m means bounding-box centers, NOT optical light centers.
+  A critic-advice-only step has no geometric verdict: leave advice_checks empty
+  and do not select source_context_episode_ids as method evidence. Its current
+  behavior may be observed, but never report a measured spatial success for it.
   Unrelated steps may be excluded. Null means all method steps, not automatic filtering.
 - Source cases may include unrelated objects and whole-scene inventories.
   Select only the source relation_index rows actually used by your advice in
@@ -139,7 +145,8 @@ Guidelines:
   those rows, including wall/room anchors; do not bind unrelated source objects
   merely to complete the source scene. Never copy unselected source relations
   into actions, checks, or preconditions. Spatial candidates require at least
-  one selected row; use [] only when the candidate has no spatial relations.
+  one selected row, except when only critic-advice-only steps are selected;
+  use [] for those steps or when the candidate has no spatial relations.
   Null is the legacy all-rows scope, not an automatic choice of relevant rows.
   Example: a bedroom source includes (0) bed against_wall wall and (1) wardrobe
   corner_of_room room. For bed anchoring alone select [0], bind bed to current

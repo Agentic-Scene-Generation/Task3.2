@@ -355,6 +355,11 @@ def experience_text(experience: PlacementExperience) -> str:
         )
         lines.extend(f"{i}. {step}" for i, step in enumerate(experience.procedure, 1))
     for episode in experience.episodes:
+        if episode.episode_id in experience.source_context_episode_ids:
+            lines.append(
+                "Stage context only; not geometric evidence for a method step."
+            )
+            continue
         lines.append(
             f"Source observation only — {object_role(episode.subject)} relative to {object_role(episode.anchor)}: "
             + json.dumps(episode.measurements, sort_keys=True)

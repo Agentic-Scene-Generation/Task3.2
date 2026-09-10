@@ -310,6 +310,7 @@ class MemoryAdviceCheck(BaseModel):
         "anchor_local_offset_m",
         "relative_yaw_deg",
         "aabb_separation_m",
+        "bbox_center_distance_m",
         "native_constraint",
     ]
     subject_role: str

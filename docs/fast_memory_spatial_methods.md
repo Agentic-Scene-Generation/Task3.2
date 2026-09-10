@@ -17,6 +17,9 @@ inside the existing memory v3 JSONL format. The bank layout is unchanged.
 | `method_steps[].episode_ids` / `critic_refs` | Sources for this specific step, selected only from evidence visible to the Writer. |
 | `method_steps[].evidence_kinds` | Source observation, critic advice, or both. |
 | `method_steps[].verification_status` | `transfer_unverified`; source stage success never upgrades this to a demonstrated transfer benefit. |
+| `method_steps[].relation_bindings` | Code-bound exact episode, subject/anchor instance IDs, metric and source value. Writer declarations cannot change IDs or measurements. |
+| `method_steps[].relation_binding_version` | `1` for the additive pair/metric contract; `0` reads older records without inventing new evidence. |
+| `source_context_episode_ids` | Same-stage provenance for critic-only methods, NOT method geometry or downstream observation targets. |
 | `procedure`, `successful_pattern`, `positive_guidance` | One canonical, readable set of surviving instructions; raw unbound model summaries cannot bypass the source contract. |
 
 For example, a bed-wall instruction must cite the bed-wall episode. A
@@ -31,9 +34,21 @@ improvements, prove every proposed action occurred, or treat final AABB gaps as
 walkable clearance. Quoted repair advice remains advice, not a verified repair.
 
 Unusable steps are logged and excluded, not silently repaired by guessing a
-source. A spatial candidate still needs at least two surviving steps, an
+source. A spatial candidate needs at least one substantive supported step, an
 applicability description and the existing source-outcome eligibility checks.
 Fewer/no records can therefore be a valid result when evidence is insufficient.
+There is no reason to invent a second filler step. A purpose clause such as
+"to ensure nightstands flank the bed" is not itself a universal guarantee.
+Fixed numerical targets and explicit claims of guaranteed benefits remain gated.
+
+Each newly proposed measured step declares `relations` with `episode_id`,
+`subject_id`, `anchor_id`, and `metric`; source values are computed by Python.
+`bbox_center_distance_m` describes bounding-box centers, not optical centers,
+light-pool overlap, or navigable clearance. Old episode measurements/hashes are
+unchanged. Distinct fixtures cannot be replaced by one fixture and two walls.
+Only exact critic support may survive without a matching pair; it is explicitly
+`critic_advice` only and produces no measured geometric success. No replacement
+pair is silently guessed, even if a plausible pair exists elsewhere in the input.
 
 ## Retrieval and delivery
 
@@ -51,6 +66,10 @@ current objects but do not create a measured historical object pair.
 Accepted designer context contains the adapted actions, bindings and read-only
 observation checks, not a second copy of raw historical instructions. Main's
 quality criteria remain unchanged.
+Declared method metrics must be represented in `advice_checks`; a center-distance
+method cannot be certified by a wall gap or even by the same pair's AABB gap.
+Critic-only steps may be delivered without fabricated observation targets; their
+geometric result is `unknown` and never an automatic positive gain.
 
 ## Compatibility
 
@@ -83,6 +102,8 @@ Check these files under the new replay directory:
   model-call success or candidate count with records added to the bank.
 - `audit/memory_writer_debug.json`: `result_status.placement_method_decisions`
   and `placement_candidate_decisions` explain each bound/rejected step/candidate.
+  Inspect `accepted_episode_ids`, `relation_bindings`, `warnings`, and
+  `evidence_scope` to distinguish actual method geometry from critic-only advice.
 - `audit/memory_writer_prompt_*.json`: the exact request; every cited ID must
   have been visible in its corresponding request.
 - `bank/success_cases.jsonl` / `failure_cases.jsonl`: inspect the fields above,

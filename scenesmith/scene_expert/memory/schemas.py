@@ -277,6 +277,29 @@ class CriticAdviceEvidence(BaseModel):
         ).hexdigest()
 
 
+class PlacementRelationCandidate(BaseModel):
+    """Exact source pair and observable requested by the Writer, not its value."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    episode_id: str
+    subject_id: str
+    anchor_id: str
+    metric: Literal[
+        "pair_observation",
+        "aabb_separation_m",
+        "anchor_local_offset_m",
+        "relative_yaw_deg",
+        "bbox_center_distance_m",
+    ]
+
+
+class PlacementRelationEvidence(PlacementRelationCandidate):
+    """Code-owned source measurement; no success or transferable target implied."""
+
+    value: float | list[float] | None = None
+
+
 class PlacementMethodStep(BaseModel):
     """A transfer hypothesis with explicit source links, never proven benefit."""
 
@@ -288,6 +311,8 @@ class PlacementMethodStep(BaseModel):
         default_factory=list
     )
     verification_status: Literal["transfer_unverified"] = "transfer_unverified"
+    relation_binding_version: Literal[0, 1] = 0
+    relation_bindings: list[PlacementRelationEvidence] = Field(default_factory=list)
 
 
 class PlacementExperience(BaseModel):
@@ -299,6 +324,8 @@ class PlacementExperience(BaseModel):
     episodes: list[PlacementEpisode] = Field(default_factory=list)
     method_steps: list[PlacementMethodStep] = Field(default_factory=list)
     critic_advice: list[CriticAdviceEvidence] = Field(default_factory=list)
+    # Unused observations certify the same source stage only, never a method pair.
+    source_context_episode_ids: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(
         default_factory=lambda: [
             "Observed transforms are not semantic front directions or universal thresholds.",
@@ -562,6 +589,9 @@ class PlacementMethodCandidate(BaseModel):
     instruction: str = Field(min_length=1, max_length=600)
     episode_ids: list[str] = Field(default_factory=list, max_length=2)
     critic_refs: list[str] = Field(default_factory=list, max_length=2)
+    relations: list[PlacementRelationCandidate] = Field(
+        default_factory=list, max_length=2
+    )
 
 
 class SuccessMemoryCandidate(BaseModel):

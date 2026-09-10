@@ -467,6 +467,11 @@ def test_exact_native_advice_check_cannot_certify_different_metric(tmp_path) -> 
     catalog = collect_placement_episodes(tmp_path, "furniture", entry)
     episode = catalog["episodes"][0]
     item["source"]["placement_experience"]["episodes"] = [episode]
+    # Changing the source episode also changes each immutable method reference.
+    for step in item["source"]["placement_experience"]["method_steps"]:
+        step["episode_ids"] = [episode["episode_id"]]
+        for binding in step.get("relation_bindings", []):
+            binding["episode_id"] = episode["episode_id"]
     item["source"]["spatial_relations"][0]["evidence_ref"] = episode["episode_id"]
     check = item["adaptation"]["advice_checks"][0]
     check.update(
