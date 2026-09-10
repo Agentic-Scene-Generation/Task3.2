@@ -29,6 +29,13 @@ from scenesmith.scene_expert.memory.placement import (
 from scenesmith.scene_expert.memory.placement_methods import (
     bind_method_steps,
     critic_catalog,
+    has_placement_action,
+    methods_valid,
+)
+from scenesmith.scene_expert.memory.placement_outcomes import (
+    episode_catalog,
+    success_scope,
+    relation_method_supported,
 )
 from scenesmith.scene_expert.memory.schemas import (
     FailureCase,
@@ -105,10 +112,15 @@ Rules:
 - stage must be one of floor_plan, furniture, wall_mounted,
   ceiling_mounted, or manipuland.
 - Do not invent IDs, scores, object coordinates, task metadata, or provenance.
-- A success lesson must describe what transferred well, not merely that a stage passed.
+- A success lesson describes an observed method, not proven transfer benefit.
 - A failed or degraded final scene may still contain a reusable success from an
   earlier stage, but propose it only when that exact stage has an authoritative
   passing verify_report. It will be stored as stage-local, never scene-level.
+- Exception for success cases ONLY: a failed stage's explicit passing native pair
+  relation may support a relation-local method. Name that same pair and relation
+  in the actual placement action, use pair_observation if no metric corresponds,
+  and preserve the failed stage. Unrelated passing context cannot sponsor advice.
+  A conflicting failure on that pair blocks success. Skill rules remain unchanged.
 - A failure lesson is allowed only when the trace shows a verified repair or a
   deterministic/repeatable hard failure. Never label visual opinion as deterministic.
 - A skill must contain a reusable procedure with at least two concrete steps.
@@ -659,8 +671,28 @@ class MemoryWriter:
             for check in e.native_checks
         ):
             reasons.append("selected_pair_has_verified_failure")
-        if not failure and any(e.stage_passed is not True for e in episodes):
-            reasons.append("selected_episode_stage_not_passed")
+        if not failure and any(
+            success_scope(e, by_id.values()) is None for e in episodes
+        ):
+            reasons.append("selected_episode_has_no_unconflicted_success")
+        if procedure and not has_placement_action(procedure):
+            reasons.append("no_supported_placement_action")
+        experience = PlacementExperience(
+            schema_version="placement-experience.v2",
+            procedure=procedure,
+            applicability=self._clean_list(candidate.applicability),
+            episodes=episodes,
+            method_steps=steps,
+            critic_advice=[quotes[i] for i in refs],
+            source_context_episode_ids=[i for i in ids if i not in method_ids],
+        )
+        relation_local = not failure and any(
+            e.stage_passed is not True for e in episodes
+        )
+        if relation_local and not relation_method_supported(
+            experience, list(by_id.values())
+        ):
+            reasons.append("method_not_supported_by_passing_relation")
         self.last_trace.setdefault("placement_candidate_decisions", []).append(
             {
                 "stage": candidate.stage,
@@ -673,15 +705,11 @@ class MemoryWriter:
         )
         if reasons:
             return False
-        experience = PlacementExperience(
-            schema_version="placement-experience.v2",
-            procedure=procedure,
-            applicability=self._clean_list(candidate.applicability),
-            episodes=episodes,
-            method_steps=steps,
-            critic_advice=[quotes[i] for i in refs],
-            source_context_episode_ids=[i for i in ids if i not in method_ids],
-        )
+        if relation_local:
+            experience.limitations.append(
+                "Source stage did not pass. Only the explicitly listed native pair relations passed; "
+                "other relations and the proposed method remain unverified. No stage success or repair improvement is implied."
+            )
         content["placement_experience"] = experience.model_dump(mode="json")
         # One canonical method owns all reader/embedding paths. Unbound model
         # summaries cannot reappear through positive_guidance or legacy hints.
@@ -1034,13 +1062,45 @@ class MemoryWriter:
                     continue
                 stage_evidence = self._stage_evidence(evidence, record.stage)
                 stage_passed = self._stage_passed(stage_evidence)
+                relation_local_success = False
                 if record.placement_experience is not None:
+                    if not methods_valid(record.placement_experience):
+                        record_decision(op, "rejected", "invalid_method_contract")
+                        continue
                     # A retried stage can have different outcomes in its trace.
                     # Use the actual selected episode, never the first stage row.
                     stage_passed = bool(record.placement_experience.episodes) and all(
                         e.stage_passed is True and valid_episode(e)
                         for e in record.placement_experience.episodes
                     )
+                    catalog = (
+                        episode_catalog(evidence)
+                        if "placement_experience_catalog" in evidence
+                        else record.placement_experience.episodes
+                    )
+                    eligible = all(
+                        success_scope(e, catalog) is not None
+                        for e in record.placement_experience.episodes
+                    )
+                    relation_local_success = bool(
+                        eligible
+                        and not stage_passed
+                        and relation_method_supported(
+                            record.placement_experience, catalog
+                        )
+                    )
+                    if not eligible:
+                        record_decision(
+                            op,
+                            "rejected",
+                            "selected_episode_has_no_unconflicted_success",
+                        )
+                        continue
+                    if not stage_passed and not relation_local_success:
+                        record_decision(
+                            op, "rejected", "method_not_supported_by_passing_relation"
+                        )
+                        continue
                 scene_success = bool(
                     full_report.pass_scene
                     and full_report.overall_score >= success_threshold
@@ -1048,7 +1108,11 @@ class MemoryWriter:
                 stage_local_success = bool(
                     has_structured_evidence and not scene_success and stage_passed
                 )
-                if has_structured_evidence and not stage_passed:
+                if (
+                    has_structured_evidence
+                    and not stage_passed
+                    and not relation_local_success
+                ):
                     record_decision(op, "rejected", "selected_stage_not_verified")
                     console_logger.info(
                         "MemoryWriter: rejected success %s because its exact stage "
@@ -1056,7 +1120,11 @@ class MemoryWriter:
                         record.case_id,
                     )
                     continue
-                if not scene_success and not stage_local_success:
+                if (
+                    not scene_success
+                    and not stage_local_success
+                    and not relation_local_success
+                ):
                     record_decision(
                         op, "rejected", "neither_scene_nor_stage_gate_passed"
                     )
@@ -1066,7 +1134,17 @@ class MemoryWriter:
                         record.case_id,
                     )
                     continue
-                if stage_local_success:
+                if relation_local_success:
+                    record = record.model_copy(
+                        update={
+                            "promotion_scope": "relation",
+                            "source_scene_passed": bool(full_report.pass_scene),
+                            "confidence": min(float(record.confidence), 0.65),
+                            "quality_score": self._mean_score(record.scores),
+                            "scene_summary": f"Locally passing {record.stage} relation from a non-passing stage; transfer hypothesis only.",
+                        }
+                    )
+                elif stage_local_success:
                     record = record.model_copy(
                         update={
                             "promotion_scope": "stage",
@@ -1091,7 +1169,11 @@ class MemoryWriter:
                 record_decision(
                     op,
                     "proposed_to_store",
-                    "stage_success" if stage_local_success else "scene_success",
+                    (
+                        "relation_success"
+                        if relation_local_success
+                        else "stage_success" if stage_local_success else "scene_success"
+                    ),
                 )
                 continue
 

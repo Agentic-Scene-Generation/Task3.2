@@ -15,6 +15,10 @@ from typing import Any
 from scenesmith.scene_expert.memory.evidence import evidence_hash
 from scenesmith.scene_expert.memory.placement import valid_episode
 from scenesmith.scene_expert.memory.placement_methods import critic_catalog
+from scenesmith.scene_expert.memory.placement_outcomes import (
+    episode_catalog,
+    success_scope,
+)
 from scenesmith.scene_expert.memory.schemas import PlacementEpisode
 
 INSTRUCTION = (
@@ -28,7 +32,7 @@ INSTRUCTION = (
     "root episode_ids supply context only, or code binds same-snapshot context. "
     "Stage reports and episode-specific outcomes are authoritative, not task "
     "inventories or retrieved advice. Omitted evidence is unknown, not passing. "
-    "A passing episode from a degraded scene permits only stage-local success. "
+    "Local pair passes do not certify a failed stage. Include a supported placement action. "
     "Final geometry does not prove an optimal layout or a successful repair. "
     "If no supported method exists, return empty arrays and explain noop_reason.\n"
 )
@@ -88,6 +92,10 @@ def _episode_view(episode: PlacementEpisode) -> dict:
                 "constraint_id": check.get("constraint_id"),
                 "metric": check.get("metric"),
                 "status": item["status"],
+                "relation": (item.get("constraint") or {}).get("relation", "unknown"),
+                "source_requirement": _small(
+                    (item.get("constraint") or {}).get("evidence_span", ""), 1024
+                ),
                 "observations": {
                     "primary_object": observations.get("primary_object"),
                     "related_objects": observations.get("related_objects", []),
@@ -174,6 +182,7 @@ def build_writer_prompt(
             stage_details.append((compact["verify_report"], report))
 
     groups: dict[tuple[str, str], list[PlacementEpisode]] = defaultdict(list)
+    catalog = episode_catalog(evidence)
     seen = set()
     for raw in (evidence.get("placement_experience_catalog") or {}).get("episodes", []):
         eid = str(raw.get("episode_id") or "")
@@ -189,7 +198,7 @@ def build_writer_prompt(
             continue
         seen.add(eid)
         failing = any(c["status"] == "verified_fail" for c in episode.native_checks)
-        if not failing and episode.stage_passed is not True:
+        if not failing and success_scope(episode, catalog) is None:
             omitted.append({"episode_id": eid, "reason": "no_verified_outcome"})
             continue
         groups[(episode.stage, "failure" if failing else "success")].append(episode)

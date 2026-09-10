@@ -191,7 +191,7 @@ def test_low_overall_score_does_not_discard_verified_stage_experience(tmp_path):
                 episode_ids=[episode["episode_id"]],
                 procedure=[
                     "Inspect the table frame and chair footprint.",
-                    "Adjust the chair offset and relative yaw in the available space.",
+                    "Adjust the chair offset and relative yaw relative to the table in the available space.",
                 ],
                 applicability=["A chair placed next to a table."],
             )

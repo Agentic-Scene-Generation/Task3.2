@@ -117,6 +117,20 @@ def _mentions(text: str, aliases: set[str]) -> set[str]:
     return _scope_mentions(text, aliases)
 
 
+def has_placement_action(instructions: list[str]) -> bool:
+    """Do not promote a checklist after its actual placement step was rejected."""
+    return any(
+        re.search(
+            r"(?:^|[.;:]\s*|\band\s+|\bthen\s+)(?:place|position|move|reposition|"
+            r"rotate|orient|align|adjust|arrange|center|centre|offset|ensure|maintain|"
+            r"distribute|assign|mount|hang|keep|remove|replace|avoid)\b|^(?:摆放|放置|调整|旋转|对齐)",
+            text.strip(),
+            re.I,
+        )
+        for text in instructions
+    )
+
+
 def bind_method_steps(
     candidate: Any,
     episodes: dict[str, PlacementEpisode],
@@ -210,6 +224,9 @@ def bind_method_steps(
                 if metric != "pair_observation" and relation.metric != metric:
                     reasons.append("relation_metric_mismatch")
                     continue
+                if metric == "pair_observation" and relation.metric != metric:
+                    warnings.append("unsupported_step_metric:" + episode.episode_id)
+                    continue
                 metric = relation.metric
             if not pair_scope_matches(text, episode):
                 warnings.append("unrelated_step_pair:" + episode.episode_id)
@@ -266,7 +283,7 @@ def bind_method_steps(
 
 def methods_valid(experience: Any) -> bool:
     """Validate persisted per-step references and immutable quote contents."""
-    if not experience.method_steps:
+    if not experience.method_steps or not has_placement_action(experience.procedure):
         return False
     episodes = {e.episode_id: e for e in experience.episodes}
     quotes = {q.evidence_id: q for q in experience.critic_advice}
@@ -319,7 +336,7 @@ def methods_valid(experience: Any) -> bool:
                 ):
                     return False
                 metric = intended_metric(step.instruction)
-                if metric != "pair_observation" and metric != r.metric:
+                if metric != r.metric:
                     return False
                 value = source_metric(e, r.metric)
                 if (

@@ -364,11 +364,22 @@ def experience_text(experience: PlacementExperience) -> str:
             f"Source observation only — {object_role(episode.subject)} relative to {object_role(episode.anchor)}: "
             + json.dumps(episode.measurements, sort_keys=True)
         )
-        labels = sorted({row["status"] for row in episode.native_checks})
+        labels = sorted(
+            {
+                str((row.get("constraint") or {}).get("relation", "unknown"))
+                + ":"
+                + row["status"]
+                for row in episode.native_checks
+            }
+        )
         lines.append(
             "Native checks for this source pair: "
             + (", ".join(labels) or "unavailable; observed layout only")
         )
+        if episode.stage_passed is not True:
+            lines.append(
+                "Source stage did not pass; pair checks do not certify the method or the stage."
+            )
     for i, quote in enumerate(experience.critic_advice, 1):
         lines.append(
             f"Critic excerpt {i} (source-scene opinion; numeric values are NOT transfer thresholds):\n{quote.quote}"

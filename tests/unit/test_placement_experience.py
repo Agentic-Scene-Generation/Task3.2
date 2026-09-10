@@ -421,8 +421,8 @@ def test_new_failure_has_exact_pair_evidence_but_not_verified_repair(tmp_path) -
         repair_verified=True,
         episode_ids=[episode["episode_id"]],
         procedure=[
-            "Inspect the asset front before rotation.",
-            "Recheck facing after rotating.",
+            "Inspect the chair front relative to the table before rotation.",
+            "Rotate the chair to face the table and recheck facing.",
         ],
         applicability=["Chair beside a table."],
     )
@@ -522,7 +522,7 @@ def test_writer_call_roundtrip_uses_real_catalog_and_compact_model_output(
         episode_ids=[catalog["episodes"][0]["episode_id"]],
         procedure=[
             "Inspect the table frame.",
-            "Rotate the chair relative to its anchor.",
+            "Rotate the chair relative to the table.",
         ],
         applicability=["Chair/table."],
     )
@@ -540,7 +540,9 @@ def test_writer_call_roundtrip_uses_real_catalog_and_compact_model_output(
         evidence_payload=evidence,
     )
     assert len(ops) == 1
-    assert ops[0].content["placement_experience"]["procedure"] == candidate.procedure
+    # The single-object inspection has no exact pair or critic source; only the
+    # supported placement action survives canonicalization.
+    assert ops[0].content["placement_experience"]["procedure"] == candidate.procedure[1:]
     assert writer.last_trace["placement_candidate_decisions"][0]["decision"] == "bound"
 
 
