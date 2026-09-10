@@ -1,5 +1,7 @@
 # 全资产库新风格 embedding：阶段交付说明
 
+> 完整本体标注补迁见 [完整共享资产库](FULL_ASSET_LIBRARY_ZH.md)。模型/向量迁移完成不代表完整标注已交付，最终以 annotation_migration/STATUS.json 与普通账号全库API验收为准。
+
 > 2026-09-10 共享访问修复：原向量库权限已开放只读；3D-FUTURE已有共享原始数据，其他来源正后台迁移。请先读 [共享权限与资产路径修复](SHARED_ACCESS_FIX_ZH.md)，以交付根 ACTIVE_INDEX.json 和迁移 STATUS.json 为当前入口，勿把尚未完成的新索引当作可用库。
 
 更新：2026-09-09。本文件是当前状态入口；[HSSD 规范说明](HSSD_STYLE_EMBEDDING_V2_ZH.md)保留早期准备阶段历史。
