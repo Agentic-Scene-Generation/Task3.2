@@ -7,6 +7,8 @@ set -euo pipefail
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SOURCE_RUN="${SOURCE_RUN:-reuse_full_shared_full_sceneeval100_hard_qwen38_p7_20260826_124733_sceneeval100_hard_qwen38_p7_20260909_145714}"
 SCENE_EXPERT_DIR="${SCENE_EXPERT_DIR:-$PROJECT_ROOT/outputs/critic_probe/$SOURCE_RUN/critic_on/batch_091/hydra/scene_090/scene_expert}"
+# Optional bounded multi-source plan; empty preserves the single-scene workflow.
+REPLAY_MANIFEST="${REPLAY_MANIFEST:-}"
 # TODO(user): false owns a fresh service in THIS CCI instance; true requires a
 # deliberately managed existing service and will never stop that service.
 REUSE_EXISTING_MODEL_SERVICES="${REUSE_EXISTING_MODEL_SERVICES:-false}"
@@ -28,7 +30,13 @@ LOG_DIR="$PROJECT_ROOT/tmp/acp_logs/$RUN_ID"
 [[ "$RUN_ID" =~ ^[A-Za-z0-9_.-]+$ && "$RUN_ID" != . && "$RUN_ID" != .. ]] || { echo 'ERROR: invalid RUN_ID'; exit 2; }
 [[ "$LLM_PORT" =~ ^[0-9]+$ && "$WAIT_TIMEOUT" =~ ^[0-9]+$ ]] || { echo 'ERROR: invalid port or timeout'; exit 2; }
 [[ -x "$PYTHON_BIN" ]] || { echo "ERROR: Python missing: $PYTHON_BIN"; exit 2; }
-[[ -d "$SCENE_EXPERT_DIR" ]] || { echo "ERROR: source missing: $SCENE_EXPERT_DIR"; exit 2; }
+if [[ -n "$REPLAY_MANIFEST" ]]; then
+  "$PYTHON_BIN" "$PROJECT_ROOT/scripts/replay_sceneexpert_memory_batch.py" \
+    --manifest "$REPLAY_MANIFEST" --project-root "$PROJECT_ROOT" \
+    --output-dir "$OUTPUT_DIR" --validate-only
+else
+  [[ -d "$SCENE_EXPERT_DIR" ]] || { echo "ERROR: source missing: $SCENE_EXPERT_DIR"; exit 2; }
+fi
 [[ "$REUSE_EXISTING_MODEL_SERVICES" == true || "$REUSE_EXISTING_MODEL_SERVICES" == false ]] || { echo 'ERROR: reuse must be true or false'; exit 2; }
 [[ ! -e "$OUTPUT_DIR" && ! -e "$LOG_DIR" ]] || { echo 'ERROR: RUN_ID already used; choose a new ID'; exit 2; }
 command -v curl >/dev/null
@@ -110,9 +118,15 @@ while ! curl --noproxy '*' -fsS --max-time 3 "http://127.0.0.1:$LLM_PORT/health"
 done
 
 echo "phase=writer_replay" > "$LOG_DIR/phase.env"
+if [[ -n "$REPLAY_MANIFEST" ]]; then
+  replay_command=("$PYTHON_BIN" scripts/replay_sceneexpert_memory_batch.py
+    --manifest "$REPLAY_MANIFEST" --project-root "$PROJECT_ROOT")
+else
+  replay_command=("$PYTHON_BIN" scripts/replay_sceneexpert_memory_writer.py
+    --scene-expert-dir "$SCENE_EXPERT_DIR")
+fi
 OPENAI_API_KEY="${OPENAI_API_KEY:-sk-123}" \
-  "$PYTHON_BIN" scripts/replay_sceneexpert_memory_writer.py \
-  --scene-expert-dir "$SCENE_EXPERT_DIR" --output-dir "$OUTPUT_DIR" \
+  "${replay_command[@]}" --output-dir "$OUTPUT_DIR" \
   --api-base-url "http://127.0.0.1:$LLM_PORT/v1" --model "$MODEL_NAME" &
 REPLAY_PID=$!
 if wait "$REPLAY_PID"; then code=0; else code=$?; fi
