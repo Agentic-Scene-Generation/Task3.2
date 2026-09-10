@@ -17,7 +17,7 @@ import time
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Generic, Mapping, TypeVar
+from typing import Any, Callable, Generic, Mapping, TypeVar
 
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
@@ -203,6 +203,9 @@ class SceneExpertStructuredLLMClient:
         messages: list[dict[str, Any]],
         response_model: type[T],
         profile: StructuredLLMProfile | None = None,
+        context_reducer: (
+            Callable[[list[dict[str, Any]], str], list[dict[str, Any]] | None] | None
+        ) = None,
     ) -> StructuredLLMResult[T]:
         """Return validated content or a typed failure for role-level fallback."""
         active_profile = profile or self.profile_for(role)
@@ -225,6 +228,28 @@ class SceneExpertStructuredLLMClient:
 
             if attempt_number > 1:
                 retry_strategy = self._retry_strategy(previous_kind)
+                if previous_kind == "context_length":
+                    reduced = (
+                        context_reducer(copy.deepcopy(retry_messages), previous_error)
+                        if context_reducer is not None
+                        else None
+                    )
+                    # Never retry an oversized request by changing its format,
+                    # appending feedback, or allocating even more output tokens.
+                    if reduced is None or len(
+                        json.dumps(reduced, ensure_ascii=False).encode("utf-8")
+                    ) >= len(
+                        json.dumps(retry_messages, ensure_ascii=False).encode("utf-8")
+                    ):
+                        break
+                    retry_messages = reduced
+                else:
+                    retry_messages = self._build_retry_messages(
+                        base_messages,
+                        previous_kind,
+                        previous_error,
+                        previous_content,
+                    )
                 if previous_kind in {
                     "length",
                     "reasoning_only",
@@ -235,14 +260,11 @@ class SceneExpertStructuredLLMClient:
                     thinking_enabled = False
                 if previous_kind == "bad_request" and response_format == "json_schema":
                     response_format = "json_object"
-                if active_profile.retry_max_tokens is not None:
+                if (
+                    active_profile.retry_max_tokens is not None
+                    and previous_kind != "context_length"
+                ):
                     max_tokens = active_profile.retry_max_tokens
-                retry_messages = self._build_retry_messages(
-                    base_messages,
-                    previous_kind,
-                    previous_error,
-                    previous_content,
-                )
 
             thinking_mode = active_profile.thinking_mode if thinking_enabled else "none"
             request_messages = self._apply_thinking_mode(
@@ -514,7 +536,18 @@ class SceneExpertStructuredLLMClient:
         name = type(exc).__name__
         message = str(exc)
         lowered = message.lower()
-        if name in {"APITimeoutError", "TimeoutException", "ReadTimeout"} or (
+        if any(
+            marker in lowered
+            for marker in (
+                "exceed_context_size",
+                "context_length_exceeded",
+                "maximum context length",
+                "exceeds the available context size",
+                "prompt is too long",
+            )
+        ):
+            kind = "context_length"
+        elif name in {"APITimeoutError", "TimeoutException", "ReadTimeout"} or (
             "timed out" in lowered or "timeout" in lowered
         ):
             kind = "timeout"
@@ -533,6 +566,7 @@ class SceneExpertStructuredLLMClient:
     @staticmethod
     def _retry_strategy(error_kind: str) -> str:
         return {
+            "context_length": "reduce_input_context",
             "length": "force_no_think_and_retry",
             "reasoning_only": "force_no_think_and_retry",
             "empty_response": "force_no_think_and_retry",

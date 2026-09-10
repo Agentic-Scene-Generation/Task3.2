@@ -20,10 +20,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from scenesmith.scene_expert.memory.evidence import (
-    resolve_constraint_evidence,
-    writer_prompt_evidence,
-)
+from scenesmith.scene_expert.memory.evidence import resolve_constraint_evidence
 from scenesmith.scene_expert.memory.placement import (
     inventory_only,
     object_role,
@@ -47,10 +44,16 @@ from scenesmith.scene_expert.memory.schemas import (
 from scenesmith.scene_expert.memory.skill_bootstrap import bootstrap_grounded_skills
 from scenesmith.scene_expert.memory.skill_identity import build_skill_semantic_signature
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
+from scenesmith.scene_expert.memory.writer_prompt import (
+    WriterPromptBudgetError,
+    build_writer_prompt,
+    byte_size,
+)
 from scenesmith.scene_expert.schemas import FullVerifyReport
 from scenesmith.scene_expert.structured_llm import (
     SceneExpertStructuredLLMClient,
     StructuredLLMProfile,
+    StructuredLLMResult,
 )
 
 console_logger = logging.getLogger(__name__)
@@ -110,6 +113,7 @@ Rules:
   the failed stage itself. Deterministic code decides candidate versus active.
 - Prefer empty arrays with a clear noop_reason over weak, duplicate, or speculative memory.
 - Keep each lesson concise and useful for a different scene with similar requirements.
+- Return at most three candidates total to leave enough output space for complete JSON.
 - When placement_experience_catalog is supplied, each success/failure MUST select
   one or two exact episode_ids from that catalog, and supply procedure (2-6 steps)
   and applicability. An empty catalog means no new spatial success/failure, NOT
@@ -215,6 +219,14 @@ class MemoryWriter:
             max_attempts=2,
             response_format="json_schema",
         )
+        self._context_tokens = int(
+            os.environ.get("SCENEEXPERT_MEMORY_WRITER_CONTEXT_TOKENS", 65536)
+        )
+        self._max_input_bytes = int(
+            os.environ.get("SCENEEXPERT_MEMORY_WRITER_INPUT_MAX_BYTES", 49152)
+        )
+        if min(self._context_tokens, self._max_input_bytes) <= 0:
+            raise ValueError("MemoryWriter context and input limits must be positive")
         self._llm_client = llm_client or SceneExpertStructuredLLMClient(
             model=model,
             api_base_url=api_base_url,
@@ -253,24 +265,69 @@ class MemoryWriter:
         identity. ``trace_summary`` remains for human context and compatibility.
         """
         evidence = dict(evidence_payload or {})
-        user_message = self._build_user_message(
-            trace_summary=trace_summary,
-            full_report=full_report,
-            related_old_memory=related_old_memory,
-            evidence_payload=evidence,
-        )
-        result = self._llm_client.complete(
-            role="memory_writer",
-            stage="full_scene",
-            event="write_long_term_memory",
-            messages=[
+        self._prompt_attempts: list[dict] = []
+        self._visible_episode_ids: set[str] | None = None
+        # Save the complete source before any model request, including failure.
+        if self._debug_dir is not None:
+            self._debug_dir.mkdir(parents=True, exist_ok=True)
+            self._atomic_write_json(
+                self._debug_dir / "memory_writer_input.json",
+                {
+                    "schema_version": "memory-writer-input.v1",
+                    "trace_summary": trace_summary,
+                    "evidence": evidence,
+                    "full_report": full_report.model_dump(),
+                    "related_old_memory": related_old_memory,
+                },
+            )
+        self._active_user_budget = self._user_budget(self._context_tokens)
+
+        def messages() -> list[dict[str, Any]]:
+            return [
                 {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            response_model=MemoryWriterResponse,
-            profile=self._profile,
-        )
+                {
+                    "role": "user",
+                    "content": self._build_user_message(
+                        trace_summary=trace_summary,
+                        full_report=full_report,
+                        related_old_memory=related_old_memory,
+                        evidence_payload=evidence,
+                    ),
+                },
+            ]
+
+        def reduce_context(previous: list[dict], error: str) -> list[dict] | None:
+            # Read a server's per-slot limit, not its advertised total capacity.
+            match = re.search(
+                r"(?:available context size\s*\(|[\"']n_ctx[\"']\s*:\s*|maximum context length is\s*)(\d+)",
+                error,
+            )
+            limit = (
+                self._user_budget(int(match[1])) if match else self._active_user_budget
+            )
+            previous_bytes = len(str(previous[-1].get("content", "")).encode("utf-8"))
+            self._active_user_budget = min(limit, previous_bytes // 2)
+            try:
+                return messages()
+            except WriterPromptBudgetError:
+                return None
+
+        try:
+            result = self._llm_client.complete(
+                role="memory_writer",
+                stage="full_scene",
+                event="write_long_term_memory",
+                messages=messages(),
+                response_model=MemoryWriterResponse,
+                profile=self._profile,
+                context_reducer=reduce_context,
+            )
+        except WriterPromptBudgetError as exc:
+            result = StructuredLLMResult(
+                final_error_kind="context_budget", final_error=str(exc)
+            )
         self.last_trace = result.status_dict()
+        self.last_trace["prompt_projection_attempts"] = self._prompt_attempts
         self.last_trace.update(
             {
                 "llm_skill_candidate_count": 0,
@@ -350,10 +407,21 @@ class MemoryWriter:
             {
                 "write_status": status,
                 "candidate_count": len(candidate_ops),
+                "generated_candidate_count": (
+                    len(response.success_cases)
+                    + len(response.failure_cases)
+                    + len(response.skills)
+                    if response is not None
+                    else 0
+                ),
+                "proposed_mutation_count": len(mutating_ops),
+                "persistence_confirmed": False,
+                "count_semantics": "writer counts are proposals; store_apply is authoritative",
                 "persisted_count": len(mutating_ops),
                 "promoted_count": len(active_promotion_ops),
                 "candidate_counts": self._op_counts(candidate_ops),
                 "persisted_counts": self._op_counts(mutating_ops),
+                "proposed_counts": self._op_counts(mutating_ops),
                 "promoted_counts": self._op_counts(active_promotion_ops),
                 "noop_reason": (
                     response.noop_reason
@@ -419,13 +487,13 @@ class MemoryWriter:
         if structured_failure:
             console_logger.warning(
                 "MemoryWriter structured output failed after %d attempts; "
-                "persisted %d independently gated deterministic Skill candidate(s): %s",
+                "proposed %d independently gated deterministic Skill candidate(s): %s",
                 len(result.attempts),
                 bootstrap_persisted,
                 result.final_error or result.final_error_kind,
             )
         console_logger.info(
-            "MemoryWriter: persisted %d/%d schema-valid candidates; fallback_written=false",
+            "MemoryWriter: proposed %d/%d schema-valid candidates; awaiting store; fallback_written=false",
             len(mutating_ops),
             len(candidate_ops),
         )
@@ -493,6 +561,9 @@ class MemoryWriter:
         episodes = [by_id[key] for key in ids if key in by_id]
         procedure = self._clean_list(candidate.procedure)
         reasons = []
+        visible = getattr(self, "_visible_episode_ids", None)
+        if visible is not None and any(eid not in visible for eid in ids):
+            reasons.append("episode_not_in_model_input")
         if not ids or len(ids) != len(set(ids)) or len(episodes) != len(ids):
             reasons.append("missing_or_invalid_episode_binding")
         if any(e.stage != candidate.stage for e in episodes):
@@ -830,6 +901,24 @@ class MemoryWriter:
     ) -> list[MemoryUpdateOp]:
         """Validate persisted records and enforce deterministic promotion gates."""
         self._last_skill_decisions: list[dict[str, Any]] = []
+        promotion_decisions = self.last_trace.setdefault(
+            "placement_promotion_decisions", []
+        )
+
+        def record_decision(op: MemoryUpdateOp, decision: str, reason: str) -> None:
+            if not op.content.get("placement_experience"):
+                return
+            promotion_decisions.append(
+                {
+                    "memory_type": op.memory_type,
+                    "stage": op.content.get("stage"),
+                    "record_id": op.content.get("case_id")
+                    or op.content.get("failure_id"),
+                    "decision": decision,
+                    "reason": reason,
+                }
+            )
+
         evidence = dict(evidence_payload or {})
         has_structured_evidence = bool(evidence.get("stages"))
         success_threshold = float(
@@ -846,6 +935,7 @@ class MemoryWriter:
             if op.memory_type == "success_case":
                 record = self._validate_success(op.content)
                 if record is None:
+                    record_decision(op, "rejected", "schema_invalid")
                     continue
                 stage_evidence = self._stage_evidence(evidence, record.stage)
                 stage_passed = self._stage_passed(stage_evidence)
@@ -861,11 +951,10 @@ class MemoryWriter:
                     and full_report.overall_score >= success_threshold
                 )
                 stage_local_success = bool(
-                    has_structured_evidence
-                    and not full_report.pass_scene
-                    and stage_passed
+                    has_structured_evidence and not scene_success and stage_passed
                 )
                 if has_structured_evidence and not stage_passed:
+                    record_decision(op, "rejected", "selected_stage_not_verified")
                     console_logger.info(
                         "MemoryWriter: rejected success %s because its exact stage "
                         "did not pass authoritative verification",
@@ -873,6 +962,9 @@ class MemoryWriter:
                     )
                     continue
                 if not scene_success and not stage_local_success:
+                    record_decision(
+                        op, "rejected", "neither_scene_nor_stage_gate_passed"
+                    )
                     console_logger.info(
                         "MemoryWriter: rejected success %s because neither the "
                         "scene gate nor the stage-local degraded gate passed",
@@ -883,7 +975,7 @@ class MemoryWriter:
                     record = record.model_copy(
                         update={
                             "promotion_scope": "stage",
-                            "source_scene_passed": False,
+                            "source_scene_passed": bool(full_report.pass_scene),
                             "confidence": min(float(record.confidence), 0.75),
                             "quality_score": self._mean_score(
                                 record.scores
@@ -901,11 +993,17 @@ class MemoryWriter:
                     )
                 record = self._rebuild_embedding(record)
                 filtered.append(op.model_copy(update={"content": record.model_dump()}))
+                record_decision(
+                    op,
+                    "proposed_to_store",
+                    "stage_success" if stage_local_success else "scene_success",
+                )
                 continue
 
             if op.memory_type == "failure_case":
                 record = self._validate_failure(op.content)
                 if record is None:
+                    record_decision(op, "rejected", "schema_invalid")
                     continue
                 stage_evidence = self._stage_evidence(evidence, record.stage)
                 if record.placement_experience is not None:
@@ -926,6 +1024,7 @@ class MemoryWriter:
                         record.model_dump()
                     )
                 if not repair_verified and not deterministic:
+                    record_decision(op, "rejected", "no_verified_failure_or_repair")
                     console_logger.info(
                         "MemoryWriter: rejected unverified/non-deterministic failure %s",
                         record.failure_id,
@@ -947,6 +1046,7 @@ class MemoryWriter:
                 )
                 record = self._rebuild_embedding(record)
                 filtered.append(op.model_copy(update={"content": record.model_dump()}))
+                record_decision(op, "proposed_to_store", "verified_failure")
                 continue
 
             if op.memory_type == "skill":
@@ -1497,23 +1597,73 @@ class MemoryWriter:
         related_old_memory: str,
         evidence_payload: dict[str, Any],
     ) -> str:
-        payload = {
-            "trace_summary": trace_summary,
-            "evidence": writer_prompt_evidence(evidence_payload),
-            "final_report": full_report.model_dump(),
-            "related_existing_memory": related_old_memory,
-        }
-        return (
-            "Analyze this terminal run, which may have completed or failed. Treat "
-            "each evidence.stages[*].verify_report and final_report as authoritative. "
-            "A failed final_report forbids scene-level success and immediately active "
-            "skills, but an earlier stage with pass_stage=true may still yield a "
-            "narrowly scoped stage success or reusable Skill candidate. Never infer "
-            "success or a Skill for a failed exact stage. Deterministic code owns "
-            "candidate persistence and activation. Return only "
-            "schema-valid reusable candidates.\n"
-            + json.dumps(payload, ensure_ascii=False, default=str)
+        message, metadata = build_writer_prompt(
+            evidence=evidence_payload,
+            final_report=full_report.model_dump(),
+            trace_summary=trace_summary,
+            related_old_memory=related_old_memory,
+            max_user_bytes=getattr(
+                self, "_active_user_budget", self._user_budget(self._context_tokens)
+            ),
         )
+        self._visible_episode_ids = (
+            set(metadata["selected_episode_ids"]) if metadata["has_catalog"] else None
+        )
+        if not hasattr(self, "_prompt_attempts"):
+            self._prompt_attempts = []
+        self._prompt_attempts.append(metadata)
+        if self._debug_dir is not None:
+            self._debug_dir.mkdir(parents=True, exist_ok=True)
+            self._atomic_write_json(
+                self._debug_dir
+                / f"memory_writer_prompt_{len(self._prompt_attempts):02d}.json",
+                {
+                    "projection": metadata,
+                    "messages": [
+                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "user", "content": message},
+                    ],
+                },
+            )
+        return message
+
+    def _user_budget(self, context_tokens: int) -> int:
+        """Reserve schema, output and retry/framing space within a byte envelope."""
+        reserve = (
+            max(self._profile.max_tokens, self._profile.retry_max_tokens or 0)
+            + byte_size(MemoryWriterResponse.model_json_schema())
+            + len(_SYSTEM_PROMPT.encode("utf-8"))
+            + 4096
+        )
+        return min(self._max_input_bytes, context_tokens - reserve)
+
+    def record_store_result(self, summary: dict[str, Any]) -> None:
+        """Confirm actual store mutations separately from model proposals."""
+        self.last_trace.update(
+            {
+                "store_apply": dict(summary),
+                "persistence_confirmed": True,
+                "persisted_count": sum(
+                    int(summary.get(k, 0)) for k in ("added", "updated", "merged")
+                ),
+                "promoted_count": int(summary.get("active_records_changed", 0)),
+                "persisted_counts": dict(summary.get("changed_counts", {})),
+                "promoted_counts": dict(summary.get("active_changed_counts", {})),
+                "count_semantics": "persisted/promoted counts confirmed by store; proposed counts are writer output",
+            }
+        )
+        if self._debug_dir is not None:
+            path = self._debug_dir / "memory_writer_debug.json"
+            try:
+                if path.is_file():
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    payload["result_status"] = self.last_trace
+                    self._atomic_write_json(path, payload)
+            except (OSError, ValueError) as exc:
+                self.last_trace["store_audit_error"] = str(exc)
+                console_logger.warning(
+                    "Memory store succeeded but debug refresh failed: %s", exc
+                )
 
     def _save_debug_payload(
         self,

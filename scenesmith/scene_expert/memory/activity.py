@@ -335,6 +335,14 @@ class MemoryActivityLogger:
         """Record candidate generation and the final promotion decision."""
         self._payload["writer"] = {
             "status": "failed" if error else "completed",
+            "model_status": (
+                "succeeded" if writer_trace.get("success") else "failed_or_not_run"
+            ),
+            "persistence_status": (
+                "not_confirmed"
+                if error or apply_summary is None
+                else "changed" if apply_summary.get("changed") else "no_change"
+            ),
             "proposed_ops": [
                 op.model_dump(mode="json") if hasattr(op, "model_dump") else op
                 for op in proposed_ops

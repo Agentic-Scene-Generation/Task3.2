@@ -400,6 +400,22 @@ class FastMemoryStore:
             )
             for relation in record.spatial_relations
         }
+        experience = getattr(record, "placement_experience", None)
+        if experience is not None:
+            # Same prose/role pair can describe different procedures or exact
+            # observations. Do not merge away the incoming immutable experience
+            # while retaining only the old geometry. Legacy signatures stay unchanged.
+            claims.add(
+                "placement_experience:"
+                + hashlib.sha256(
+                    json.dumps(
+                        experience.model_dump(mode="json"),
+                        sort_keys=True,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+            )
         return json.dumps(sorted(claims), ensure_ascii=False)
 
     def _rewrite(self, path: Path, records: list[BaseModel]) -> None:
@@ -638,6 +654,9 @@ class FastMemoryStore:
         skill_candidate_added = 0
         skill_candidate_merged = 0
         skill_promoted_active = 0
+        active_records_changed = 0
+        changed_counts: dict[str, int] = {}
+        active_changed_counts: dict[str, int] = {}
         with self._file_lock():
             self._manifest = self._read_or_create_manifest_unlocked()
             self._reload_from_disk_unlocked()
@@ -655,6 +674,14 @@ class FastMemoryStore:
                     changed, was_merged = self._apply_add_unlocked(op, next_revision)
                     if changed:
                         changed_banks.add(op.memory_type)
+                        changed_counts[op.memory_type] = (
+                            changed_counts.get(op.memory_type, 0) + 1
+                        )
+                        if self._mutation_is_active(op):
+                            active_records_changed += 1
+                            active_changed_counts[op.memory_type] = (
+                                active_changed_counts.get(op.memory_type, 0) + 1
+                            )
                         if was_merged:
                             merged += 1
                         else:
@@ -682,6 +709,14 @@ class FastMemoryStore:
                     if self._apply_update_unlocked(op, next_revision):
                         changed_banks.add(op.memory_type)
                         updated += 1
+                        changed_counts[op.memory_type] = (
+                            changed_counts.get(op.memory_type, 0) + 1
+                        )
+                        if self._mutation_is_active(op):
+                            active_records_changed += 1
+                            active_changed_counts[op.memory_type] = (
+                                active_changed_counts.get(op.memory_type, 0) + 1
+                            )
 
             if "success_case" in changed_banks:
                 self._rewrite(self._success_path, self.success_cases)
@@ -728,9 +763,40 @@ class FastMemoryStore:
             "skill_candidate_added": skill_candidate_added,
             "skill_candidate_merged": skill_candidate_merged,
             "skill_promoted_active": skill_promoted_active,
+            "active_records_changed": active_records_changed,
+            "changed_counts": changed_counts,
+            "active_changed_counts": active_changed_counts,
         }
         self.last_apply_summary = summary
         return summary
+
+    def _mutation_is_active(self, op: MemoryUpdateOp) -> bool:
+        """Inspect the stored result, not a candidate's requested status."""
+        records, identity, signature, model = {
+            "success_case": (
+                self.success_cases,
+                "case_id",
+                self._success_signature,
+                SuccessCase,
+            ),
+            "failure_case": (
+                self.failure_cases,
+                "failure_id",
+                self._failure_signature,
+                FailureCase,
+            ),
+            "skill": (self.skills, "skill_name", self._skill_signature, Skill),
+        }[op.memory_type]
+        target = op.target_id or str(op.content.get(identity, ""))
+        incoming = model.model_validate(op.content) if op.op == "ADD" else None
+        return any(
+            record.status == "active"
+            and (
+                (incoming is not None and signature(record) == signature(incoming))
+                or (incoming is None and str(getattr(record, identity)) == target)
+            )
+            for record in records
+        )
 
     @staticmethod
     def _normalized_skill(content: dict[str, Any]) -> Skill:

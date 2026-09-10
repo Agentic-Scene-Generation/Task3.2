@@ -131,6 +131,10 @@ SCENE_COLUMNS = (
     "memory_retrieval_time_sec",
     "memory_writer_status",
     "memory_writer_candidate_count",
+    "memory_writer_generated_candidate_count",
+    "memory_writer_proposed_mutations",
+    "memory_writer_persistence_observed",
+    "memory_writer_activation_observed",
     "memory_writer_noop_reason",
     "memory_writer_persisted",
     "memory_writer_promoted",
@@ -699,9 +703,17 @@ def _writer_metrics(
         "memory_writer_candidate_count": _as_int(status.get("candidate_count")),
         "memory_writer_noop_reason": str(status.get("noop_reason") or ""),
         "memory_writer_persisted": _as_int(
-            status.get("persisted_count", status.get("promoted_count"))
+            sum(_as_int(store_apply.get(k)) for k in ("added", "updated", "merged"))
         ),
-        "memory_writer_promoted": _as_int(status.get("promoted_count")),
+        "memory_writer_promoted": _as_int(store_apply.get("active_records_changed")),
+        "memory_writer_persistence_observed": bool(store_apply),
+        "memory_writer_activation_observed": "active_records_changed" in store_apply,
+        "memory_writer_generated_candidate_count": _as_int(
+            status.get("generated_candidate_count")
+        ),
+        "memory_writer_proposed_mutations": _as_int(
+            status.get("proposed_mutation_count", status.get("persisted_count"))
+        ),
         "memory_writer_added": _as_int(store_apply.get("added")),
         "memory_writer_merged": _as_int(store_apply.get("merged")),
         "memory_writer_fallback_written": bool(status.get("fallback_written", False)),
@@ -1455,6 +1467,15 @@ def collect_run_metrics(
         "memory_writer_candidate_records": sum(
             row["memory_writer_candidate_count"] for row in scene_rows
         ),
+        "memory_writer_generated_candidate_records": sum(
+            row["memory_writer_generated_candidate_count"] for row in scene_rows
+        ),
+        "memory_writer_proposed_mutations": sum(
+            row["memory_writer_proposed_mutations"] for row in scene_rows
+        ),
+        "memory_writer_persistence_observed_scenes": sum(
+            row["memory_writer_persistence_observed"] for row in scene_rows
+        ),
         "memory_writer_persisted_records": sum(
             row["memory_writer_persisted"] for row in scene_rows
         ),
@@ -1716,6 +1737,9 @@ def _markdown(metrics: dict[str, Any]) -> str:
         "memory_cross_task_verified_scene_coverage",
         "memory_writer_promoted_records",
         "memory_writer_persisted_records",
+        "memory_writer_generated_candidate_records",
+        "memory_writer_proposed_mutations",
+        "memory_writer_persistence_observed_scenes",
         "llm_skill_candidate_count",
         "bootstrap_skill_eligible_stage_count",
         "bootstrap_skill_candidate_count",

@@ -2442,6 +2442,7 @@ class SceneExpertHookRunner:
             if self._trace_enabled():
                 self._trace_logger.save_memory_update_ops(ops, full_report)
             apply_summary = self._memory_store.apply_updates(ops)
+            self._memory_writer.record_store_result(apply_summary)
             self._memory_activity.record_writer(
                 proposed_ops=ops,
                 writer_trace=dict(self._memory_writer.last_trace),
