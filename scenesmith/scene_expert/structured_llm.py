@@ -33,6 +33,7 @@ from scenesmith.scene_expert.context_bundle import (
     stable_hash,
     utc_now,
 )
+from scenesmith.scene_expert.service_diagnostics import connection_diagnostics
 from scenesmith.utils.openai_strict_schema import make_openai_strict_json_schema
 from scenesmith.utils.token_usage import normalize_token_usage
 
@@ -105,6 +106,7 @@ class StructuredLLMAttempt(BaseModel):
     output_chars: int = 0
     reasoning_chars: int = 0
     token_usage: dict[str, int] = Field(default_factory=dict)
+    connection_diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
 @dataclass
@@ -381,6 +383,8 @@ class SceneExpertStructuredLLMClient:
                     reasoning=reasoning,
                     response=failure.response or response,
                 )
+                if failure.kind in {"transport", "timeout"}:
+                    attempt.connection_diagnostics = connection_diagnostics(exc)
                 attempts.append(attempt)
                 self._append_debug(
                     stage=stage,
