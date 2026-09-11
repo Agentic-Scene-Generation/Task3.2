@@ -84,6 +84,7 @@ _DEFAULT_CODE_PROVENANCE_PATHS = (
     "tmp/acp/acp_qwen38_4c_generate.sh",
     "tmp/acp/acp_qwen38_4c_reuse.sh",
     "tmp/acp/acp_qwen38_full_reuse.sh",
+    "tmp/acp/acp_qwen38_slow_memory_recollect.sh",
 )
 
 
