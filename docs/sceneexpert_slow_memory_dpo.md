@@ -109,6 +109,18 @@ requirement for all future collection. See the
 the proposed decision-level sampler, memory lifecycle, and experiment gates.
 That sampler is not supplied by the existing Full capture preset.
 
+For an immediate Qwen3.8-only observer recollection with an auditable export
+probe, use the tracked ACP wrapper:
+
+```bash
+RUN_ID=recollect_qwen38_smoke_001 MAX_CASES=12 \
+  bash tmp/acp/acp_qwen38_slow_memory_recollect.sh
+```
+
+It deliberately runs one scene at a time so MemoryWriter may update only after
+a completed scene. The generated `dpo_probe` may be empty: it reports exact
+pair yield and must not start training unless real pairs are present.
+
 ```bash
 python scripts/export_sceneexpert_dpo.py \
   --trajectory-source outputs/run_001 \
