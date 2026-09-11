@@ -144,6 +144,20 @@ class SceneExpertRuntimeBoundaryTest(unittest.TestCase):
         self.assertNotIn("train_sceneexpert_dpo", online_sources)
         self.assertNotIn("DPOTrainer", online_sources)
 
+    def test_acp_qwen_overrides_do_not_leak_into_embedding_service(self) -> None:
+        launcher_source = self._source("tmp/acp/acp_qwen38_4c_generate.sh")
+        embedding_start = launcher_source.index(
+            "nohup env", launcher_source.index("EMBEDDING_PORT=8014")
+        )
+        embedding_launch = launcher_source[
+            embedding_start : launcher_source.index("EMBEDDING_PID=$!")
+        ]
+
+        self.assertIn(
+            "env -u MODEL -u MODEL_DIR -u MMPROJ -u ALIAS",
+            embedding_launch,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
