@@ -623,3 +623,24 @@ Implement in this order (each unblocks the next):
 10. `memory/writer.py` — Qwen3 memory update call
 11. `pipeline.py` — wire everything together
 12. Config + integration hooks in `indoor_scene_generation.py`
+
+---
+
+## Git Delivery Convention
+
+Use English commit messages consistent with this branch's history:
+
+```text
+Type(module-or-mechanism): Summarize the main change in one sentence
+
+- Describe a concrete change and its purpose.
+- Describe other relevant changes and validation.
+```
+
+Use an appropriate capitalized type such as `Feat`, `Fix`, `Chore`, or `Refactor`.
+For every commit, complete both the local commit on the intended branch and the
+push to its corresponding remote branch without asking for another confirmation.
+The current target is `dev_lwz_maintain` and `origin/dev_lwz_maintain`; follow an
+explicitly requested branch change. Stage only the intended task changes. Verify
+the push result and report any failure rather than claiming synchronization.
+This convention does not authorize force-pushing or overwriting unrelated work.
