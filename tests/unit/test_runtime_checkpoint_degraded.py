@@ -134,3 +134,18 @@ def test_agent_only_persists_runtime_checkpoint_after_real_designer_mutation(
         agent.scene.metadata["scenesmith_runtime_failure"]["checkpoint"]["scene_hash"]
         == "scene-hash"
     )
+
+
+def test_floor_plan_checkpoint_failure_does_not_mask_original_error(
+    tmp_path: Path,
+) -> None:
+    agent = object.__new__(_Agent)
+    agent._planner_successful_designer_mutations = 1
+    agent.layout = SimpleNamespace(content_hash=lambda: "layout-hash")
+    agent.logger = _CheckpointLogger(tmp_path)
+    failure = {"error_type": "BadRequestError"}
+
+    agent._persist_runtime_failure_checkpoint(failure)
+
+    assert failure["checkpoint"]["validation"] == "error"
+    assert "AttributeError" in failure["checkpoint"]["error"]

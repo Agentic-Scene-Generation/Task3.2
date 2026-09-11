@@ -158,6 +158,27 @@ class SceneExpertRuntimeBoundaryTest(unittest.TestCase):
             embedding_launch,
         )
 
+    def test_floor_plan_critic_separates_evidence_from_structured_scoring(
+        self,
+    ) -> None:
+        source = self._source(
+            "scenesmith/floor_plan_agents/stateful_floor_plan_agent.py"
+        )
+        method = source[
+            source.index("    async def _request_critique_impl(") : source.index(
+                "    @log_scene_action",
+                source.index("    async def _request_critique_impl("),
+            )
+        ]
+
+        self.assertIn("vision_tools._observe_scene_impl()", method)
+        self.assertIn("validation_tools._validate_impl()", method)
+        self.assertIn("tools=[]", method)
+        self.assertIn('ModelSettings(tool_choice="none"', method)
+        self.assertIn("starting_agent=critic_score", method)
+        self.assertIn("session=None", method)
+        self.assertNotIn("starting_agent=self.critic", method)
+
 
 if __name__ == "__main__":
     unittest.main()
