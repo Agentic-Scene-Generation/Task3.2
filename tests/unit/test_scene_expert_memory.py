@@ -57,7 +57,6 @@ from scenesmith.scene_expert.schemas import (
     StageVerifyReport,
     VerifyIssue,
 )
-from scenesmith.scenebenchmark_critic.object_taxonomy import generation_owner
 from scenesmith.scene_expert.task_compiler import (
     _fallback_spec_from_prompt,
     _normalize_stage_ownership,
@@ -67,6 +66,7 @@ from scenesmith.scene_expert.verifier import (
     StageVerifier,
     _map_scenesmith_scores,
 )
+from scenesmith.scenebenchmark_critic.object_taxonomy import generation_owner
 from scripts.build_memory_index import build_memory_indexes
 
 
@@ -825,7 +825,11 @@ class SceneExpertMemoryTest(unittest.TestCase):
             root = Path(tmp)
             public_dir = root / "scene_expert_memory" / "ablation_test"
             old_env = os.environ.get("SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR")
+            old_read_only_env = os.environ.get(
+                "SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY"
+            )
             os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] = str(public_dir)
+            os.environ.pop("SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY", None)
             try:
                 memory = StageWorkingMemory(
                     root_dir=root / "scene_000" / "room_bedroom",
@@ -848,6 +852,12 @@ class SceneExpertMemoryTest(unittest.TestCase):
                     os.environ.pop("SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR", None)
                 else:
                     os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] = old_env
+                if old_read_only_env is None:
+                    os.environ.pop("SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY", None)
+                else:
+                    os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY"] = (
+                        old_read_only_env
+                    )
 
             self.assertTrue((public_dir / "events.jsonl").exists())
             self.assertFalse((public_dir / "failure_cases.jsonl").exists())
@@ -1824,7 +1834,12 @@ class SceneExpertMemoryTest(unittest.TestCase):
 
             self.assertEqual(1, len(pack.success_hints))
             self.assertIn("use bed as the anchor", pack.success_hints[0])
-            self.assertIn("Reference Layout", pack.placement_reference)
+            # Legacy world coordinates have no verified local frame. Keep the
+            # useful semantic lesson, but do not copy that layout to a new room.
+            self.assertEqual("", pack.placement_reference)
+            self.assertIn(
+                "legacy_world_layout_omitted", pack.selections[0].evidence_warnings
+            )
             self.assertEqual(1, len(pack.failure_hints))
             self.assertIn("do not retry", pack.failure_hints[0])
             self.assertEqual(1, len(pack.skill_texts))

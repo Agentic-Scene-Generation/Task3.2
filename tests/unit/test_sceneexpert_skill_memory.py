@@ -21,13 +21,14 @@ from scenesmith.scene_expert.schemas import (
     MemoryPack,
     RetrievedMemorySelection,
     SceneTaskSpec,
+    SkillSelectionDecision,
     StageBrief,
     StageExecutionEvidence,
     StageRelationContext,
     StageVerifyReport,
-    SkillSelectionDecision,
     VerifyIssue,
 )
+from tests.unit.memory_context_fixtures import accepting_brief
 
 
 def _meeting_task() -> SceneTaskSpec:
@@ -212,7 +213,8 @@ def test_complete_skill_is_injected_once_and_funnel_is_explicit() -> None:
     )
     bundle = build_memory_injection_bundle(
         stage="furniture",
-        stage_brief=StageBrief(
+        stage_brief=accepting_brief(
+            pack,
             stage="furniture",
             stage_objective="Build the meeting layout.",
             recommended_skills=[skill.skill_name],
@@ -256,7 +258,8 @@ def test_skill_funnel_labels_relevant_hard_failure_without_causal_claim() -> Non
     )
     bundle = build_memory_injection_bundle(
         stage="furniture",
-        stage_brief=StageBrief(
+        stage_brief=accepting_brief(
+            pack,
             stage="furniture",
             stage_objective="Build the meeting layout.",
             recommended_skills=[skill.skill_name],
@@ -309,9 +312,9 @@ def test_skill_funnel_labels_relevant_hard_failure_without_causal_claim() -> Non
     observation = observations[0]
     assert observation.retrieved
     assert observation.planner_selected
-    assert observation.prompt_delivered
-    assert observation.outcome == "negative"
-    assert observation.outcome_basis == "relevant_hard_failure_after_skill_delivery"
+    assert not observation.prompt_delivered
+    assert observation.outcome == "unknown"
+    assert observation.outcome_basis == "no_verified_related_action"
 
 
 def test_only_independent_skill_evidence_refines_and_repeated_harm_quarantines() -> (
@@ -375,6 +378,85 @@ def test_only_independent_skill_evidence_refines_and_repeated_harm_quarantines()
         assert second_summary["quarantined"] == [original.skill_name]
         assert store.skills[0].negative_utility_count == 2
         assert store.skills[0].status == "quarantined"
+        assert store.active_skills == []
+
+
+def test_stage_candidates_require_two_independent_semantic_supports() -> None:
+    with TemporaryDirectory() as temp_dir:
+        store = FastMemoryStore(temp_dir)
+        first = _edge_skill(
+            name="distribute_table_seating",
+            source_task_id="candidate_task_a",
+            source_run_id="candidate_run_a",
+        ).model_copy(
+            update={
+                "status": "candidate",
+                "source_scene_passed": False,
+                "promotion_scope": "stage",
+                "activation_reason": "stage_pass_awaiting_independent_support",
+            }
+        )
+        assert store.add_skill(first)
+        assert len(store.skills) == 1
+        assert store.skills[0].status == "candidate"
+        assert store.active_skills == []
+        assert store.manifest["counts"]["candidate_skill"] == 1
+        assert store.last_apply_summary["skill_candidate_added"] == 1
+
+        same_task_alias = _edge_skill(
+            name="bind_contract_seats_to_edges",
+            source_task_id="candidate_task_a",
+            source_run_id="candidate_run_retry",
+        ).model_copy(update={"status": "candidate"})
+        assert not store.add_skill(same_task_alias)
+        assert store.skills[0].independent_support_count == 1
+
+        independent_alias = _edge_skill(
+            name="bind_contract_seats_to_edges",
+            source_task_id="candidate_task_b",
+            source_run_id="candidate_run_b",
+        ).model_copy(update={"status": "candidate"})
+        assert store.add_skill(independent_alias)
+
+        promoted = store.skills[0]
+        assert len(store.skills) == 1
+        assert promoted.status == "active"
+        assert promoted.independent_support_count == 2
+        assert promoted.activation_reason == "independent_stage_support_threshold_met"
+        assert promoted.skill_aliases == [
+            "distribute_table_seating",
+            "bind_contract_seats_to_edges",
+        ]
+        assert store.active_skills == [promoted]
+        assert store.last_apply_summary["skill_promoted_active"] == 1
+        assert store.manifest["counts"]["candidate_skill"] == 0
+        assert store.manifest["counts"]["active_skill"] == 1
+
+
+def test_same_skill_name_with_different_semantics_never_merges_support() -> None:
+    with TemporaryDirectory() as temp_dir:
+        store = FastMemoryStore(temp_dir)
+        meeting_skill = _edge_skill(
+            name="arrange_required_seating",
+            room_type="meeting_room",
+            chair_count=7,
+            source_task_id="meeting_task",
+            source_run_id="meeting_run",
+        ).model_copy(update={"status": "candidate"})
+        dining_skill = _edge_skill(
+            name="arrange_required_seating",
+            room_type="dining_room",
+            chair_count=4,
+            source_task_id="dining_task",
+            source_run_id="dining_run",
+        ).model_copy(update={"status": "candidate"})
+
+        assert store.add_skill(meeting_skill)
+        assert store.add_skill(dining_skill)
+
+        assert len(store.skills) == 2
+        assert all(skill.status == "candidate" for skill in store.skills)
+        assert all(skill.independent_support_count == 1 for skill in store.skills)
         assert store.active_skills == []
 
 

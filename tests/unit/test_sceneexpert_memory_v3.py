@@ -6,8 +6,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from scenesmith.scene_expert.experiment_identity import (
+    shared_base_scene_identity,
     stable_config_hash,
+    stable_control_signature,
     stable_experiment_signature,
+    stable_source_bundle_hash,
 )
 from scenesmith.scene_expert.memory.activity import MemoryActivityLogger
 from scenesmith.scene_expert.memory.injection import build_memory_injection_bundle
@@ -20,6 +23,7 @@ from scenesmith.scene_expert.schemas import (
     StageExecutionEvidence,
     StageVerifyReport,
 )
+from tests.unit.memory_context_fixtures import accepting_brief
 
 
 def _task_spec() -> SceneTaskSpec:
@@ -42,6 +46,8 @@ def test_v2_record_loads_with_conservative_v3_defaults() -> None:
 
     assert MEMORY_SCHEMA_VERSION == "sceneexpert.memory.v3"
     assert record.schema_version == "sceneexpert.memory.v2"
+    assert record.promotion_scope == "scene"
+    assert record.source_scene_passed is True
     assert record.spatial_relations == []
     assert record.provenance.trace_id == ""
 
@@ -83,6 +89,118 @@ def test_experiment_signature_ignores_batch_labels_and_port_ranges() -> None:
     assert stable_experiment_signature(first) != stable_experiment_signature(second)
 
 
+def test_experiment_signature_ignores_per_scene_prompt_and_identity() -> None:
+    first = {
+        "experiment": {
+            "name": "ablation_4c",
+            "prompt": "A classroom.",
+            "scene_id": 1,
+            "pipeline": {"stop_stage": "manipuland"},
+        }
+    }
+    second = {
+        "experiment": {
+            "name": "ablation_4c",
+            "prompt": "A bedroom.",
+            "scene_id": 99,
+            "pipeline": {"stop_stage": "manipuland"},
+        }
+    }
+
+    assert stable_config_hash(first) != stable_config_hash(second)
+    assert stable_experiment_signature(first) == stable_experiment_signature(second)
+
+
+def test_exact_and_control_identity_ignore_runtime_private_contracts() -> None:
+    first = {
+        "experiment": {"pipeline": {"stop_stage": "manipuland"}},
+        "_scenebenchmark_intent_contract": {"constraint_id": "case-a"},
+    }
+    second = {
+        "experiment": {"pipeline": {"stop_stage": "manipuland"}},
+        "_scenebenchmark_intent_contract": {"constraint_id": "case-b"},
+    }
+
+    assert stable_config_hash(first) == stable_config_hash(second)
+    assert stable_experiment_signature(first) == stable_experiment_signature(second)
+
+
+def test_experiment_signature_keeps_agent_prompt_template_selection() -> None:
+    first = {
+        "experiment": {"prompts": ["A classroom."]},
+        "furniture_agent": {"agents": {"designer": {"prompt": "DESIGNER_AGENT"}}},
+    }
+    second = {
+        "experiment": {"prompts": ["A bedroom."]},
+        "furniture_agent": {
+            "agents": {"designer": {"prompt": "EXPERIMENTAL_DESIGNER_AGENT"}}
+        },
+    }
+
+    assert stable_experiment_signature(first) != stable_experiment_signature(second)
+
+
+def test_source_bundle_hash_is_path_separator_and_order_stable() -> None:
+    first = {"scenesmith/a.py": "aaa", "scenesmith/b.py": "bbb"}
+    second = {"scenesmith\\b.py": "bbb", "scenesmith\\a.py": "aaa"}
+
+    assert stable_source_bundle_hash(first) == stable_source_bundle_hash(second)
+
+
+def test_control_signature_ignores_only_declared_memory_treatment() -> None:
+    baseline = {
+        "scene_expert": {
+            "mode": "full",
+            "evaluation": {"arm": "memory_off", "pair_id": "pair-a"},
+            "components": {
+                "fast_memory_retrieval": {"enabled": False},
+                "memory_writer": {"enabled": False},
+            },
+        },
+        "furniture_agent": {"openai": {"model": "qwen-test"}},
+    }
+    treatment = json.loads(json.dumps(baseline))
+    treatment["scene_expert"]["evaluation"]["arm"] = "memory_on"
+    treatment["scene_expert"]["components"]["fast_memory_retrieval"] = {"enabled": True}
+
+    assert stable_experiment_signature(baseline) != stable_experiment_signature(
+        treatment
+    )
+    assert stable_control_signature(
+        baseline, controlled_dimension="fast_memory_retrieval"
+    ) == stable_control_signature(
+        treatment, controlled_dimension="fast_memory_retrieval"
+    )
+
+    treatment["scene_expert"]["components"]["memory_writer"] = {"enabled": True}
+    assert stable_control_signature(
+        baseline, controlled_dimension="fast_memory_retrieval"
+    ) != stable_control_signature(
+        treatment, controlled_dimension="fast_memory_retrieval"
+    )
+
+
+def test_shared_base_identity_is_path_independent_and_content_sensitive(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first" / "scene_003"
+    second = tmp_path / "second" / "scene_003"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    (first / "house_layout.json").write_text('{"rooms": 1}', encoding="utf-8")
+    (second / "house_layout.json").write_text('{"rooms": 1}', encoding="utf-8")
+
+    first_identity = shared_base_scene_identity(tmp_path / "first", scene_index=3)
+    second_identity = shared_base_scene_identity(tmp_path / "second", scene_index=3)
+    assert first_identity["fingerprint"] == second_identity["fingerprint"]
+
+    (second / "house_layout.json").write_text('{"rooms": 2}', encoding="utf-8")
+    assert (
+        first_identity["fingerprint"]
+        != shared_base_scene_identity(tmp_path / "second", scene_index=3)["fingerprint"]
+    )
+
+
 def test_canonical_bundle_does_not_repeat_memory_directives() -> None:
     success = "[Positive/furniture] Keep desks aligned to the teaching wall."
     failure = "[Avoid/furniture] Do not face student chairs away from desks."
@@ -95,10 +213,20 @@ def test_canonical_bundle_does_not_repeat_memory_directives() -> None:
         success_case_ids=["success_1"],
         failure_case_ids=["failure_1"],
         skill_names=["align_student_seating"],
+        selections=[
+            RetrievedMemorySelection(
+                memory_id="success_1",
+                memory_type="success",
+                rank=1,
+                injected_text=success,
+                placement_text="Reference relation: chair faces desk.",
+            ),
+        ],
     )
     bundle = build_memory_injection_bundle(
         stage="furniture",
-        stage_brief=StageBrief(
+        stage_brief=accepting_brief(
+            pack,
             stage="furniture",
             stage_objective="Create a usable classroom.",
         ),
@@ -107,8 +235,9 @@ def test_canonical_bundle_does_not_repeat_memory_directives() -> None:
 
     assert bundle.final_text.count(success) == 1
     assert bundle.final_text.count(failure) == 1
-    assert bundle.final_text.count(skill) == 1
-    assert bundle.final_text.count(pack.placement_reference) == 1
+    assert bundle.final_text.count("[Skill: align_student_seating]") == 1
+    assert bundle.final_text.count("Bind chairs to desks.") == 1
+    assert pack.placement_reference not in bundle.final_text
     assert bundle.selected_memory_ids == [
         "success_1",
         "failure_1",
@@ -143,7 +272,8 @@ def test_memory_activity_links_selection_injection_and_outcome() -> None:
         )
         bundle = build_memory_injection_bundle(
             stage="furniture",
-            stage_brief=StageBrief(
+            stage_brief=accepting_brief(
+                pack,
                 stage="furniture",
                 stage_objective="Create a usable classroom.",
             ),
@@ -178,6 +308,8 @@ def test_memory_activity_links_selection_injection_and_outcome() -> None:
     assert stage["injection"]["selected_memory_ids"] == ["success_1"]
     assert stage["utility_observations"][0]["outcome"] == "unknown"
     assert stage["utility_observations"][0]["stage_passed"] is True
-    assert stage["utility_observations"][0]["injected"] is True
+    assert (
+        stage["utility_observations"][0]["injected"] is False
+    )  # Preparation is not request evidence.
     assert stage["utility_observations"][0]["task_id"] == "task_current"
     assert stage["utility_observations"][0]["run_id"] == "run_current"

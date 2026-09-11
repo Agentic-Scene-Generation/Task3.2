@@ -20,10 +20,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from scenesmith.scene_expert.evaluation_costs import collect_attempt_costs
+from scenesmith.scene_expert.experiment_identity import stable_source_bundle_hash
+from scenesmith.scene_expert.memory.usage import collect_memory_usage
+
 console_logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "sceneexpert.run_metrics.v5"
+SCHEMA_VERSION = "sceneexpert.run_metrics.v9"
 SCENE_COLUMNS = (
+    "all_attempt_time_sec",
+    "all_attempt_cost_complete",
+    "observed_attempt_time_lower_bound_sec",
+    "all_attempt_trace_time_sec",
+    "memory_payload_observed_count",
+    "memory_delivered_count",
+    "memory_action_observed_count",
+    "memory_target_verified_count",
     "run_id",
     "batch_id",
     "scene_index",
@@ -54,12 +66,26 @@ SCENE_COLUMNS = (
     "critic_zero_fail",
     "sceneexpert_overall_score",
     "sceneexpert_pass_scene",
+    "generation_status",
+    "requirement_status",
+    "quality_status",
+    "required_coverage",
     "hard_constraint_pass",
     "hard_violation_count",
     "relation_satisfaction",
     "experiment_name",
     "config_hash",
     "experiment_signature",
+    "control_signature",
+    "evaluation_pair_id",
+    "evaluation_dimension",
+    "evaluation_arm",
+    "evaluation_require_frozen_memory",
+    "shared_base_fingerprint",
+    "compiled_input_fingerprint",
+    "task_spec_fingerprint",
+    "intent_contract_fingerprint",
+    "source_bundle_hash",
     "model",
     "code_revision",
     "code_dirty",
@@ -73,6 +99,13 @@ SCENE_COLUMNS = (
     "stage_agent_invoked_stages",
     "missing_stage_agent_invocation_stages",
     "optional_asset_recommendation_count",
+    "required_first_instruction_stages",
+    "required_first_missing_instruction_stages",
+    "optional_autonomy_preserved_stages",
+    "required_objects_by_stage",
+    "required_satisfied_objects_by_stage",
+    "required_missing_objects_by_stage",
+    "requirement_status_by_stage",
     "observed_stages",
     "memory_retrieved_stages",
     "memory_retrieved_ids",
@@ -84,17 +117,42 @@ SCENE_COLUMNS = (
     "memory_bank_ids",
     "memory_bank_revisions",
     "memory_dirs",
+    "memory_snapshot_fingerprint",
+    "memory_snapshot_revision",
+    "memory_snapshot_unchanged",
+    "memory_read_only",
     "memory_zero_result_reasons",
     "memory_zero_result_events",
+    "memory_selection_rejection_count",
+    "memory_selection_rejection_reasons",
+    "memory_adaptation_rejection_count",
+    "memory_adaptation_rejection_reasons",
+    "memory_adaptation_decision_unknown_count",
     "memory_retrieval_time_sec",
     "memory_writer_status",
     "memory_writer_candidate_count",
+    "memory_writer_generated_candidate_count",
+    "memory_writer_proposed_mutations",
+    "memory_writer_persistence_observed",
+    "memory_writer_activation_observed",
     "memory_writer_noop_reason",
+    "memory_writer_persisted",
     "memory_writer_promoted",
     "memory_writer_added",
     "memory_writer_merged",
     "memory_writer_fallback_written",
     "memory_writer_degraded",
+    "llm_skill_candidate_count",
+    "bootstrap_skill_eligible_stage_count",
+    "bootstrap_skill_candidate_count",
+    "bootstrap_skill_persisted_candidate_count",
+    "bootstrap_skill_rejected_count",
+    "skill_persisted_candidate_count",
+    "skill_promoted_active_count",
+    "skill_rejected_count",
+    "skill_rejection_reasons",
+    "skill_store_candidate_added",
+    "skill_store_candidate_merged",
     "scenesmith_repair_events",
     "scenesmith_repairs_accepted",
     "scenesmith_repairs_rejected",
@@ -211,6 +269,61 @@ def _manifest_rows(output_root: Path, warnings: list[str]) -> list[dict[str, Any
     return rows
 
 
+def _assigned_rows(
+    output_root: Path, warnings: list[str]
+) -> tuple[list[dict[str, Any]], bool]:
+    """Retain planned but unstarted scenes without trusting completed-only output."""
+    observed = _manifest_rows(output_root, warnings)
+    inventory = output_root / "assigned_cases.csv"
+    if not inventory.is_file():
+        warnings.append("assignment_inventory_missing:observed_batches_only")
+        return observed, False
+    planned: list[dict[str, Any]] = []
+    try:
+        with inventory.open("r", encoding="utf-8", newline="") as stream:
+            for raw in csv.DictReader(stream):
+                batch = str(raw.get("batch_id") or "")
+                index = int(raw["scene_index"])
+                if (
+                    not batch.startswith("batch_")
+                    or not batch[6:].isdigit()
+                    or index < 0
+                    or not raw.get("case_id")
+                ):
+                    raise ValueError("invalid assignment identity")
+                planned.append(
+                    {
+                        "batch_dir": output_root / "critic_on" / batch,
+                        "batch_id": batch,
+                        "scene_index": index,
+                        "scene_id": f"scene_{index:03d}",
+                        "case_id": str(raw["case_id"]),
+                        "prompt": str(raw.get("prompt") or ""),
+                    }
+                )
+    except (OSError, UnicodeError, csv.Error, ValueError, KeyError, TypeError) as exc:
+        warnings.append(f"assignment_inventory_unreadable:{type(exc).__name__}")
+        return observed, False
+
+    def identity(row: dict[str, Any]) -> tuple[str, int]:
+        return row["batch_id"], row["scene_index"]
+
+    by_location = {identity(row): row for row in planned}
+    valid = bool(planned) and len(by_location) == len(planned)
+    valid = valid and len({row["case_id"] for row in planned}) == len(planned)
+    valid = valid and len({identity(row) for row in observed}) == len(observed)
+    for row in observed:
+        expected = by_location.get(identity(row))
+        if expected is None:
+            planned.append(row)
+            valid = False
+        elif any(row[key] != expected[key] for key in ("case_id", "prompt")):
+            valid = False
+    if not valid:
+        warnings.append("assignment_inventory_invalid_or_batch_mismatch")
+    return planned, valid
+
+
 def _discover_rows(output_root: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for batch_dir in sorted((output_root / "critic_on").glob("batch_*")):
@@ -296,10 +409,19 @@ def _memory_metrics(
     source_run_ids: dict[str, list[str]] = {}
     bank_ids: list[str] = []
     bank_revisions: list[int] = []
+    selection_rejection_reasons: dict[str, int] = {}
     current_task_id = "task_" + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
     for stage_payload in stages:
         stage = str(stage_payload.get("stage") or "")
         pack = stage_payload.get("memory_pack") or {}
+        for decision in pack.get("selection_decisions") or []:
+            if not isinstance(decision, dict) or decision.get("decision") != "rejected":
+                continue
+            for reason in decision.get("reasons") or ["unspecified"]:
+                reason_text = str(reason or "unspecified")
+                selection_rejection_reasons[reason_text] = (
+                    selection_rejection_reasons.get(reason_text, 0) + 1
+                )
         ids = [
             *list(pack.get("success_case_ids") or []),
             *list(pack.get("failure_case_ids") or []),
@@ -395,6 +517,10 @@ def _memory_metrics(
         "memory_dirs": memory_dirs,
         "memory_zero_result_reasons": zero_reasons,
         "memory_zero_result_events": zero_events,
+        "memory_selection_rejection_count": sum(selection_rejection_reasons.values()),
+        "memory_selection_rejection_reasons": dict(
+            sorted(selection_rejection_reasons.items())
+        ),
         "memory_retrieval_time_sec": round(retrieval_time, 6),
     }
 
@@ -411,6 +537,14 @@ def _component_execution_metrics(
     missing_stage_agent_invocation: list[str] = []
     stage_policies: dict[str, str] = {}
     optional_recommendation_count = 0
+    required_first_instruction_stages: list[str] = []
+    required_first_missing_instruction_stages: list[str] = []
+    optional_autonomy_preserved_stages: list[str] = []
+    required_objects_by_stage: dict[str, list[str]] = {}
+    required_satisfied_by_stage: dict[str, list[str]] = {}
+    required_missing_by_stage: dict[str, list[str]] = {}
+    requirement_status_by_stage: dict[str, str] = {}
+    required_coverage_by_stage: dict[str, float] = {}
     for stage_payload in stages:
         stage = str(stage_payload.get("stage") or "")
         planner_status = str(
@@ -419,10 +553,43 @@ def _component_execution_metrics(
         if planner_status in planner_by_status:
             planner_by_status[planner_status].append(stage)
         evidence = stage_payload.get("execution_evidence") or {}
-        stage_policies[stage] = str(evidence.get("stage_policy") or "unknown")
+        stage_policy = str(evidence.get("stage_policy") or "unknown")
+        if stage_policy != "unknown" or stage not in stage_policies:
+            stage_policies[stage] = stage_policy
         optional_recommendation_count += len(
             evidence.get("optional_asset_recommendations") or []
         )
+        required_objects = [
+            str(item) for item in evidence.get("required_objects") or [] if str(item)
+        ]
+        required_satisfied = [
+            str(item)
+            for item in evidence.get("required_satisfied_objects") or []
+            if str(item)
+        ]
+        required_missing = [
+            str(item)
+            for item in evidence.get("required_missing_objects") or []
+            if str(item)
+        ]
+        if required_objects or stage not in required_objects_by_stage:
+            required_objects_by_stage[stage] = required_objects
+        if required_satisfied or stage not in required_satisfied_by_stage:
+            required_satisfied_by_stage[stage] = required_satisfied
+        if required_missing or stage not in required_missing_by_stage:
+            required_missing_by_stage[stage] = required_missing
+        requirement_status = str(evidence.get("requirement_status") or "unknown")
+        if requirement_status != "unknown" or stage not in requirement_status_by_stage:
+            requirement_status_by_stage[stage] = requirement_status
+        required_coverage = _as_float(evidence.get("required_coverage"))
+        if required_coverage is not None and required_objects:
+            required_coverage_by_stage[stage] = required_coverage
+        if bool(evidence.get("required_first_instruction_delivered")):
+            required_first_instruction_stages.append(stage)
+        elif bool(evidence.get("required_first_instruction_applicable")):
+            required_first_missing_instruction_stages.append(stage)
+        if bool(evidence.get("optional_autonomy_preserved")):
+            optional_autonomy_preserved_stages.append(stage)
         if bool(evidence.get("stage_agent_invoked")):
             stage_agent_invoked.append(stage)
         else:
@@ -438,10 +605,37 @@ def _component_execution_metrics(
         "brief_injection_verified_stages": _unique(brief_verified),
         "stage_policies": stage_policies,
         "stage_agent_invoked_stages": _unique(stage_agent_invoked),
-        "missing_stage_agent_invocation_stages": _unique(
-            missing_stage_agent_invocation
+        "missing_stage_agent_invocation_stages": sorted(
+            set(missing_stage_agent_invocation) - set(stage_agent_invoked)
         ),
         "optional_asset_recommendation_count": optional_recommendation_count,
+        "required_first_instruction_stages": _unique(required_first_instruction_stages),
+        "required_first_missing_instruction_stages": sorted(
+            set(required_first_missing_instruction_stages)
+            - set(required_first_instruction_stages)
+        ),
+        "optional_autonomy_preserved_stages": _unique(
+            optional_autonomy_preserved_stages
+        ),
+        "required_objects_by_stage": required_objects_by_stage,
+        "required_satisfied_objects_by_stage": required_satisfied_by_stage,
+        "required_missing_objects_by_stage": required_missing_by_stage,
+        "requirement_status_by_stage": requirement_status_by_stage,
+        "required_coverage": (
+            round(
+                sum(
+                    len(required_objects_by_stage.get(stage) or []) * value
+                    for stage, value in required_coverage_by_stage.items()
+                )
+                / sum(
+                    len(required_objects_by_stage.get(stage) or [])
+                    for stage in required_coverage_by_stage
+                ),
+                6,
+            )
+            if required_coverage_by_stage
+            else None
+        ),
     }
 
 
@@ -508,11 +702,51 @@ def _writer_metrics(
         ),
         "memory_writer_candidate_count": _as_int(status.get("candidate_count")),
         "memory_writer_noop_reason": str(status.get("noop_reason") or ""),
-        "memory_writer_promoted": _as_int(status.get("promoted_count")),
+        "memory_writer_persisted": _as_int(
+            sum(_as_int(store_apply.get(k)) for k in ("added", "updated", "merged"))
+        ),
+        "memory_writer_promoted": _as_int(store_apply.get("active_records_changed")),
+        "memory_writer_persistence_observed": bool(store_apply),
+        "memory_writer_activation_observed": "active_records_changed" in store_apply,
+        "memory_writer_generated_candidate_count": _as_int(
+            status.get("generated_candidate_count")
+        ),
+        "memory_writer_proposed_mutations": _as_int(
+            status.get("proposed_mutation_count", status.get("persisted_count"))
+        ),
         "memory_writer_added": _as_int(store_apply.get("added")),
         "memory_writer_merged": _as_int(store_apply.get("merged")),
         "memory_writer_fallback_written": bool(status.get("fallback_written", False)),
         "memory_writer_degraded": bool(status.get("degraded", False)),
+        "llm_skill_candidate_count": _as_int(status.get("llm_skill_candidate_count")),
+        "bootstrap_skill_eligible_stage_count": _as_int(
+            status.get("bootstrap_skill_eligible_stage_count")
+        ),
+        "bootstrap_skill_candidate_count": _as_int(
+            status.get("bootstrap_skill_candidate_count")
+        ),
+        "bootstrap_skill_persisted_candidate_count": _as_int(
+            status.get("bootstrap_skill_persisted_candidate_count")
+        ),
+        "bootstrap_skill_rejected_count": _as_int(
+            status.get("bootstrap_skill_rejected_count")
+        ),
+        "skill_persisted_candidate_count": _as_int(
+            status.get("skill_persisted_candidate_count")
+        ),
+        "skill_promoted_active_count": _as_int(
+            store_apply.get(
+                "skill_promoted_active", status.get("skill_promoted_active_count")
+            )
+        ),
+        "skill_rejected_count": _as_int(status.get("skill_rejected_count")),
+        "skill_rejection_reasons": dict(status.get("skill_rejection_reasons") or {}),
+        "skill_store_candidate_added": _as_int(
+            store_apply.get("skill_candidate_added")
+        ),
+        "skill_store_candidate_merged": _as_int(
+            store_apply.get("skill_candidate_merged")
+        ),
     }
 
 
@@ -655,13 +889,37 @@ def _scene_metrics(
     )
     stages = _stage_payloads(scene_dir, trace, warnings)
     final_report = trace.get("final_report") or {}
+    memory_identity = dict(trace.get("memory_identity") or {})
+    evaluation_contract = dict(trace.get("evaluation_contract") or {})
+    shared_base_identity = dict(evaluation_contract.get("shared_base_identity") or {})
+    compiled_inputs_identity = dict(
+        evaluation_contract.get("compiled_inputs_identity") or {}
+    )
+    memory_snapshot = dict(
+        (trace.get("component_status") or {}).get("memory_snapshot") or {}
+    )
     code_provenance = dict(trace.get("code_provenance") or {})
+    source_bundle_hash = str(code_provenance.get("source_bundle_hash") or "")
+    if not source_bundle_hash:
+        source_hashes = code_provenance.get("source_hashes") or {}
+        if isinstance(source_hashes, dict):
+            source_bundle_hash = stable_source_bundle_hash(source_hashes)
+    if source_bundle_hash:
+        code_provenance["source_bundle_hash"] = source_bundle_hash
     status = str(status_payload.get("status") or "missing")
     failure = status_payload.get("failure")
     failure = failure if isinstance(failure, dict) else {}
     failure_class = str(failure.get("failure_class") or "")
     if status == "failed" and not failure_class:
         failure_class = "unclassified_legacy"
+    generation_status = str(final_report.get("generation_status") or "")
+    if not generation_status:
+        if status in {"completed", "completed_with_quality_issues"}:
+            generation_status = "complete"
+        elif status == "failed":
+            generation_status = "failed"
+        else:
+            generation_status = "unknown"
     row: dict[str, Any] = {
         "run_id": run_id,
         "batch_id": manifest_row["batch_id"],
@@ -689,9 +947,32 @@ def _scene_metrics(
         "sceneexpert_pass_scene": (
             bool(final_report.get("pass_scene")) if final_report else None
         ),
+        "generation_status": generation_status,
+        "requirement_status": str(final_report.get("requirement_status") or "unknown"),
+        "quality_status": str(final_report.get("quality_status") or "unknown"),
         "experiment_name": str(trace.get("experiment_name") or ""),
         "config_hash": str(trace.get("config_hash") or ""),
         "experiment_signature": str(trace.get("experiment_signature") or ""),
+        "control_signature": str(trace.get("control_signature") or ""),
+        "evaluation_pair_id": str(evaluation_contract.get("pair_id") or ""),
+        "evaluation_dimension": str(
+            evaluation_contract.get("controlled_dimension") or ""
+        ),
+        "evaluation_arm": str(evaluation_contract.get("arm") or ""),
+        "evaluation_require_frozen_memory": evaluation_contract.get(
+            "require_frozen_memory"
+        ),
+        "shared_base_fingerprint": str(shared_base_identity.get("fingerprint") or ""),
+        "compiled_input_fingerprint": str(
+            compiled_inputs_identity.get("compiled_input_fingerprint") or ""
+        ),
+        "task_spec_fingerprint": str(
+            compiled_inputs_identity.get("task_spec_fingerprint") or ""
+        ),
+        "intent_contract_fingerprint": str(
+            compiled_inputs_identity.get("intent_contract_fingerprint") or ""
+        ),
+        "source_bundle_hash": source_bundle_hash,
         "model": str(trace.get("model") or ""),
         "code_revision": str(
             (trace.get("code_provenance") or {}).get("git_revision") or ""
@@ -700,13 +981,116 @@ def _scene_metrics(
         "code_provenance": code_provenance,
         "observed_stages": _unique(str(stage.get("stage") or "") for stage in stages),
         "component_flags": dict(trace.get("component_flags") or {}),
+        "memory_snapshot_fingerprint": str(
+            memory_identity.get("content_fingerprint") or ""
+        ),
+        "memory_snapshot_revision": _as_int(memory_identity.get("revision")),
+        "memory_snapshot_unchanged": memory_snapshot.get("unchanged"),
+        "memory_read_only": memory_identity.get("read_only"),
     }
     row.update(_component_execution_metrics(trace, stages))
     row.update(_critic_metrics(scene_dir, warnings))
     row.update(_memory_metrics(scene_dir, stages, row["prompt"], warnings))
+    if memory_identity.get("bank_id"):
+        row["memory_bank_ids"] = _unique(
+            [*row["memory_bank_ids"], str(memory_identity["bank_id"])]
+        )
+    if memory_identity.get("revision") is not None:
+        row["memory_bank_revisions"] = sorted(
+            {
+                *row["memory_bank_revisions"],
+                _as_int(memory_identity.get("revision")),
+            }
+        )
+    if memory_identity.get("memory_dir"):
+        row["memory_dirs"] = _unique(
+            [*row["memory_dirs"], str(memory_identity["memory_dir"])]
+        )
     row.update(_writer_metrics(scene_dir, trace, warnings))
     row.update(_repair_metrics(scene_dir, stages, warnings))
     row.update(_verification_metrics(stages))
+    costs = collect_attempt_costs(scene_dir, int(manifest_row["scene_index"]))
+    warnings.extend(costs["warnings"])
+    row["attempt_costs"] = costs
+    for key in (
+        "all_attempt_time_sec",
+        "all_attempt_cost_complete",
+        "observed_attempt_time_lower_bound_sec",
+        "all_attempt_trace_time_sec",
+    ):
+        row[key] = costs[key]
+    row["runtime_identity"] = trace.get("runtime_identity") or {}
+    usage_items = []
+    usage_warnings = []
+    checkpoints = {}
+    for attempt in costs["attempts"]:
+        attempt_dir = Path(attempt["scene_dir"])
+        activity_path = attempt_dir / "scene_expert/memory_activity.json"
+        activity = (
+            _read_json(activity_path, warnings) if activity_path.is_file() else {}
+        )
+        usage = collect_memory_usage(attempt_dir, activity)
+        usage_items.extend(
+            {**item, "scene_attempt": attempt["attempt"], "scene_dir": str(attempt_dir)}
+            for item in usage["items"]
+        )
+        usage_warnings.extend(usage["warnings"])
+        for stage, evidence in usage["initial_checkpoints"].items():
+            checkpoints.setdefault(stage, []).append(
+                {**evidence, "scene_attempt": attempt["attempt"]}
+            )
+    row["memory_usage"] = {
+        "schema_version": "memory-usage.v1",
+        "items": usage_items,
+        "warnings": usage_warnings,
+    }
+    row["checkpoint_stage"] = evaluation_contract.get("checkpoint_stage", "")
+    row["initial_checkpoints"] = checkpoints
+    warnings.extend(usage_warnings)
+    row["memory_prepared_stages"] = row["memory_injected_stages"]
+    # v9 no longer calls a prepared hash or source provenance delivery proof.
+    delivered = [item for item in usage_items if item["delivered"]]
+    row["memory_injected_stages"] = _unique(
+        item["stage"] for item in usage_items if item["payload_observed"]
+    )
+    row["memory_injection_verified_stages"] = _unique(
+        item["stage"] for item in delivered
+    )
+    current_task_id = (
+        "task_" + hashlib.sha256(row["prompt"].encode("utf-8")).hexdigest()[:16]
+    )
+    row["memory_cross_task_verified_stages"] = _unique(
+        item["stage"]
+        for item in delivered
+        if item["source_task_ids"]
+        and all(value != current_task_id for value in item["source_task_ids"])
+    )
+    for field, condition in (
+        ("payload_observed", "payload_observed"),
+        ("delivered", "delivered"),
+        ("action_observed", "action_observed"),
+        ("target_verified", "target_verified"),
+    ):
+        row[f"memory_{field}_count"] = sum(
+            item[condition] is True for item in usage_items
+        )
+        row[f"memory_{field}_unknown_count"] = sum(
+            item[condition] is None for item in usage_items
+        )
+    row["memory_accepted_count"] = sum(item["accepted"] for item in usage_items)
+    adaptation_reasons: dict[str, int] = {}
+    for item in usage_items:
+        for reason in item["adaptation_rejection_reasons"]:
+            adaptation_reasons[reason] = adaptation_reasons.get(reason, 0) + 1
+    row["memory_adaptation_rejection_count"] = sum(
+        bool(item["adaptation_rejection_reasons"]) for item in usage_items
+    )
+    row["memory_adaptation_rejection_reasons"] = dict(
+        sorted(adaptation_reasons.items())
+    )
+    row["memory_adaptation_decision_unknown_count"] = sum(
+        not item["adaptation_decision_observed"] for item in usage_items
+    )
     return row
 
 
@@ -720,7 +1104,7 @@ def collect_run_metrics(
     root = Path(output_root).resolve()
     resolved_run_id = run_id or root.name
     warnings: list[str] = []
-    manifest_rows = _manifest_rows(root, warnings)
+    manifest_rows, assignment_inventory_complete = _assigned_rows(root, warnings)
     if not manifest_rows:
         warnings.append("no_critic_on_manifests:falling_back_to_scene_discovery")
         manifest_rows = _discover_rows(root)
@@ -802,6 +1186,21 @@ def collect_run_metrics(
     revisions = _unique(row["code_revision"] for row in scene_rows)
     config_hashes = _unique(row["config_hash"] for row in scene_rows)
     experiment_signatures = _unique(row["experiment_signature"] for row in scene_rows)
+    control_signatures = _unique(row["control_signature"] for row in scene_rows)
+    evaluation_pair_ids = _unique(row["evaluation_pair_id"] for row in scene_rows)
+    evaluation_dimensions = _unique(row["evaluation_dimension"] for row in scene_rows)
+    evaluation_arms = _unique(row["evaluation_arm"] for row in scene_rows)
+    shared_base_fingerprints = _unique(
+        row["shared_base_fingerprint"] for row in scene_rows
+    )
+    compiled_input_fingerprints = _unique(
+        row["compiled_input_fingerprint"] for row in scene_rows
+    )
+    task_spec_fingerprints = _unique(row["task_spec_fingerprint"] for row in scene_rows)
+    intent_contract_fingerprints = _unique(
+        row["intent_contract_fingerprint"] for row in scene_rows
+    )
+    source_bundle_hashes = _unique(row["source_bundle_hash"] for row in scene_rows)
     experiment_names = _unique(row["experiment_name"] for row in scene_rows)
     models = _unique(row["model"] for row in scene_rows)
     provenance_by_signature = {
@@ -813,18 +1212,27 @@ def collect_run_metrics(
     }
     if len(revisions) > 1:
         warnings.append(f"mixed_code_revisions:{len(revisions)}")
-    if len(provenance_by_signature) > 1:
-        warnings.append(f"mixed_code_provenance:{len(provenance_by_signature)}")
-    if len(config_hashes) > 1:
-        warnings.append(f"mixed_config_hashes:{len(config_hashes)}")
+    if len(source_bundle_hashes) > 1:
+        warnings.append(f"mixed_source_bundle_hashes:{len(source_bundle_hashes)}")
+    elif len(provenance_by_signature) > 1:
+        # Git/path metadata may legitimately vary across workers. Source bytes,
+        # not worktree layout, own controlled code identity.
+        console_logger.info(
+            "Run contains %d provenance envelopes with one source bundle",
+            len(provenance_by_signature),
+        )
     if len(experiment_signatures) > 1:
         warnings.append(f"mixed_experiment_signatures:{len(experiment_signatures)}")
-    if not revisions:
-        warnings.append("missing_code_revision")
+    if len(control_signatures) > 1:
+        warnings.append(f"mixed_control_signatures:{len(control_signatures)}")
     if not config_hashes:
         warnings.append("missing_config_hash")
     if not experiment_signatures:
         warnings.append("missing_experiment_signature")
+    if not control_signatures:
+        warnings.append("missing_control_signature")
+    if not source_bundle_hashes:
+        warnings.append("missing_source_bundle_hash")
     if not experiment_names:
         warnings.append("missing_experiment_name")
 
@@ -841,8 +1249,142 @@ def collect_run_metrics(
             for revision in row["memory_bank_revisions"]
         }
     )
+    memory_snapshot_fingerprints = _unique(
+        row["memory_snapshot_fingerprint"] for row in scene_rows
+    )
+    memory_snapshot_revisions = sorted(
+        {
+            int(row["memory_snapshot_revision"])
+            for row in scene_rows
+            if row["memory_snapshot_fingerprint"]
+        }
+    )
+    evaluation_active = bool(
+        evaluation_pair_ids or evaluation_dimensions or evaluation_arms
+    )
+    memory_snapshot_all_unchanged = bool(
+        scene_rows
+        and all(row["memory_snapshot_unchanged"] is True for row in scene_rows)
+    )
+    memory_snapshot_identity_stable = bool(
+        len(memory_snapshot_fingerprints) == 1 and len(memory_snapshot_revisions) == 1
+    )
+    shared_base_all_present = bool(
+        scene_rows and all(row["shared_base_fingerprint"] for row in scene_rows)
+    )
+    compiled_inputs_all_present = bool(
+        scene_rows and all(row["compiled_input_fingerprint"] for row in scene_rows)
+    )
+    memory_read_only_all = bool(
+        scene_rows and all(row["memory_read_only"] is True for row in scene_rows)
+    )
+    frozen_required_all = bool(
+        scene_rows
+        and all(row["evaluation_require_frozen_memory"] is True for row in scene_rows)
+    )
+    if evaluation_active:
+        if not memory_snapshot_fingerprints:
+            warnings.append("evaluation_missing_memory_snapshot_fingerprint")
+        if not memory_snapshot_all_unchanged:
+            warnings.append("evaluation_memory_snapshot_changed_or_unverified")
+        if not memory_snapshot_identity_stable:
+            warnings.append("evaluation_memory_snapshot_mixed_across_scenes")
+        if len(evaluation_pair_ids) != 1:
+            warnings.append("evaluation_pair_id_missing_or_mixed")
+        if len(evaluation_dimensions) != 1:
+            warnings.append("evaluation_dimension_missing_or_mixed")
+        if len(evaluation_arms) != 1:
+            warnings.append("evaluation_arm_missing_or_mixed")
+        if not shared_base_all_present:
+            warnings.append("evaluation_shared_base_fingerprint_missing")
+        if not compiled_inputs_all_present:
+            warnings.append("evaluation_compiled_input_fingerprint_missing")
+        if not memory_read_only_all:
+            warnings.append("evaluation_memory_bank_not_read_only")
+        if not frozen_required_all:
+            warnings.append("evaluation_frozen_contract_not_required")
+    requirement_observed = [
+        row
+        for row in scene_rows
+        if row["requirement_status"] not in {"", "unknown", "not_applicable"}
+    ]
+    quality_observed = [
+        row for row in scene_rows if row["quality_status"] not in {"", "unknown"}
+    ]
+    required_first_applicable_count = sum(
+        len(row["required_first_instruction_stages"])
+        + len(row["required_first_missing_instruction_stages"])
+        for row in scene_rows
+    )
+    required_first_delivered_count = sum(
+        len(row["required_first_instruction_stages"]) for row in scene_rows
+    )
+    auto_stage_count = sum(
+        sum(policy == "auto" for policy in row["stage_policies"].values())
+        for row in scene_rows
+    )
+    optional_autonomy_preserved_count = sum(
+        len(row["optional_autonomy_preserved_stages"]) for row in scene_rows
+    )
+    skill_rejection_reasons: dict[str, int] = {}
+    memory_selection_rejection_reasons: dict[str, int] = {}
+    memory_adaptation_rejection_reasons: dict[str, int] = {}
+    for row in scene_rows:
+        for reason, count in row["memory_adaptation_rejection_reasons"].items():
+            memory_adaptation_rejection_reasons[reason] = (
+                memory_adaptation_rejection_reasons.get(reason, 0) + count
+            )
+        for reason, count in row["skill_rejection_reasons"].items():
+            reason_text = str(reason)
+            skill_rejection_reasons[reason_text] = int(
+                skill_rejection_reasons.get(reason_text, 0)
+            ) + _as_int(count)
+        for reason, count in row["memory_selection_rejection_reasons"].items():
+            reason_text = str(reason)
+            memory_selection_rejection_reasons[reason_text] = int(
+                memory_selection_rejection_reasons.get(reason_text, 0)
+            ) + _as_int(count)
 
     summary = {
+        "memory_adaptation_rejection_count": sum(
+            row["memory_adaptation_rejection_count"] for row in scene_rows
+        ),
+        "memory_adaptation_rejection_reasons": dict(
+            sorted(memory_adaptation_rejection_reasons.items())
+        ),
+        "memory_adaptation_decision_unknown_count": sum(
+            row["memory_adaptation_decision_unknown_count"] for row in scene_rows
+        ),
+        "all_attempt_cost_coverage": _rate(
+            sum(row["all_attempt_cost_complete"] for row in scene_rows), expected
+        ),
+        "all_assigned_attempt_time_sec": (
+            sum(row["all_attempt_time_sec"] for row in scene_rows)
+            if scene_rows
+            and all(row["all_attempt_cost_complete"] for row in scene_rows)
+            else None
+        ),
+        "memory_delivered_count": sum(
+            row["memory_delivered_count"] for row in scene_rows
+        ),
+        "memory_accepted_count": sum(
+            row["memory_accepted_count"] for row in scene_rows
+        ),
+        "memory_delivery_unknown_count": sum(
+            row["memory_delivered_unknown_count"] for row in scene_rows
+        ),
+        "memory_action_unknown_count": sum(
+            row["memory_action_observed_unknown_count"] for row in scene_rows
+        ),
+        "memory_target_unknown_count": sum(
+            row["memory_target_verified_unknown_count"] for row in scene_rows
+        ),
+        "memory_action_observed_count": sum(
+            row["memory_action_observed_count"] for row in scene_rows
+        ),
+        "memory_target_verified_count": sum(
+            row["memory_target_verified_count"] for row in scene_rows
+        ),
         "expected_scenes": expected,
         "completed_scenes": len(completed),
         "degraded_scenes": len(degraded),
@@ -853,6 +1395,27 @@ def collect_run_metrics(
         ),
         "missing_or_nonterminal_scenes": len(missing),
         "completion_rate": _rate(len(completed), expected),
+        "generation_complete_rate": _rate(
+            sum(row["generation_status"] == "complete" for row in scene_rows),
+            expected,
+        ),
+        "required_satisfaction_rate": _rate(
+            sum(row["requirement_status"] == "satisfied" for row in scene_rows),
+            len(requirement_observed),
+        ),
+        "mean_required_coverage": _mean(row["required_coverage"] for row in scene_rows),
+        "quality_pass_rate": _rate(
+            sum(row["quality_status"] == "passed" for row in scene_rows),
+            len(quality_observed),
+        ),
+        "required_first_instruction_delivery_rate": _rate(
+            required_first_delivered_count,
+            required_first_applicable_count,
+        ),
+        "optional_autonomy_preservation_rate": _rate(
+            optional_autonomy_preserved_count,
+            auto_stage_count,
+        ),
         "trace_coverage": _rate(len(trace_observed), expected),
         "mean_scene_time_sec": _mean(row["trace_time_sec"] for row in scene_rows),
         "median_scene_time_sec": _median(row["trace_time_sec"] for row in scene_rows),
@@ -892,11 +1455,29 @@ def collect_run_metrics(
                 for reason in row["memory_zero_result_reasons"]
             }
         ),
+        "memory_selection_rejection_count": sum(
+            row["memory_selection_rejection_count"] for row in scene_rows
+        ),
+        "memory_selection_rejection_reasons": dict(
+            sorted(memory_selection_rejection_reasons.items())
+        ),
         "memory_writer_observed_scenes": len(writer_observed),
         "memory_writer_failure_scenes": len(writer_failures),
         "memory_writer_noop_scenes": len(writer_noops),
         "memory_writer_candidate_records": sum(
             row["memory_writer_candidate_count"] for row in scene_rows
+        ),
+        "memory_writer_generated_candidate_records": sum(
+            row["memory_writer_generated_candidate_count"] for row in scene_rows
+        ),
+        "memory_writer_proposed_mutations": sum(
+            row["memory_writer_proposed_mutations"] for row in scene_rows
+        ),
+        "memory_writer_persistence_observed_scenes": sum(
+            row["memory_writer_persistence_observed"] for row in scene_rows
+        ),
+        "memory_writer_persisted_records": sum(
+            row["memory_writer_persisted"] for row in scene_rows
         ),
         "memory_writer_promoted_records": sum(
             row["memory_writer_promoted"] for row in scene_rows
@@ -908,6 +1489,35 @@ def collect_run_metrics(
             row["memory_writer_merged"] for row in scene_rows
         ),
         "memory_writer_fallback_writes": len(fallback_writes),
+        "llm_skill_candidate_count": sum(
+            row["llm_skill_candidate_count"] for row in scene_rows
+        ),
+        "bootstrap_skill_eligible_stage_count": sum(
+            row["bootstrap_skill_eligible_stage_count"] for row in scene_rows
+        ),
+        "bootstrap_skill_candidate_count": sum(
+            row["bootstrap_skill_candidate_count"] for row in scene_rows
+        ),
+        "bootstrap_skill_persisted_candidate_count": sum(
+            row["bootstrap_skill_persisted_candidate_count"] for row in scene_rows
+        ),
+        "bootstrap_skill_rejected_count": sum(
+            row["bootstrap_skill_rejected_count"] for row in scene_rows
+        ),
+        "skill_persisted_candidate_count": sum(
+            row["skill_persisted_candidate_count"] for row in scene_rows
+        ),
+        "skill_promoted_active_count": sum(
+            row["skill_promoted_active_count"] for row in scene_rows
+        ),
+        "skill_rejected_count": sum(row["skill_rejected_count"] for row in scene_rows),
+        "skill_rejection_reasons": dict(sorted(skill_rejection_reasons.items())),
+        "skill_store_candidate_added": sum(
+            row["skill_store_candidate_added"] for row in scene_rows
+        ),
+        "skill_store_candidate_merged": sum(
+            row["skill_store_candidate_merged"] for row in scene_rows
+        ),
         "scenesmith_repair_events": sum(
             row["scenesmith_repair_events"] for row in scene_rows
         ),
@@ -982,18 +1592,26 @@ def collect_run_metrics(
         and cross_task_verified
         and injected
     )
+    provenance_variants = list(provenance_by_signature.values())
+    run_code_provenance = dict(provenance_variants[0]) if provenance_variants else {}
+    if len(provenance_variants) > 1:
+        run_code_provenance["variants"] = provenance_variants
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "run_id": resolved_run_id,
         "output_root": str(root),
         "process_exit_code": process_exit_code,
+        "assignment_inventory_complete": assignment_inventory_complete,
         "quality_comparison_ready": quality_comparison_ready,
         "memory_closed_loop_observed": memory_closed_loop_observed,
         "experiment_identity": {
             "experiment_names": experiment_names,
             "config_hashes": config_hashes,
+            "exact_config_hashes": config_hashes,
             "experiment_signatures": experiment_signatures,
+            "control_signatures": control_signatures,
+            "source_bundle_hashes": source_bundle_hashes,
             "models": models,
             "code_revisions": revisions,
             "code_dirty_values": sorted(
@@ -1004,11 +1622,7 @@ def collect_run_metrics(
                 }
             ),
         },
-        "code_provenance": (
-            next(iter(provenance_by_signature.values()), {})
-            if len(provenance_by_signature) <= 1
-            else {"variants": list(provenance_by_signature.values())}
-        ),
+        "code_provenance": run_code_provenance,
         "memory_identity": {
             "scope": "persistent_configured_bank",
             "memory_dirs": memory_dirs,
@@ -1018,6 +1632,36 @@ def collect_run_metrics(
             ),
             "memory_bank_revision_max": (
                 max(memory_bank_revisions) if memory_bank_revisions else None
+            ),
+            "snapshot_fingerprints": memory_snapshot_fingerprints,
+            "snapshot_revisions": memory_snapshot_revisions,
+            "frozen_all_unchanged": memory_snapshot_all_unchanged,
+            "snapshot_identity_stable": memory_snapshot_identity_stable,
+        },
+        "evaluation_contract": {
+            "active": evaluation_active,
+            "pair_ids": evaluation_pair_ids,
+            "controlled_dimensions": evaluation_dimensions,
+            "arms": evaluation_arms,
+            "shared_base_fingerprints": shared_base_fingerprints,
+            "shared_base_all_present": shared_base_all_present,
+            "compiled_input_fingerprints": compiled_input_fingerprints,
+            "task_spec_fingerprints": task_spec_fingerprints,
+            "intent_contract_fingerprints": intent_contract_fingerprints,
+            "compiled_inputs_all_present": compiled_inputs_all_present,
+            "memory_read_only_all": memory_read_only_all,
+            "frozen_required_all": frozen_required_all,
+            "contract_ready": bool(
+                evaluation_active
+                and len(evaluation_pair_ids) == 1
+                and len(evaluation_dimensions) == 1
+                and len(evaluation_arms) == 1
+                and shared_base_all_present
+                and compiled_inputs_all_present
+                and memory_snapshot_all_unchanged
+                and memory_snapshot_identity_stable
+                and memory_read_only_all
+                and frozen_required_all
             ),
         },
         "summary": summary,
@@ -1060,6 +1704,18 @@ def _markdown(metrics: dict[str, Any]) -> str:
         "|---|---:|",
     ]
     for key in (
+        "all_attempt_cost_coverage",
+        "all_assigned_attempt_time_sec",
+        "memory_delivered_count",
+        "memory_accepted_count",
+        "memory_adaptation_rejection_count",
+        "memory_adaptation_rejection_reasons",
+        "memory_adaptation_decision_unknown_count",
+        "memory_delivery_unknown_count",
+        "memory_action_unknown_count",
+        "memory_target_unknown_count",
+        "memory_action_observed_count",
+        "memory_target_verified_count",
         "expected_scenes",
         "completed_scenes",
         "degraded_scenes",
@@ -1067,6 +1723,10 @@ def _markdown(metrics: dict[str, Any]) -> str:
         "recorded_failed_scenes",
         "missing_or_nonterminal_scenes",
         "completion_rate",
+        "generation_complete_rate",
+        "required_satisfaction_rate",
+        "mean_required_coverage",
+        "quality_pass_rate",
         "mean_scene_time_sec",
         "critic_coverage",
         "critic_mean_score",
@@ -1076,6 +1736,20 @@ def _markdown(metrics: dict[str, Any]) -> str:
         "memory_injection_delivery_rate",
         "memory_cross_task_verified_scene_coverage",
         "memory_writer_promoted_records",
+        "memory_writer_persisted_records",
+        "memory_writer_generated_candidate_records",
+        "memory_writer_proposed_mutations",
+        "memory_writer_persistence_observed_scenes",
+        "llm_skill_candidate_count",
+        "bootstrap_skill_eligible_stage_count",
+        "bootstrap_skill_candidate_count",
+        "bootstrap_skill_persisted_candidate_count",
+        "bootstrap_skill_rejected_count",
+        "skill_persisted_candidate_count",
+        "skill_promoted_active_count",
+        "skill_rejected_count",
+        "skill_store_candidate_added",
+        "skill_store_candidate_merged",
         "memory_writer_noop_scenes",
         "memory_writer_failure_scenes",
         "memory_writer_fallback_writes",
@@ -1097,6 +1771,8 @@ def _markdown(metrics: dict[str, Any]) -> str:
         "missing_native_stage_agent_invocation_count",
         "native_stage_agent_invocation_rate",
         "optional_asset_recommendation_count",
+        "required_first_instruction_delivery_rate",
+        "optional_autonomy_preservation_rate",
     ):
         lines.append(f"| `{key}` | {summary.get(key)} |")
     lines.extend(
@@ -1105,6 +1781,22 @@ def _markdown(metrics: dict[str, Any]) -> str:
             "## Scene failures",
             "",
             f"- Failure class counts: `{summary.get('failure_class_counts', {})}`",
+        ]
+    )
+    experiment_identity = metrics.get("experiment_identity") or {}
+    lines.extend(
+        [
+            "",
+            "## Experiment identity",
+            "",
+            "- Exact configuration hashes: "
+            f"`{experiment_identity.get('exact_config_hashes', [])}`",
+            "- Semantic experiment signatures: "
+            f"`{experiment_identity.get('experiment_signatures', [])}`",
+            "- Source-bundle hashes: "
+            f"`{experiment_identity.get('source_bundle_hashes', [])}`",
+            "- Git revisions (diagnostic only): "
+            f"`{experiment_identity.get('code_revisions', [])}`",
         ]
     )
     identity = metrics.get("memory_identity") or {}
@@ -1144,6 +1836,29 @@ def write_run_metrics(metrics: dict[str, Any]) -> dict[str, str]:
         json.dumps(metrics, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
     )
     _atomic_write_text(run_md, _markdown(metrics))
+    for filename, field in (
+        ("memory_usage.json", "memory_usage"),
+        ("attempt_costs.json", "attempt_costs"),
+    ):
+        _atomic_write_text(
+            metrics_dir / filename,
+            json.dumps(
+                {
+                    "run_id": metrics.get("run_id"),
+                    "cases": [
+                        {
+                            "case_id": row.get("case_id"),
+                            "batch_id": row.get("batch_id"),
+                            **(row.get(field) or {}),
+                        }
+                        for row in metrics.get("scenes", [])
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
     _atomic_write_text(
         scene_jsonl,
         "".join(
@@ -1163,6 +1878,8 @@ def write_run_metrics(metrics: dict[str, Any]) -> dict[str, str]:
         "run_markdown": str(run_md),
         "scene_jsonl": str(scene_jsonl),
         "scene_csv": str(scene_csv),
+        "memory_usage": str(metrics_dir / "memory_usage.json"),
+        "attempt_costs": str(metrics_dir / "attempt_costs.json"),
     }
 
 

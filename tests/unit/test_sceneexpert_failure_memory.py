@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -40,6 +41,7 @@ def _runner(tmp_path) -> SceneExpertHookRunner:
         "fallback_written": False,
     }
     runner._memory_store = Mock()
+    runner._memory_store.revision = 2
     runner._memory_store.apply_updates.return_value = {
         "added": 0,
         "merged": 0,
@@ -61,7 +63,10 @@ def _runner(tmp_path) -> SceneExpertHookRunner:
     runner._current_planner_trace = {"status": "ok"}
     runner._current_stage_brief = None
     runner._current_execution_evidence = StageExecutionEvidence()
+    runner._latest_scene = SimpleNamespace(metadata={})
     runner._completed_stages = ["floor_plan"]
+    runner._configured_stop_stage = "manipuland"
+    runner._allow_long_term_memory_updates = True
     runner._stage_reports = []
     runner._qwen_calls = 1
     runner._stage_start_time = time.time()
@@ -92,9 +97,51 @@ def test_main_hard_gate_runs_failure_writer_without_changing_failure(tmp_path) -
 def test_arbitrary_runtime_failure_remains_trace_only(tmp_path) -> None:
     runner = _runner(tmp_path)
     runner.save_partial_trace = Mock()
+    runner._current_execution_evidence.stage_agent_invoked = True
+    runner._latest_scene.metadata["scenesmith_planner_failure"] = {
+        "schema_version": "scenesmith.planner_failure.v1",
+        "finish_reason": "no_scene_mutation_after_recovery",
+        "successful_designer_mutations": 0,
+        "checkpoint_state": {
+            "has_current_checkpoint": False,
+            "has_previous_checkpoint": False,
+        },
+    }
 
-    runner.finalize_failure("CUDA connection reset")
+    runner.finalize_failure("CUDA connection reset", error_type="ConnectionError")
 
     runner.save_partial_trace.assert_called_once_with(error="CUDA connection reset")
     runner._memory_writer.write.assert_not_called()
     runner._memory_store.append_event.assert_not_called()
+    assert runner._current_execution_evidence.degraded is True
+    failure = runner._current_execution_evidence.runtime_failure
+    assert failure["error_type"] == "ConnectionError"
+    assert failure["stage_agent_invoked"] is True
+    assert (
+        failure["planner_diagnostics"]["finish_reason"]
+        == "no_scene_mutation_after_recovery"
+    )
+    assert failure["planner_diagnostics"]["checkpoint_state"] == {
+        "has_current_checkpoint": False,
+        "has_previous_checkpoint": False,
+    }
+    runner._trace_logger.log_stage.assert_called_once()
+    runner._trace_logger.save_stage_context.assert_called_once()
+
+
+def test_shared_base_hard_failure_does_not_write_long_term_memory(tmp_path) -> None:
+    runner = _runner(tmp_path)
+    runner._configured_stop_stage = "floor_plan"
+    runner._allow_long_term_memory_updates = False
+    runner._flush_skill_outcomes = Mock()
+
+    runner.finalize_failure(
+        "Floor plan stage failed with unresolved core relations: room_boundary"
+    )
+
+    runner._memory_writer.write.assert_not_called()
+    runner._flush_skill_outcomes.assert_not_called()
+    status = runner._trace_logger.record_component_status.call_args_list[-1]
+    assert status.args[0] == "memory_writer"
+    assert status.args[1]["write_status"] == "skipped_non_terminal_pipeline"
+    assert status.args[1]["configured_stop_stage"] == "floor_plan"

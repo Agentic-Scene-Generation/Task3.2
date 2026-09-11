@@ -1,4 +1,5 @@
 import json
+import os
 import unittest
 
 from pathlib import Path
@@ -59,6 +60,63 @@ def _score(name: str, grade: int) -> CategoryScore:
 
 
 class StageWorkingMemoryTest(unittest.TestCase):
+    def test_frozen_public_bank_stays_unchanged(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            public_dir = root / "frozen_memory" / "ablation_4c"
+            public_dir.mkdir(parents=True)
+            events_path = public_dir / "events.jsonl"
+            events_path.write_text('{"event_type":"seed"}\n', encoding="utf-8")
+            before = events_path.read_bytes()
+            old_env = os.environ.get("SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR")
+            old_read_only_env = os.environ.get(
+                "SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY"
+            )
+            os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] = str(public_dir)
+            os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY"] = "true"
+            try:
+                memory = StageWorkingMemory(
+                    root_dir=root / "scene_000" / "room_bedroom",
+                    stage="furniture",
+                    enabled=True,
+                )
+                render_dir = root / "renders_001"
+                render_dir.mkdir()
+                memory.save_render_record(
+                    render_dir=render_dir,
+                    role="designer",
+                    event="request_initial_design",
+                    scene=_DummyScene(),
+                )
+                memory.record_llm_call(
+                    agent_role="designer",
+                    event="request_initial_design",
+                    prompt="design a bedroom",
+                    output="done",
+                )
+                memory.record_planner_orchestration(
+                    call_id="call_1",
+                    phase="dispatch",
+                    operation="request_initial_design",
+                    child_agent="designer",
+                    status="completed",
+                )
+            finally:
+                if old_env is None:
+                    os.environ.pop("SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR", None)
+                else:
+                    os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] = old_env
+                if old_read_only_env is None:
+                    os.environ.pop("SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY", None)
+                else:
+                    os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY"] = (
+                        old_read_only_env
+                    )
+
+            self.assertEqual(before, events_path.read_bytes())
+            self.assertTrue(memory.debug_memory_path.exists())
+            self.assertTrue(memory.debug_llm_path.exists())
+
     def test_repair_event_is_saved_with_pose_changes(self) -> None:
         with TemporaryDirectory() as tmp:
             memory = StageWorkingMemory(Path(tmp) / "room_bedroom", "furniture")

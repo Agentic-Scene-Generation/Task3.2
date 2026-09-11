@@ -34,22 +34,39 @@ from scenesmith.scene_expert.config_utils import (
     resolve_stage_policies,
 )
 from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
+from scenesmith.scene_expert.evaluation_inputs import FrozenCompiledInputStore
 from scenesmith.scene_expert.experiment_identity import (
+    MEMORY_RETRIEVAL_EVALUATION_DIMENSION,
+    shared_base_scene_identity as _shared_base_scene_identity,
     stable_config_hash as _stable_config_hash,
+    stable_control_signature as _stable_control_signature,
     stable_experiment_signature as _stable_experiment_signature,
 )
 from scenesmith.scene_expert.failure_evidence import main_hard_failure_report
 from scenesmith.scene_expert.global_planner import GlobalPlanner
-from scenesmith.scene_expert.harness import Harness, RepairDecision
+from scenesmith.scene_expert.harness import (
+    STAGE_ORDER as HARNESS_STAGE_ORDER,
+    Harness,
+    RepairDecision,
+)
 from scenesmith.scene_expert.memory.activity import MemoryActivityLogger
 from scenesmith.scene_expert.memory.injection import build_memory_injection_bundle
 from scenesmith.scene_expert.memory.retriever import MemoryRetriever
 from scenesmith.scene_expert.memory.schemas import MemoryUtilityObservation
+from scenesmith.scene_expert.memory.selection_policy import (
+    BudgetedMemoryRetriever,
+    MemoryInjectionPolicy,
+)
+from scenesmith.scene_expert.memory.state import (
+    build_memory_scene_state,
+    format_memory_scene_state,
+)
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.writer import MemoryWriter
 from scenesmith.scene_expert.relation_context import StageRelationProjector
 from scenesmith.scene_expert.repair_controller import RepairController
 from scenesmith.scene_expert.schemas import (
+    REQUIRED_FIRST_DIRECTIVE,
     FullVerifyReport,
     MemoryInjectionBundle,
     MemoryPack,
@@ -90,6 +107,12 @@ console_logger = logging.getLogger(__name__)
 
 # Valid ablation modes
 ABLATION_MODES = frozenset(["disabled", "harness_only", "harness_memory", "full"])
+
+# SceneSmith's generation lifecycle ends at ``manipuland``.  The critic relation
+# registry additionally owns an evaluator-only ``final`` stage, so it must never
+# be used to decide whether an online run is eligible to promote long-term memory.
+GENERATION_STAGE_ORDER = tuple(HARNESS_STAGE_ORDER)
+GENERATION_TERMINAL_STAGE = GENERATION_STAGE_ORDER[-1]
 
 
 @dataclass(frozen=True)
@@ -819,8 +842,12 @@ class SceneExpertHookRunner:
         experiment_name: str = "",
         config_hash: str = "",
         experiment_signature: str = "",
+        control_signature: str = "",
+        memory_identity: dict[str, Any] | None = None,
+        evaluation_contract: dict[str, Any] | None = None,
         start_stage: str = "floor_plan",
-        allow_long_term_memory_updates: bool = True,
+        configured_stop_stage: str = GENERATION_TERMINAL_STAGE,
+        allow_long_term_memory_updates: bool | None = None,
         intent_contract: dict[str, Any] | None = None,
         intent_trace: dict[str, Any] | None = None,
         task_compiler_trace: dict[str, Any] | None = None,
@@ -854,12 +881,22 @@ class SceneExpertHookRunner:
         self._experiment_name = experiment_name
         self._config_hash = config_hash
         self._experiment_signature = experiment_signature
+        self._control_signature = control_signature
+        self._initial_memory_identity = dict(memory_identity or {})
+        self._evaluation_contract = dict(evaluation_contract or {})
         self._start_stage = start_stage
+        self._configured_stop_stage = str(
+            configured_stop_stage or GENERATION_TERMINAL_STAGE
+        )
         # A normal, intentionally truncated pipeline (for example the
         # floor-plan-only shared base used by critic probes) is not a complete
         # scene outcome.  It may read memory and emit local audit artifacts,
         # but it must not promote long-term memories or update skill utility.
-        self._allow_long_term_memory_updates = allow_long_term_memory_updates
+        self._allow_long_term_memory_updates = (
+            self._configured_stop_stage == GENERATION_TERMINAL_STAGE
+            if allow_long_term_memory_updates is None
+            else bool(allow_long_term_memory_updates)
+        )
         self._intent_contract = dict(intent_contract or {})
         self._intent_trace = dict(intent_trace or {})
         self._critic_config = critic_config
@@ -978,6 +1015,26 @@ class SceneExpertHookRunner:
                 "stage_agent_invoked": (
                     self._current_execution_evidence.stage_agent_invoked
                 ),
+                "required_first_instruction_applicable": (
+                    self._current_execution_evidence.required_first_instruction_applicable
+                ),
+                "required_first_instruction_delivered": (
+                    self._current_execution_evidence.required_first_instruction_delivered
+                ),
+                "optional_autonomy_preserved": (
+                    self._current_execution_evidence.optional_autonomy_preserved
+                ),
+                "required_satisfied_objects": (
+                    self._current_execution_evidence.required_satisfied_objects
+                ),
+                "required_missing_objects": (
+                    self._current_execution_evidence.required_missing_objects
+                ),
+                "required_coverage": self._current_execution_evidence.required_coverage,
+                "requirement_status": (
+                    self._current_execution_evidence.requirement_status
+                ),
+                "stage_outcome": self._current_execution_evidence.stage_outcome,
                 "stage_skip_allowed": False,
             }
             path = audit_dir / f"{self._current_stage}.json"
@@ -1009,6 +1066,8 @@ class SceneExpertHookRunner:
             self._harness.validate_stage_order(self._completed_stages, stage)
         self._completed_stages.append(stage)
         self._pending_stage_repairs.pop(stage, None)
+        self._current_execution_evidence.continuation_policy = "degraded_quality"
+        self._write_stage_policy_audit()
         console_logger.warning(
             "[SceneExpert] Accepted stage %s with degraded quality", stage
         )
@@ -1027,6 +1086,12 @@ class SceneExpertHookRunner:
         memory_text = self._current_injection_bundle.memory_text
         placement_reference = self._current_injection_bundle.placement_text
         final_text = self._current_injection_bundle.final_text
+        required_objects = self._stage_required_objects(self._current_stage)
+        optional_assets_allowed = (
+            self._current_stage_brief.optional_assets_allowed
+            if self._current_stage_brief is not None
+            else self._current_stage_policy == "auto"
+        )
         return StageExecutionEvidence(
             task_spec_source=(
                 "fallback"
@@ -1039,12 +1104,8 @@ class SceneExpertHookRunner:
                 else "disabled_or_unavailable"
             ),
             stage_policy=self._current_stage_policy,
-            optional_assets_allowed=(
-                self._current_stage_brief.optional_assets_allowed
-                if self._current_stage_brief is not None
-                else self._current_stage_policy == "auto"
-            ),
-            required_objects=self._stage_required_objects(self._current_stage),
+            optional_assets_allowed=optional_assets_allowed,
+            required_objects=required_objects,
             optional_asset_recommendations=(
                 [
                     item.model_dump(mode="json")
@@ -1052,6 +1113,14 @@ class SceneExpertHookRunner:
                 ]
                 if self._current_stage_brief is not None
                 else []
+            ),
+            required_first_instruction_applicable=bool(required_objects),
+            required_first_instruction_delivered=bool(
+                self._current_stage_brief is not None
+                and REQUIRED_FIRST_DIRECTIVE in str(prompt)
+            ),
+            optional_autonomy_preserved=bool(
+                self._current_stage_policy == "auto" and optional_assets_allowed
             ),
             retrieved_memory_ids=self._current_injection_bundle.selected_memory_ids,
             retrieved_skill_names=(
@@ -1114,6 +1183,31 @@ class SceneExpertHookRunner:
                 error,
             )
 
+    def _record_required_first_outcome(
+        self,
+        verify_report: StageVerifyReport | None,
+        *,
+        verification_error: bool,
+    ) -> None:
+        """Attach final requirement coverage without changing stage disposition."""
+        evidence = self._current_execution_evidence
+        if verify_report is None:
+            evidence.stage_outcome = (
+                "verification_error" if verification_error else "quality_issue"
+            )
+            self._write_stage_policy_audit()
+            return
+        evidence.required_satisfied_objects = list(
+            verify_report.required_satisfied_objects
+        )
+        evidence.required_missing_objects = list(verify_report.required_missing_objects)
+        evidence.required_coverage = verify_report.required_coverage
+        evidence.requirement_status = verify_report.requirement_status
+        evidence.stage_outcome = (
+            "passed" if verify_report.pass_stage else "quality_issue"
+        )
+        self._write_stage_policy_audit()
+
     def _record_memory_post_stage_activity(
         self,
         *,
@@ -1121,6 +1215,7 @@ class SceneExpertHookRunner:
         verify_report: StageVerifyReport | None,
         repair_actions: list[RepairResult],
         scene_state_path: str,
+        scene: RoomScene | None = None,
     ) -> None:
         """Persist the critic outcome linked to the exact retrieved records."""
         try:
@@ -1129,6 +1224,10 @@ class SceneExpertHookRunner:
                 verify_report=verify_report,
                 repair_actions=repair_actions,
                 scene_state_path=scene_state_path,
+                current_scene_state=(
+                    build_memory_scene_state(scene) if scene is not None else None
+                ),
+                capture_placement=self._component_enabled("memory_writer"),
             )
             if isinstance(observations, list):
                 pending = list(getattr(self, "_pending_skill_observations", []))
@@ -1146,6 +1245,18 @@ class SceneExpertHookRunner:
         observations = list(getattr(self, "_pending_skill_observations", []))
         if self._memory_store is None or not observations:
             return None
+        if self._memory_store.read_only or not self._component_enabled("memory_writer"):
+            self._pending_skill_observations = []
+            return {
+                "success": True,
+                "skipped": True,
+                "reason": (
+                    "frozen_memory_bank"
+                    if self._memory_store.read_only
+                    else "memory_writer_disabled"
+                ),
+                "observation_count": len(observations),
+            }
         try:
             summary = self._memory_store.record_skill_outcomes(observations)
             self._memory_activity.record_skill_learning(summary=summary)
@@ -1324,6 +1435,7 @@ class SceneExpertHookRunner:
         """
         if (
             self._memory_store is None
+            or self._memory_store.read_only
             or verify_report is None
             or not self._component_enabled("stage_working_memory")
             or not self._component_enabled("verifier")
@@ -1379,6 +1491,51 @@ class SceneExpertHookRunner:
                 stage,
                 e,
             )
+
+    def _audit_memory_snapshot(self) -> dict[str, Any] | None:
+        """Record whether the evaluation bank changed during this scene."""
+        if (
+            self._memory_store is None
+            or not self._initial_memory_identity
+            or not self._evaluation_contract.get("require_frozen_memory")
+        ):
+            return None
+        try:
+            final_identity = self._memory_store.snapshot_identity(refresh=True)
+            unchanged = all(
+                final_identity.get(key) == self._initial_memory_identity.get(key)
+                for key in ("bank_id", "revision", "content_fingerprint")
+            )
+            result = {
+                "success": unchanged,
+                "unchanged": unchanged,
+                "initial": dict(self._initial_memory_identity),
+                "final": final_identity,
+            }
+            if self._trace_enabled():
+                self._trace_logger.record_component_status(
+                    "memory_snapshot",
+                    result,
+                )
+            if self._evaluation_contract.get("require_frozen_memory") and not unchanged:
+                console_logger.error(
+                    "[SceneExpert] Frozen Memory bank changed during evaluation: %s",
+                    self._memory_store.memory_dir,
+                )
+            return result
+        except Exception as error:
+            result = {
+                "success": False,
+                "unchanged": False,
+                "error": f"{type(error).__name__}: {error}",
+                "initial": dict(self._initial_memory_identity),
+            }
+            if self._trace_enabled():
+                self._trace_logger.record_component_status(
+                    "memory_snapshot",
+                    result,
+                )
+            return result
 
     def _stage_required_objects(self, stage: str) -> list[str]:
         if stage == "floor_plan":
@@ -1512,6 +1669,8 @@ class SceneExpertHookRunner:
             stage=stage,
             stage_brief=self._current_stage_brief,
             memory_pack=self._current_memory_pack,
+            task_spec=self._task_spec,
+            relation_context=self._current_relation_context,
         )
         self._current_stage_brief = self._current_injection_bundle.enriched_stage_brief
         enhanced = self._prompt
@@ -1688,6 +1847,10 @@ class SceneExpertHookRunner:
         if self._component_enabled("harness"):
             self._validate_stage_transition(stage)
         self._current_stage = stage
+        # Keep the live scene available if the native stage raises before
+        # ``post_stage``.  This is read-only failure evidence; it does not alter
+        # SceneSmith's exception or recovery policy.
+        self._latest_scene = scene
         self._current_stage_policy = self.stage_policy(stage)
         self._stage_start_time = time.time()
         self._qwen_calls = 0
@@ -1706,6 +1869,7 @@ class SceneExpertHookRunner:
             intent_contract=self._intent_contract,
             scene=scene,
         )
+        current_memory_state = build_memory_scene_state(scene)
 
         # --- Step 1: Memory retrieval (skip in harness_only mode) ---
         if self._retriever is not None and self._component_enabled(
@@ -1717,6 +1881,7 @@ class SceneExpertHookRunner:
                     self._task_spec,
                     stage,
                     relation_context=self._current_relation_context,
+                    scene_state=current_memory_state,
                 )
                 retrieval_elapsed = time.time() - retrieval_start
                 n_hints = len(self._current_memory_pack.success_hints) + len(
@@ -1754,7 +1919,7 @@ class SceneExpertHookRunner:
         if self._component_enabled("global_planner"):
             try:
                 planner_start = time.time()
-                scene_state_summary = self._build_scene_state_summary()
+                scene_state_summary = self._build_scene_state_summary(scene)
                 context = self._harness.build_context(
                     stage=stage,
                     task_spec=self._task_spec,
@@ -1795,18 +1960,28 @@ class SceneExpertHookRunner:
             stage=stage,
             stage_brief=self._current_stage_brief,
             memory_pack=self._current_memory_pack,
+            task_spec=self._task_spec,
+            relation_context=self._current_relation_context,
         )
         self._current_stage_brief = self._current_injection_bundle.enriched_stage_brief
-        injection_text = self._current_injection_bundle.final_text
+        # Only task-derived guidance stays in the scene description. Cross-task
+        # advice is delivered at native Designer request boundaries by the
+        # existing context-bundle hook, including design-change calls.
+        injection_text = self._current_injection_bundle.brief_text
+        setattr(
+            scene,
+            "scene_expert_memory_delivery_enabled",
+            self._component_enabled("prompt_injection"),
+        )
+        setattr(
+            scene,
+            "scene_expert_accepted_memory_bundle",
+            self._current_injection_bundle.model_dump(mode="json"),
+        )
+        setattr(scene, "scene_expert_memory_directives", "")
         if self._component_enabled("prompt_injection") and injection_text:
             scene.text_description += "\n\n" + injection_text
             setattr(scene, "scene_expert_brief", injection_text)
-            if self._current_injection_bundle.memory_text:
-                setattr(
-                    scene,
-                    "scene_expert_memory_directives",
-                    self._current_injection_bundle.memory_text,
-                )
             briefs = getattr(scene, "scene_expert_briefs", {})
             if not isinstance(briefs, dict):
                 briefs = {}
@@ -1987,6 +2162,11 @@ class SceneExpertHookRunner:
                 f"[SceneExpert] Verification failed for {stage}: {e}"
             )
 
+        self._record_required_first_outcome(
+            verify_report,
+            verification_error=verification_error,
+        )
+
         # Log stage trace entry
         elapsed = time.time() - self._stage_start_time
         self._commit_stage_memory(
@@ -2000,6 +2180,7 @@ class SceneExpertHookRunner:
             verify_report=verify_report,
             repair_actions=repair_actions,
             scene_state_path=str(room_dir),
+            scene=scene,
         )
         trajectory_collector = getattr(self, "_trajectory_collector", None)
         if trajectory_collector is not None:
@@ -2107,8 +2288,103 @@ class SceneExpertHookRunner:
     # Finalize: called after all stages complete
     # ------------------------------------------------------------------
 
+    def _memory_writer_eligibility(self) -> dict[str, Any]:
+        """Return auditable eligibility for normal terminal memory promotion."""
+        configured_stop_stage = str(
+            getattr(self, "_configured_stop_stage", GENERATION_TERMINAL_STAGE)
+            or GENERATION_TERMINAL_STAGE
+        )
+        completed = set(getattr(self, "_completed_stages", []))
+        completed_generation_stages = [
+            stage for stage in GENERATION_STAGE_ORDER if stage in completed
+        ]
+        missing_generation_stages = [
+            stage
+            for stage in GENERATION_STAGE_ORDER
+            if stage not in completed_generation_stages
+        ]
+        updates_allowed = bool(
+            getattr(
+                self,
+                "_allow_long_term_memory_updates",
+                configured_stop_stage == GENERATION_TERMINAL_STAGE,
+            )
+        )
+        if not updates_allowed:
+            skip_reason = "memory_updates_disabled_for_pipeline"
+        elif configured_stop_stage != GENERATION_TERMINAL_STAGE:
+            skip_reason = "configured_stop_stage_not_generation_terminal"
+        elif missing_generation_stages:
+            skip_reason = "generation_stages_incomplete"
+        else:
+            skip_reason = ""
+        return {
+            "configured_start_stage": str(
+                getattr(self, "_start_stage", "floor_plan") or "floor_plan"
+            ),
+            "configured_stop_stage": configured_stop_stage,
+            "effective_generation_terminal": GENERATION_TERMINAL_STAGE,
+            "completed_generation_stages": completed_generation_stages,
+            "missing_generation_stages": missing_generation_stages,
+            "writer_eligible": not skip_reason,
+            "writer_skip_reason": skip_reason,
+            "eligibility_basis": "complete_generation_lifecycle",
+        }
+
+    def _authoritative_failure_memory_lifecycle(self) -> dict[str, Any]:
+        """Allow only evidence-gated failure lessons from a recognized main gate."""
+        lifecycle = self._memory_writer_eligibility()
+        terminal_pipeline = bool(
+            lifecycle["configured_stop_stage"] == GENERATION_TERMINAL_STAGE
+            and getattr(self, "_allow_long_term_memory_updates", True)
+        )
+        lifecycle["eligibility_basis"] = "authoritative_main_hard_failure"
+        if terminal_pipeline:
+            # A run intended to execute the complete generation lifecycle may
+            # learn an evidence-gated negative lesson even when a main hard gate
+            # interrupts it before manipuland.
+            lifecycle["writer_eligible"] = True
+            lifecycle["writer_skip_reason"] = ""
+        return lifecycle
+
+    def _enrich_result_dimensions(
+        self,
+        full_report: FullVerifyReport,
+    ) -> FullVerifyReport:
+        """Separate execution, requirement, and quality outcomes for evaluation."""
+        completed_set = set(getattr(self, "_completed_stages", []))
+        completed = [
+            stage for stage in GENERATION_STAGE_ORDER if stage in completed_set
+        ]
+        missing = [stage for stage in GENERATION_STAGE_ORDER if stage not in completed]
+        generation_status = "complete" if not missing else "partial"
+        degraded_reasons = list(full_report.degraded_reasons)
+        if missing:
+            degraded_reasons.append("generation_stages_incomplete:" + ",".join(missing))
+        if full_report.requirement_status in {"partial", "unsatisfied"}:
+            degraded_reasons.append(f"required_assets_{full_report.requirement_status}")
+        if full_report.quality_status == "degraded":
+            degraded_reasons.append("visual_quality_degraded")
+        return full_report.model_copy(
+            update={
+                "expected_stages": list(GENERATION_STAGE_ORDER),
+                "completed_stages": completed,
+                "missing_stages": missing,
+                "generation_status": generation_status,
+                "outcome_status": (
+                    "DEGRADED_INCOMPLETE"
+                    if generation_status == "partial"
+                    else full_report.outcome_status
+                ),
+                "degraded_reasons": list(dict.fromkeys(degraded_reasons)),
+            }
+        )
+
     def _write_long_term_memory(
-        self, full_report: FullVerifyReport
+        self,
+        full_report: FullVerifyReport,
+        *,
+        lifecycle: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Run the strict writer and atomically apply its evidence-gated ops."""
         if (
@@ -2120,6 +2396,8 @@ class SceneExpertHookRunner:
             return None
         try:
             memory_start = time.time()
+            lifecycle_payload = dict(lifecycle or self._memory_writer_eligibility())
+            revision_before = int(self._memory_store.revision)
             trace_summary = (
                 self._trace_logger.build_trace_summary()
                 if self._trace_enabled()
@@ -2130,35 +2408,41 @@ class SceneExpertHookRunner:
                 )
             )
             related_old_memory = self._format_related_memory_for_writer()
+            evidence_payload = (
+                self._trace_logger.build_memory_writer_evidence()
+                if self._trace_enabled()
+                else {
+                    "trace_id": f"trace_{self._scene_id:06d}",
+                    "run_id": str(self._output_dir.resolve()),
+                    "prompt": self._prompt,
+                    "experiment_name": self._experiment_name,
+                    "config_hash": self._config_hash,
+                    "experiment_signature": self._experiment_signature,
+                    "task_spec": self._task_spec.model_dump(),
+                    "stages": [
+                        {
+                            "stage": report.stage,
+                            "verify_report": report.model_dump(),
+                            "repair_actions": [],
+                        }
+                        for report in self._stage_reports
+                    ],
+                }
+            )
+            evidence_payload["memory_lifecycle"] = lifecycle_payload
+            evidence_payload["placement_experience_catalog"] = (
+                self._memory_activity.placement_experience_catalog()
+            )
             ops = self._memory_writer.write(
                 trace_summary=trace_summary,
                 full_report=full_report,
                 related_old_memory=related_old_memory,
-                evidence_payload=(
-                    self._trace_logger.build_memory_writer_evidence()
-                    if self._trace_enabled()
-                    else {
-                        "trace_id": f"trace_{self._scene_id:06d}",
-                        "run_id": str(self._output_dir.resolve()),
-                        "prompt": self._prompt,
-                        "experiment_name": self._experiment_name,
-                        "config_hash": self._config_hash,
-                        "experiment_signature": self._experiment_signature,
-                        "task_spec": self._task_spec.model_dump(),
-                        "stages": [
-                            {
-                                "stage": report.stage,
-                                "verify_report": report.model_dump(),
-                                "repair_actions": [],
-                            }
-                            for report in self._stage_reports
-                        ],
-                    }
-                ),
+                evidence_payload=evidence_payload,
             )
             if self._trace_enabled():
                 self._trace_logger.save_memory_update_ops(ops, full_report)
             apply_summary = self._memory_store.apply_updates(ops)
+            self._memory_writer.record_store_result(apply_summary)
             self._memory_activity.record_writer(
                 proposed_ops=ops,
                 writer_trace=dict(self._memory_writer.last_trace),
@@ -2170,6 +2454,9 @@ class SceneExpertHookRunner:
                     {
                         **dict(self._memory_writer.last_trace),
                         "store_apply": apply_summary,
+                        **lifecycle_payload,
+                        "bank_revision_before": revision_before,
+                        "bank_revision_after": int(apply_summary["revision"]),
                     },
                 )
             console_logger.info(
@@ -2210,6 +2497,7 @@ class SceneExpertHookRunner:
                         "write_status": "exception_no_write",
                         "fallback_written": False,
                         "error": f"{type(e).__name__}: {e}",
+                        **dict(lifecycle or self._memory_writer_eligibility()),
                     },
                 )
                 self._trace_logger.save_memory_update_ops([], full_report)
@@ -2260,6 +2548,7 @@ class SceneExpertHookRunner:
             )
         except Exception as e:
             console_logger.warning(f"FullVerifier failed: {e}")
+        full_report = self._enrich_result_dimensions(full_report)
 
         # Save trace
         final_path = Path(final_scene_path)
@@ -2280,12 +2569,15 @@ class SceneExpertHookRunner:
                 model=self._qwen_model,
             )
 
-        # Only terminal pipeline runs own a complete scene outcome.  Shared
-        # bases deliberately stop at floor_plan and are later resumed by a
-        # critic-on run; promoting their partial reports would contaminate the
-        # active bank and count one task twice.
-        if getattr(self, "_allow_long_term_memory_updates", True):
-            self._write_long_term_memory(full_report)
+        # Only a complete SceneSmith generation lifecycle owns a terminal scene
+        # outcome.  The evaluator-only ``final`` contract stage is deliberately
+        # excluded, while floor-plan-only shared bases remain ineligible.
+        memory_lifecycle = self._memory_writer_eligibility()
+        if memory_lifecycle["writer_eligible"]:
+            self._write_long_term_memory(
+                full_report,
+                lifecycle=memory_lifecycle,
+            )
             self._flush_skill_outcomes()
         else:
             self._pending_skill_observations = []
@@ -2296,10 +2588,8 @@ class SceneExpertHookRunner:
                         "success": True,
                         "skipped": True,
                         "write_status": "skipped_non_terminal_pipeline",
-                        "reason": (
-                            "Long-term memory promotion requires a run whose "
-                            "configured stop_stage is manipuland."
-                        ),
+                        "reason": memory_lifecycle["writer_skip_reason"],
+                        **memory_lifecycle,
                     },
                 )
             console_logger.info(
@@ -2307,6 +2597,7 @@ class SceneExpertHookRunner:
                 "non-terminal pipeline run"
             )
 
+        self._audit_memory_snapshot()
         if self._trace_enabled():
             trace_dict = self._trace_logger.finalize(
                 full_report=full_report,
@@ -2329,7 +2620,7 @@ class SceneExpertHookRunner:
         )
         return full_report
 
-    def finalize_failure(self, error: str = "") -> None:
+    def finalize_failure(self, error: str = "", error_type: str = "") -> None:
         """Persist a failed trace and curate only recognized main hard-gate evidence.
 
         This does not catch, suppress, retry, or otherwise change main's failure.
@@ -2354,8 +2645,17 @@ class SceneExpertHookRunner:
             return
         failure_report = main_hard_failure_report(error, self._current_stage)
         if failure_report is None:
+            self._record_inflight_runtime_failure(
+                error=error,
+                error_type=error_type or "RuntimeError",
+            )
             self.save_partial_trace(error=error)
             return
+
+        self._record_required_first_outcome(
+            failure_report,
+            verification_error=False,
+        )
 
         if self._current_stage not in self._completed_stages:
             self._stage_reports.append(failure_report)
@@ -2399,16 +2699,19 @@ class SceneExpertHookRunner:
 
         missing_stages = [
             stage
-            for stage in CONTRACT_STAGE_ORDER
+            for stage in GENERATION_STAGE_ORDER
             if stage not in self._completed_stages
         ]
         full_report = FullVerifyReport(
             deterministic_pass=False,
             pass_scene=False,
-            expected_stages=list(CONTRACT_STAGE_ORDER),
+            expected_stages=list(GENERATION_STAGE_ORDER),
             completed_stages=list(self._completed_stages),
             missing_stages=missing_stages,
             outcome_status="FAILED",
+            generation_status="failed",
+            requirement_status=failure_report.requirement_status,
+            quality_status="failed",
             degraded_reasons=[str(error)],
             metric_sources={"failure": "scenesmith_main_hard_gate"},
         )
@@ -2418,8 +2721,26 @@ class SceneExpertHookRunner:
             exports=exports,
             model=self._qwen_model,
         )
-        self._write_long_term_memory(full_report)
-        self._flush_skill_outcomes()
+        memory_lifecycle = self._authoritative_failure_memory_lifecycle()
+        if memory_lifecycle["writer_eligible"]:
+            self._write_long_term_memory(
+                full_report,
+                lifecycle=memory_lifecycle,
+            )
+            self._flush_skill_outcomes()
+        else:
+            self._pending_skill_observations = []
+            self._trace_logger.record_component_status(
+                "memory_writer",
+                {
+                    "success": True,
+                    "skipped": True,
+                    "write_status": "skipped_non_terminal_pipeline",
+                    "reason": memory_lifecycle["writer_skip_reason"],
+                    **memory_lifecycle,
+                },
+            )
+        self._audit_memory_snapshot()
         trace_dict = self._trace_logger.finalize(
             full_report=full_report,
             exports=exports,
@@ -2434,6 +2755,7 @@ class SceneExpertHookRunner:
         if not self._trace_enabled():
             return
         try:
+            self._audit_memory_snapshot()
             path = self._trace_logger.save_partial(status="failed", error=error)
             self._capture_main_repair_activity()
             console_logger.info(f"[SceneExpert] Partial trace saved to {path}")
@@ -2442,15 +2764,84 @@ class SceneExpertHookRunner:
                 f"[SceneExpert] Failed to save partial trace: {save_error}"
             )
 
+    def _record_inflight_runtime_failure(
+        self,
+        *,
+        error: str,
+        error_type: str,
+    ) -> None:
+        """Persist the current native-stage boundary without changing its failure."""
+        if not self._trace_enabled() or not getattr(self, "_current_stage", ""):
+            return
+        stage = self._current_stage
+        if stage in getattr(self, "_completed_stages", []):
+            return
+        planner_diagnostics: dict[str, Any] = {}
+        latest_scene = getattr(self, "_latest_scene", None)
+        metadata = getattr(latest_scene, "metadata", None)
+        if isinstance(metadata, dict):
+            candidate = metadata.get("scenesmith_planner_failure")
+            if isinstance(candidate, dict):
+                planner_diagnostics = dict(candidate)
+            runtime_checkpoint = metadata.get("scenesmith_runtime_failure")
+            if isinstance(runtime_checkpoint, dict):
+                planner_diagnostics.setdefault(
+                    "runtime_failure_checkpoint",
+                    dict(runtime_checkpoint),
+                )
+        runtime_failure = {
+            "stage": stage,
+            "error_type": str(error_type or "RuntimeError"),
+            "error": str(error),
+            "stage_agent_invoked": bool(
+                self._current_execution_evidence.stage_agent_invoked
+            ),
+            "planner_diagnostics": planner_diagnostics,
+        }
+        self._current_execution_evidence.degraded = True
+        self._current_execution_evidence.stage_outcome = "runtime_failed"
+        self._current_execution_evidence.runtime_failure = runtime_failure
+        self._trace_logger.record_component_status(
+            "runtime_failure",
+            {
+                "success": False,
+                "degraded": True,
+                **runtime_failure,
+            },
+        )
+        planner_trace = dict(self._current_planner_trace)
+        planner_trace["native_stage_runtime_failure"] = runtime_failure
+        self._trace_logger.log_stage(
+            stage=stage,
+            memory_pack=self._current_memory_pack,
+            relation_context=self._current_relation_context,
+            planner_trace=planner_trace,
+            stage_brief=self._current_stage_brief,
+            scene_state_path=str(self._scene_debug_dir.parent),
+            verify_report=None,
+            repair_actions=[],
+            qwen_calls=self._qwen_calls,
+            stage_time_sec=max(0.0, time.time() - self._stage_start_time),
+            execution_evidence=self._current_execution_evidence,
+        )
+        self._trace_logger.save_stage_context(
+            stage=stage,
+            memory_pack=self._current_memory_pack,
+            relation_context=self._current_relation_context,
+            stage_brief=self._current_stage_brief,
+            phase="failure",
+            execution_evidence=self._current_execution_evidence,
+        )
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _initial_completed_stages(self, start_stage: str) -> list[str]:
         """Return the stage-order prefix already satisfied by a resumed run."""
-        if start_stage not in CONTRACT_STAGE_ORDER:
+        if start_stage not in GENERATION_STAGE_ORDER:
             return []
-        return CONTRACT_STAGE_ORDER[: CONTRACT_STAGE_ORDER.index(start_stage)]
+        return list(GENERATION_STAGE_ORDER[: GENERATION_STAGE_ORDER.index(start_stage)])
 
     def _validate_stage_transition(self, stage: str) -> None:
         """Enforce Harness FSM order while tolerating sequential multi-room runs."""
@@ -2471,8 +2862,15 @@ class SceneExpertHookRunner:
                 return
             raise
 
-    def _build_scene_state_summary(self) -> str:
-        """Build a text summary of completed stages for the GlobalPlanner."""
+    def _build_scene_state_summary(self, scene: RoomScene | None = None) -> str:
+        """Describe actual bounded scene observations, not only FSM progress."""
+        if scene is not None:
+            return (
+                "Completed stages: "
+                + ", ".join(self._completed_stages)
+                + "\n"
+                + format_memory_scene_state(build_memory_scene_state(scene))
+            )
         if not self._completed_stages:
             return "Empty scene — no objects placed yet."
         return "Completed stages: " + ", ".join(self._completed_stages)
@@ -2511,7 +2909,7 @@ class SceneExpertHookRunner:
 
         lines: list[str] = []
         seen: set[str] = set()
-        for stage in CONTRACT_STAGE_ORDER:
+        for stage in GENERATION_STAGE_ORDER:
             try:
                 pack = self._retriever.retrieve(self._task_spec, stage)
             except Exception:
@@ -2598,6 +2996,8 @@ def build_hook_runner(
     scene_id: int,
     output_dir: Path,
     cfg_dict: dict,
+    *,
+    scene_started_at: str = "",
 ) -> SceneExpertHookRunner | None:
     """Build a SceneExpertHookRunner from config.
 
@@ -2609,6 +3009,7 @@ def build_hook_runner(
         scene_id: Scene index.
         output_dir: Base experiment output directory.
         cfg_dict: Full Hydra config as plain dict.
+        scene_started_at: Worker start before checkpoint copying and compilation.
 
     Returns:
         Configured SceneExpertHookRunner, or None if disabled.
@@ -2628,6 +3029,22 @@ def build_hook_runner(
     memory_cfg = se_cfg.get("memory", {}) or {}
     behavior_cfg = se_cfg.get("behavior", {}) or {}
     component_flags = resolve_component_flags(cfg_dict)
+
+    evaluation_cfg = se_cfg.get("evaluation", {}) or {}
+    evaluation_pair_id = str(evaluation_cfg.get("pair_id") or "").strip()
+    evaluation_dimension = (
+        str(evaluation_cfg.get("controlled_dimension") or "").strip().casefold()
+    )
+    evaluation_arm = str(evaluation_cfg.get("arm") or "").strip().casefold()
+    require_frozen_memory = _cfg_bool(
+        evaluation_cfg.get("require_frozen_memory"), False
+    )
+    evaluation_requested = bool(
+        evaluation_pair_id
+        or evaluation_dimension
+        or evaluation_arm
+        or require_frozen_memory
+    )
 
     mode = se_cfg.get("mode", "disabled")
     if not se_cfg.get("enabled", False) or not any(component_flags.values()):
@@ -2652,6 +3069,49 @@ def build_hook_runner(
         )
         return None
 
+    if evaluation_requested:
+        if mode != "full":
+            raise ValueError("Paired Memory evaluation requires scene_expert.mode=full")
+        if not evaluation_pair_id:
+            raise ValueError("Paired Memory evaluation requires a non-empty pair_id")
+        if evaluation_dimension != MEMORY_RETRIEVAL_EVALUATION_DIMENSION:
+            raise ValueError(
+                "Paired Memory evaluation supports only controlled_dimension="
+                f"{MEMORY_RETRIEVAL_EVALUATION_DIMENSION!r}"
+            )
+        if evaluation_arm not in {"memory_off", "memory_on"}:
+            raise ValueError(
+                "Paired Memory evaluation arm must be 'memory_off' or 'memory_on'"
+            )
+        if not require_frozen_memory:
+            raise ValueError("Paired Memory evaluation requires a frozen Memory bank")
+        retrieval_expected = evaluation_arm == "memory_on"
+        if component_flags["fast_memory_retrieval"] != retrieval_expected:
+            raise ValueError(
+                "Evaluation arm and fast_memory_retrieval component disagree"
+            )
+        if component_flags["memory_writer"]:
+            raise ValueError("Paired Memory evaluation requires memory_writer=false")
+
+    compiled_inputs_dir = str(evaluation_cfg.get("compiled_inputs_dir") or "").strip()
+    if evaluation_requested and not compiled_inputs_dir:
+        raise ValueError(
+            "Paired Memory evaluation requires a pair-scoped compiled_inputs_dir"
+        )
+
+    # Capture resolved experiment identity before TaskCompiler/IntentCompiler
+    # attach any per-scene runtime envelopes to cfg_dict.
+    config_hash = _stable_config_hash(cfg_dict)
+    experiment_signature = _stable_experiment_signature(cfg_dict)
+    control_signature = (
+        _stable_control_signature(
+            cfg_dict,
+            controlled_dimension=evaluation_dimension,
+        )
+        if evaluation_requested
+        else experiment_signature
+    )
+
     stage_policies = resolve_stage_policies(cfg_dict)
     console_logger.info(f"[SceneExpert] Building hook runner (mode={mode})")
 
@@ -2672,7 +3132,7 @@ def build_hook_runner(
         exclude_source_task_id = (
             "task_" + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
         )
-    use_memory_store = any(
+    use_memory_store = evaluation_requested or any(
         component_flags[name]
         for name in (
             "fast_memory_retrieval",
@@ -2686,6 +3146,7 @@ def build_hook_runner(
     )
     if not use_memory_store:
         os.environ.pop("SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR", None)
+        os.environ.pop("SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY", None)
 
     memory_store: FastMemoryStore | None = None
     retriever: Any | None = None
@@ -2708,8 +3169,15 @@ def build_hook_runner(
 
     if use_memory_store:
         ret_cfg = memory_cfg.get("retrieval", {})
-        memory_store = FastMemoryStore(memory_dir)
+        memory_store = FastMemoryStore(
+            memory_dir,
+            read_only=evaluation_requested and require_frozen_memory,
+        )
         os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] = str(memory_dir)
+        if memory_store.read_only:
+            os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY"] = "true"
+        else:
+            os.environ.pop("SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY", None)
 
     if component_flags["fast_memory_retrieval"]:
         if memory_store is None:
@@ -2737,6 +3205,27 @@ def build_hook_runner(
                 f"Unsupported SceneExpert memory retriever_type={retriever_type!r}. "
                 "Use 'lexical' or 'hybrid'."
             )
+        injection_cfg = memory_cfg.get("injection_budget", {}) or {}
+        retriever = BudgetedMemoryRetriever(
+            retriever,
+            store=memory_store,
+            policy=MemoryInjectionPolicy(
+                max_total_records=_cfg_int(injection_cfg.get("max_total_records"), 3),
+                max_success_cases=_cfg_int(injection_cfg.get("max_success_cases"), 1),
+                max_failure_cases=_cfg_int(injection_cfg.get("max_failure_cases"), 1),
+                max_skills=_cfg_int(injection_cfg.get("max_skills"), 1),
+                max_total_chars=_cfg_int(injection_cfg.get("max_total_chars"), 8000),
+                require_verified_failures=_cfg_bool(
+                    injection_cfg.get("require_verified_failures"), True
+                ),
+                require_failure_grounding=_cfg_bool(
+                    injection_cfg.get("require_failure_grounding"), True
+                ),
+                object_overlap_threshold=_cfg_float(
+                    ret_cfg.get("object_overlap_threshold"), 0.15
+                ),
+            ),
+        )
     if component_flags["memory_writer"]:
         writer_kwargs: dict[str, Any] = {
             "model": model,
@@ -2749,6 +3238,30 @@ def build_hook_runner(
                     "success_min_overall_score", 0.75
                 ),
                 0.75,
+            ),
+            "skill_min_independent_support": _cfg_int(
+                (memory_cfg.get("writer", {}) or {}).get(
+                    "skill_min_independent_support", 2
+                ),
+                2,
+            ),
+            "skill_bootstrap_enabled": _cfg_bool(
+                (memory_cfg.get("writer", {}) or {}).get(
+                    "skill_bootstrap_enabled", True
+                ),
+                True,
+            ),
+            "skill_bootstrap_max_candidates_per_scene": _cfg_int(
+                (memory_cfg.get("writer", {}) or {}).get(
+                    "skill_bootstrap_max_candidates_per_scene", 5
+                ),
+                5,
+            ),
+            "skill_bootstrap_min_procedure_steps": _cfg_int(
+                (memory_cfg.get("writer", {}) or {}).get(
+                    "skill_bootstrap_min_procedure_steps", 2
+                ),
+                2,
             ),
         }
         if component_flags["structured_llm"]:
@@ -2788,65 +3301,123 @@ def build_hook_runner(
 
     from scenesmith.scene_expert.task_compiler import _fallback_spec_from_prompt
 
-    task_compiler: TaskCompiler | None = None
-    task_compiler_trace: dict[str, Any] = {}
-    if component_flags["task_compiler"]:
-        task_compiler = TaskCompiler(
+    def compile_current_inputs() -> dict[str, Any]:
+        task_compiler: TaskCompiler | None = None
+        task_compiler_trace: dict[str, Any] = {}
+        if component_flags["task_compiler"]:
+            task_compiler = TaskCompiler(
+                model=model,
+                api_base_url=api_base,
+                api_key=api_key,
+                llm_client=structured_llm_client,
+            )
+            try:
+                current_task_spec = task_compiler.compile(prompt)
+            except Exception as e:
+                console_logger.warning(
+                    "TaskCompiler failed, using fallback task spec from prompt text: %s",
+                    e,
+                )
+                current_task_spec = _fallback_spec_from_prompt(prompt)
+            task_compiler_trace = dict(getattr(task_compiler, "last_trace", {}) or {})
+        else:
+            current_task_spec = _fallback_spec_from_prompt(prompt)
+            task_compiler_trace = {
+                "status": "disabled",
+                "attempts": [],
+                "failure_reason": "TaskCompiler disabled by component gate",
+            }
+
+        current_task_spec, behavior_spec = apply_behavior_template(
+            prompt,
+            current_task_spec,
+            config=behavior_cfg,
+            output_path=scene_debug_dir / "behavior_spec.json",
             model=model,
             api_base_url=api_base,
             api_key=api_key,
-            llm_client=structured_llm_client,
         )
-        try:
-            task_spec = task_compiler.compile(prompt)
-        except Exception as e:
-            console_logger.warning(
-                f"TaskCompiler failed, using fallback task spec from prompt text: {e}"
+        if behavior_spec is not None:
+            console_logger.info(
+                "[SceneExpert] Applied deterministic behavior template; spec=%s",
+                scene_debug_dir / "behavior_spec.json",
             )
-            task_spec = _fallback_spec_from_prompt(prompt)
-        task_compiler_trace = dict(getattr(task_compiler, "last_trace", {}) or {})
-    else:
-        task_spec = _fallback_spec_from_prompt(prompt)
-        task_compiler_trace = {
-            "status": "disabled",
-            "attempts": [],
-            "failure_reason": "TaskCompiler disabled by component gate",
+
+        current_contract, current_intent_trace = _compile_intent_contract_if_enabled(
+            prompt=prompt,
+            scene_id=scene_id,
+            output_dir=output_dir,
+            cfg_dict=cfg_dict,
+            task_spec=current_task_spec,
+        )
+        pre_reconciliation = current_task_spec
+        current_task_spec = _reconcile_task_spec_stage_ownership(
+            current_task_spec, current_contract
+        )
+        ownership_audit = _audit_stage_ownership(
+            pre_reconciliation,
+            current_task_spec,
+            current_contract,
+        )
+        task_compiler_trace["ownership_reconciliation"] = ownership_audit
+        if ownership_audit["errors"]:
+            raise ValueError(
+                "Stage ownership reconciliation failed: "
+                + "; ".join(ownership_audit["errors"])
+            )
+        return {
+            "task_spec": current_task_spec.model_dump(mode="json", exclude_none=True),
+            "intent_contract": current_contract,
+            "compiler_metadata": {
+                "task_compiler_trace": task_compiler_trace,
+                "intent_trace": current_intent_trace,
+                "intent_cache_key": dict(
+                    cfg_dict.get("_scenebenchmark_intent_cache_key") or {}
+                ),
+                "behavior_spec": (
+                    behavior_spec.model_dump(mode="json")
+                    if behavior_spec is not None
+                    else None
+                ),
+            },
         }
 
-    task_spec, behavior_spec = apply_behavior_template(
-        prompt,
-        task_spec,
-        config=behavior_cfg,
-        output_path=scene_debug_dir / "behavior_spec.json",
-        model=model,
-        api_base_url=api_base,
-        api_key=api_key,
-    )
-    if behavior_spec is not None:
-        console_logger.info(
-            "[SceneExpert] Applied deterministic behavior template; spec=%s",
-            scene_debug_dir / "behavior_spec.json",
+    compiled_inputs_identity: dict[str, Any] = {}
+    if evaluation_requested:
+        compiled_payload, compiled_inputs_identity = FrozenCompiledInputStore(
+            compiled_inputs_dir
+        ).load_or_create(
+            scene_id=scene_id,
+            prompt=prompt,
+            producer=compile_current_inputs,
         )
+    else:
+        compiled_payload = compile_current_inputs()
 
-    intent_contract, intent_trace = _compile_intent_contract_if_enabled(
-        prompt=prompt,
-        scene_id=scene_id,
-        output_dir=output_dir,
-        cfg_dict=cfg_dict,
-        task_spec=task_spec,
+    task_spec = SceneTaskSpec.model_validate(compiled_payload["task_spec"])
+    intent_contract = dict(compiled_payload.get("intent_contract") or {})
+    compiler_metadata = dict(compiled_payload.get("compiler_metadata") or {})
+    task_compiler_trace = dict(compiler_metadata.get("task_compiler_trace") or {})
+    intent_trace = dict(compiler_metadata.get("intent_trace") or {})
+    cfg_dict["_scenebenchmark_intent_contract"] = intent_contract
+    cfg_dict["_scenebenchmark_intent_trace"] = intent_trace
+    cfg_dict["_scenebenchmark_intent_cache_key"] = dict(
+        compiler_metadata.get("intent_cache_key") or {}
     )
-    pre_reconciliation_task_spec = task_spec
-    task_spec = _reconcile_task_spec_stage_ownership(task_spec, intent_contract)
-    ownership_audit = _audit_stage_ownership(
-        pre_reconciliation_task_spec,
-        task_spec,
-        intent_contract,
+    intent_trace_path = scene_debug_dir / "trace" / "intent_compiler.json"
+    intent_trace_path.parent.mkdir(parents=True, exist_ok=True)
+    intent_trace_path.write_text(
+        json.dumps(intent_trace, indent=2, ensure_ascii=False, default=str) + "\n",
+        encoding="utf-8",
+        newline="\n",
     )
-    task_compiler_trace["ownership_reconciliation"] = ownership_audit
-    if ownership_audit["errors"]:
-        raise ValueError(
-            "Stage ownership reconciliation failed: "
-            + "; ".join(ownership_audit["errors"])
+    behavior_payload = compiler_metadata.get("behavior_spec")
+    if isinstance(behavior_payload, dict):
+        (scene_debug_dir / "behavior_spec.json").write_text(
+            json.dumps(behavior_payload, indent=2, ensure_ascii=False, default=str)
+            + "\n",
+            encoding="utf-8",
+            newline="\n",
         )
 
     # Harness always assembles planner context, while its FSM and budget
@@ -2863,6 +3434,13 @@ def build_hook_runner(
         api_base_url=api_base,
         api_key=api_key,
         llm_client=structured_llm_client,
+        max_tokens=_cfg_int(
+            (
+                (structured_llm_cfg.get("roles", {}) or {}).get("global_planner", {})
+                or {}
+            ).get("max_tokens"),
+            2048,
+        ),
     )
     floor_plan_reservation_cfg = _deep_merge_dicts(
         root_se_cfg.get("floor_plan_reservations", {}),
@@ -2883,13 +3461,43 @@ def build_hook_runner(
         .get("pipeline", {})
         .get("start_stage", "floor_plan")
     )
-    stop_stage = (
+    stop_stage = str(
         cfg_dict.get("experiment", {})
         .get("pipeline", {})
-        .get("stop_stage", CONTRACT_STAGE_ORDER[-1])
+        .get("stop_stage", GENERATION_TERMINAL_STAGE)
+        or GENERATION_TERMINAL_STAGE
     )
-    config_hash = _stable_config_hash(cfg_dict)
-    experiment_signature = _stable_experiment_signature(cfg_dict)
+    memory_identity = (
+        memory_store.snapshot_identity(refresh=True) if memory_store is not None else {}
+    )
+    pipeline_cfg = (cfg_dict.get("experiment", {}) or {}).get("pipeline", {}) or {}
+    resume_from_path = str(pipeline_cfg.get("resume_from_path") or "").strip()
+    shared_base_identity = (
+        _shared_base_scene_identity(resume_from_path, scene_index=scene_id)
+        if resume_from_path
+        else {}
+    )
+    evaluation_contract = (
+        {
+            "schema_version": "sceneexpert.memory_evaluation_contract.v1",
+            "pair_id": evaluation_pair_id,
+            "controlled_dimension": evaluation_dimension,
+            "arm": evaluation_arm,
+            "require_frozen_memory": require_frozen_memory,
+            "fast_memory_retrieval_enabled": component_flags["fast_memory_retrieval"],
+            "memory_writer_enabled": component_flags["memory_writer"],
+            "memory_read_only": bool(memory_store and memory_store.read_only),
+            "shared_base_identity": shared_base_identity,
+            "compiled_inputs_identity": compiled_inputs_identity,
+            "checkpoint_stage": str(pipeline_cfg.get("start_stage") or "floor_plan"),
+        }
+        if evaluation_requested
+        else {}
+    )
+    if evaluation_requested and not shared_base_identity.get("fingerprint"):
+        raise ValueError(
+            "Paired Memory evaluation requires a readable reused shared-base scene"
+        )
     trace_logger: TraceLogger | None = None
     if component_flags["trace"]:
         trace_logger = TraceLogger(
@@ -2899,6 +3507,7 @@ def build_hook_runner(
             experiment_name=cfg_dict.get("name", ""),
             config_hash=config_hash,
             experiment_signature=experiment_signature,
+            control_signature=control_signature,
             task_spec=task_spec.model_dump(mode="json", exclude_none=True),
             task_spec_status={
                 "source": (
@@ -2908,6 +3517,9 @@ def build_hook_runner(
             },
             code_provenance=collect_code_provenance(),
             component_flags=component_flags,
+            memory_identity=memory_identity,
+            evaluation_contract=evaluation_contract,
+            scene_started_at=scene_started_at,
         )
 
     trajectory_collector: TrajectoryCollector | None = None
@@ -2952,8 +3564,12 @@ def build_hook_runner(
         experiment_name=cfg_dict.get("name", ""),
         config_hash=config_hash,
         experiment_signature=experiment_signature,
+        control_signature=control_signature,
+        memory_identity=memory_identity,
+        evaluation_contract=evaluation_contract,
         start_stage=start_stage,
-        allow_long_term_memory_updates=(stop_stage == CONTRACT_STAGE_ORDER[-1]),
+        configured_stop_stage=stop_stage,
+        allow_long_term_memory_updates=(stop_stage == GENERATION_TERMINAL_STAGE),
         intent_contract=intent_contract,
         intent_trace=intent_trace,
         task_compiler_trace=task_compiler_trace,

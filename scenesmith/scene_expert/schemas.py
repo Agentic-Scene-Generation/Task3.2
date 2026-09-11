@@ -6,9 +6,14 @@ type safety and easy JSON serialization across the pipeline.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+REQUIRED_FIRST_DIRECTIVE = (
+    "Execution order: place and stabilize prompt-required assets first; then use "
+    "native designer judgment for useful same-stage optional additions."
+)
 
 # ---------------------------------------------------------------------------
 # TaskCompiler output
@@ -111,6 +116,24 @@ class RetrievedMemorySelection(BaseModel):
     bank_id: str = ""
     bank_revision: int = Field(default=0, ge=0)
     injected_text: str = ""
+    placement_text: str = ""
+    content_hash: str = ""
+    payload_version: str = ""
+    evidence_warnings: list[str] = Field(default_factory=list)
+    spatial_relations: list[dict[str, Any]] = Field(default_factory=list)
+    applicability: dict[str, Any] = Field(default_factory=dict)
+    placement_experience: dict[str, Any] = Field(default_factory=dict)
+
+
+class MemorySelectionDecision(BaseModel):
+    """One auditable admission or rejection made by the injection policy."""
+
+    memory_id: str
+    memory_type: Literal["success", "failure", "skill"]
+    decision: Literal["selected", "rejected"]
+    reasons: list[str] = Field(default_factory=list)
+    retrieval_rank: int = Field(default=0, ge=0)
+    retrieval_score: float | None = None
 
 
 class SkillSelectionDecision(BaseModel):
@@ -149,6 +172,7 @@ class MemoryPack(BaseModel):
             "Injected directly into the designer prompt, bypassing GlobalPlanner."
         ),
     )
+    placement_memory_ids: list[str] = Field(default_factory=list)
     success_case_ids: list[str] = Field(default_factory=list)
     failure_case_ids: list[str] = Field(default_factory=list)
     skill_names: list[str] = Field(default_factory=list)
@@ -166,10 +190,18 @@ class MemoryPack(BaseModel):
     memory_bank_id: str = ""
     memory_bank_revision: int = 0
     selections: list[RetrievedMemorySelection] = Field(default_factory=list)
+    selection_decisions: list[MemorySelectionDecision] = Field(default_factory=list)
+    selection_policy: dict[str, Any] = Field(default_factory=dict)
     skill_filter_decisions: list[SkillSelectionDecision] = Field(default_factory=list)
+    current_scene_state: dict[str, Any] = Field(default_factory=dict)
 
     def deduplicated(self) -> "MemoryPack":
-        """Return an order-preserving copy without repeated prompt content."""
+        """Deduplicate identities without detaching text from its source.
+
+        Equal text from distinct records must survive until admission: one of
+        those records may be ineligible. Legacy parallel lists are accepted
+        only when their alignment is unambiguous. Unbound layouts are dropped.
+        """
 
         def unique_text(values: list[str]) -> list[str]:
             seen: set[str] = set()
@@ -182,16 +214,138 @@ class MemoryPack(BaseModel):
                     seen.add(key)
             return result
 
-        return self.model_copy(
-            update={
-                "success_hints": unique_text(self.success_hints),
-                "failure_hints": unique_text(self.failure_hints),
-                "skill_texts": unique_text(self.skill_texts),
-                "success_case_ids": unique_text(self.success_case_ids),
-                "failure_case_ids": unique_text(self.failure_case_ids),
-                "skill_names": unique_text(self.skill_names),
-            }
+        updates: dict[str, Any] = {}
+        canonical_rows: list[RetrievedMemorySelection] = []
+        for kind, id_field, text_field in (
+            ("success", "success_case_ids", "success_hints"),
+            ("failure", "failure_case_ids", "failure_hints"),
+            ("skill", "skill_names", "skill_texts"),
+        ):
+            ids = getattr(self, id_field)
+            texts = getattr(self, text_field)
+            by_id: dict[str, RetrievedMemorySelection] = {}
+            for row in self.selections:
+                if row.memory_type == kind:
+                    by_id.setdefault(row.memory_id, row)
+            if not ids and not by_id:
+                updates[text_field] = unique_text(texts)
+                updates[id_field] = []
+                continue
+            ordered_ids = list(dict.fromkeys(ids or by_id))
+            aligned: dict[str, str] = {}
+            ambiguous: set[str] = set()
+            if len(ids) == len(texts):
+                for memory_id, text in zip(ids, texts, strict=True):
+                    if memory_id in aligned and " ".join(
+                        aligned[memory_id].casefold().split()
+                    ) != " ".join(text.casefold().split()):
+                        ambiguous.add(memory_id)
+                    aligned.setdefault(memory_id, text.strip())
+                for memory_id in ambiguous:
+                    aligned[memory_id] = ""
+            rows = []
+            for memory_id in ordered_ids:
+                row = by_id.get(memory_id)
+                if row is None:
+                    row = RetrievedMemorySelection(
+                        memory_id=memory_id,
+                        memory_type=kind,
+                        rank=len(rows) + 1,
+                        injected_text=aligned.get(memory_id, ""),
+                        source_task_ids=self.retrieved_source_task_ids.get(
+                            memory_id, []
+                        ),
+                        source_run_ids=self.retrieved_source_run_ids.get(memory_id, []),
+                        bank_id=self.memory_bank_id,
+                        bank_revision=self.memory_bank_revision,
+                    )
+                rows.append(row)
+            canonical_rows.extend(rows)
+            updates[id_field] = [row.memory_id for row in rows]
+            updates[text_field] = [row.injected_text for row in rows]
+        layouts = [
+            row
+            for row in canonical_rows
+            if row.memory_type == "success" and row.placement_text
+        ]
+        updates["selections"] = canonical_rows
+        updates["placement_reference"] = "\n\n".join(
+            row.placement_text for row in layouts
         )
+        updates["placement_memory_ids"] = [row.memory_id for row in layouts]
+        id_counts = {
+            row.memory_id: sum(
+                other.memory_id == row.memory_id for other in canonical_rows
+            )
+            for row in canonical_rows
+        }
+        updates["retrieved_source_task_ids"] = {
+            row.memory_id: row.source_task_ids
+            for row in canonical_rows
+            if id_counts[row.memory_id] == 1
+        }
+        updates["retrieved_source_run_ids"] = {
+            row.memory_id: row.source_run_ids
+            for row in canonical_rows
+            if id_counts[row.memory_id] == 1
+        }
+        return self.model_copy(update=updates)
+
+
+class MemoryRoleBinding(BaseModel):
+    """A source role bound to observed objects or a current task design role."""
+
+    model_config = ConfigDict(extra="forbid")
+    source_role: str
+    current_role: str
+    object_ids: list[str] = Field(default_factory=list)
+
+
+class MemoryAdviceCheck(BaseModel):
+    """Read-only advice observation. No model-invented pass thresholds."""
+
+    model_config = ConfigDict(extra="forbid")
+    source_episode_id: str
+    metric: Literal[
+        "anchor_local_offset_m",
+        "relative_yaw_deg",
+        "aabb_separation_m",
+        "bbox_center_distance_m",
+        "native_constraint",
+    ]
+    subject_role: str
+    anchor_role: str
+    constraint_id: str = ""
+
+
+class MemoryAdaptation(BaseModel):
+    """Planner-owned advice; identity/evidence are validated outside the LLM."""
+
+    model_config = ConfigDict(extra="forbid")
+    memory_type: Literal["success", "failure", "skill"]
+    memory_id: str
+    source_content_hash: str
+    decision: Literal["accepted", "adapted", "rejected"]
+    reason: str = ""
+    source_relation_indices: list[Annotated[int, Field(strict=True, ge=0)]] | None = (
+        None  # Zero-based immutable source rows; legacy None means the entire source.
+    )
+    source_method_step_indices: (
+        list[Annotated[int, Field(strict=True, ge=0)]] | None
+    ) = None  # Legacy None keeps all steps; a subset must retain its own sources.
+    bindings: list[MemoryRoleBinding] = Field(default_factory=list)
+    preconditions: list[str] = Field(default_factory=list)
+    actions: list[str] = Field(default_factory=list)
+    checks: list[str] = Field(default_factory=list)
+    advice_checks: list[MemoryAdviceCheck] = Field(default_factory=list, max_length=6)
+
+
+class AcceptedMemoryItem(BaseModel):
+    """Single, validated source/adaptation pair for design-time delivery."""
+
+    source: RetrievedMemorySelection
+    adaptation: MemoryAdaptation
+    text: str
 
 
 class MemoryInjectionBundle(BaseModel):
@@ -208,6 +362,12 @@ class MemoryInjectionBundle(BaseModel):
     retrieved_skill_names: list[str] = Field(default_factory=list)
     planner_selected_skill_names: list[str] = Field(default_factory=list)
     prompt_delivered_skill_names: list[str] = Field(default_factory=list)
+    schema_version: str = "memory-context.v1"
+    accepted_items: list[AcceptedMemoryItem] = Field(default_factory=list)
+    adaptation_decisions: list[dict[str, Any]] = Field(default_factory=list)
+    current_scene_state: dict[str, Any] = Field(default_factory=dict)
+    task_spec: dict[str, Any] = Field(default_factory=dict)
+    relation_context: dict[str, Any] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +503,8 @@ class StageBrief(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    memory_adaptations: list[MemoryAdaptation] = Field(default_factory=list)
+
     stage: str
     stage_policy: Literal["auto", "required_only"] = "auto"
     optional_assets_allowed: bool = True
@@ -394,6 +556,7 @@ class StageBrief(BaseModel):
             lines.append(
                 "  - None explicitly named. This does NOT disable or skip the stage."
             )
+        lines.append(f"REQUIRED-FIRST EXECUTION: {REQUIRED_FIRST_DIRECTIVE}")
         if self.optional_assets_allowed:
             lines.append("OPTIONAL ASSET RECOMMENDATIONS (soft, capacity-aware):")
             if self.optional_asset_recommendations:
@@ -472,6 +635,13 @@ class StageVerifyReport(BaseModel):
     vlm_scoring_performed: bool = False
     hard_check_report: dict = Field(default_factory=dict)
     runtime_repair_events: list[str] = Field(default_factory=list)
+    required_objects: list[str] = Field(default_factory=list)
+    required_satisfied_objects: list[str] = Field(default_factory=list)
+    required_missing_objects: list[str] = Field(default_factory=list)
+    required_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
+    requirement_status: Literal[
+        "satisfied", "partial", "unsatisfied", "not_applicable", "unknown"
+    ] = "unknown"
 
 
 class FullVerifyReport(BaseModel):
@@ -497,6 +667,11 @@ class FullVerifyReport(BaseModel):
     degraded_reasons: list[str] = Field(default_factory=list)
     measured_metrics: dict[str, bool] = Field(default_factory=dict)
     metric_sources: dict[str, str] = Field(default_factory=dict)
+    generation_status: Literal["complete", "partial", "failed", "unknown"] = "unknown"
+    requirement_status: Literal[
+        "satisfied", "partial", "unsatisfied", "not_applicable", "unknown"
+    ] = "unknown"
+    quality_status: Literal["passed", "degraded", "failed", "unknown"] = "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -535,6 +710,18 @@ class StageExecutionEvidence(BaseModel):
     optional_assets_allowed: bool = True
     required_objects: list[str] = Field(default_factory=list)
     optional_asset_recommendations: list[dict[str, Any]] = Field(default_factory=list)
+    required_first_instruction_applicable: bool = False
+    required_first_instruction_delivered: bool = False
+    optional_autonomy_preserved: bool = False
+    required_satisfied_objects: list[str] = Field(default_factory=list)
+    required_missing_objects: list[str] = Field(default_factory=list)
+    required_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
+    requirement_status: Literal[
+        "satisfied", "partial", "unsatisfied", "not_applicable", "unknown"
+    ] = "unknown"
+    stage_outcome: Literal[
+        "running", "passed", "quality_issue", "verification_error", "runtime_failed"
+    ] = "running"
     stage_agent_invoked: bool = False
     retrieved_memory_ids: list[str] = Field(default_factory=list)
     retrieved_skill_names: list[str] = Field(default_factory=list)

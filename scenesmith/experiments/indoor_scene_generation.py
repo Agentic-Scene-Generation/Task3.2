@@ -453,8 +453,11 @@ def _write_scene_status(
     error: str | None = None,
     provenance: dict[str, Any] | None = None,
     failure: dict[str, Any] | None = None,
+    started_at: str | None = None,
 ) -> None:
     """Atomically persist the lifecycle state of one scene task."""
+    from scenesmith.scene_expert.attempt_timing import scene_attempt_start
+
     scene_dir = output_dir / f"scene_{scene_id:03d}"
     scene_dir.mkdir(parents=True, exist_ok=True)
     status_path = scene_dir / _SCENE_STATUS_FILENAME
@@ -467,6 +470,20 @@ def _write_scene_status(
         "pid": os.getpid(),
         "updated_at": datetime.now().astimezone().isoformat(),
     }
+    # Reuse replaces scene_dir after the running status is written. Keep the
+    # worker start outside that directory, including failures before hooks build.
+    attempt_start = scene_attempt_start(
+        output_dir=output_dir,
+        scene_id=scene_id,
+        attempt=attempt,
+        prompt=prompt,
+        run_id=run_id,
+        started_at=(
+            (started_at or payload["updated_at"]) if status == "running" else None
+        ),
+    )
+    if attempt_start:
+        payload["started_at"] = attempt_start
     if run_id:
         payload["run_id"] = run_id
     if error:
@@ -3242,6 +3259,9 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
         faulthandler.enable()
 
         scene_generation_start_time = time.time()
+        scene_started_at = (
+            datetime.fromtimestamp(scene_generation_start_time).astimezone().isoformat()
+        )
 
         # Create scene directory.
         scene_dir = output_dir / f"scene_{scene_id:03d}"
@@ -3255,6 +3275,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             status="running",
             attempt=attempt,
             run_id=experiment_run_id,
+            started_at=scene_started_at,
         )
 
         # Always create log file.
@@ -3362,6 +3383,7 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
                         scene_id=scene_id,
                         output_dir=output_dir,
                         cfg_dict=cfg_dict,
+                        scene_started_at=scene_started_at,
                     )
                     floor_plan_prompt = prompt
                     if scene_expert_hooks and start_stage == "floor_plan":
@@ -3636,7 +3658,10 @@ class IndoorSceneGenerationExperiment(BaseExperiment):
             except Exception as e:
                 if scene_expert_hooks:
                     try:
-                        scene_expert_hooks.finalize_failure(error=str(e))
+                        scene_expert_hooks.finalize_failure(
+                            error=str(e),
+                            error_type=type(e).__name__,
+                        )
                     except Exception as hook_error:
                         # Additive diagnostics must never replace main's original
                         # exception or change its success/failure semantics.

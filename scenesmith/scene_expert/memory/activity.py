@@ -7,10 +7,13 @@ import os
 import re
 import time
 
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from scenesmith.scene_expert.memory.placement import collect_placement_episodes
 from scenesmith.scene_expert.memory.schemas import MemoryUtilityObservation
+from scenesmith.scene_expert.memory.usage import collect_memory_usage
 from scenesmith.scene_expert.schemas import (
     MemoryInjectionBundle,
     MemoryPack,
@@ -63,7 +66,14 @@ class MemoryActivityLogger:
         execution_evidence: StageExecutionEvidence,
     ) -> None:
         """Record every retrieval choice and the exact downstream injection."""
-        stage_entry = self._payload["stages"].setdefault(stage, {})
+        previous = self._payload["stages"].get(stage)
+        if previous:
+            self._payload.setdefault("stage_attempt_history", []).append(
+                {"stage": stage, "entry": deepcopy(previous)}
+            )
+        stage_entry = self._payload["stages"][stage] = {
+            "prepared_at_epoch": time.time()
+        }
         stage_entry.update(
             {
                 "retrieval": memory_pack.model_dump(mode="json"),
@@ -86,6 +96,8 @@ class MemoryActivityLogger:
         verify_report: StageVerifyReport | None,
         repair_actions: list[Any],
         scene_state_path: str,
+        current_scene_state: dict | None = None,
+        capture_placement: bool = True,
     ) -> list[MemoryUtilityObservation]:
         """Attach the authoritative critic result to the selected memory."""
         stage_entry = self._payload["stages"].setdefault(stage, {})
@@ -146,6 +158,8 @@ class MemoryActivityLogger:
         stage_entry.update(
             {
                 "scene_state_path": scene_state_path,
+                "post_scene_state": current_scene_state or {},
+                "finished_at_epoch": time.time(),
                 "verify_report": (
                     verify_report.model_dump(mode="json")
                     if verify_report is not None
@@ -164,8 +178,81 @@ class MemoryActivityLogger:
                 ],
             }
         )
+        # Reconcile at a completed request boundary, not from a pre-stage marker.
+        capture_started = time.perf_counter()
+        try:
+            stage_entry["placement_episodes"] = (
+                collect_placement_episodes(self._output_dir.parent, stage, stage_entry)
+                if capture_placement
+                else {"episodes": [], "warnings": [], "disabled": True}
+            )
+        except Exception as exc:
+            # Observation failure cannot change native generation or fabricate data.
+            stage_entry["placement_episodes"] = {
+                "episodes": [],
+                "warnings": [f"capture_failed:{type(exc).__name__}"],
+            }
+        stage_entry["placement_capture_elapsed_sec"] = (
+            time.perf_counter() - capture_started
+        )
+        usage = collect_memory_usage(
+            self._output_dir.parent, self._payload, stage_filter=stage
+        )
+        stage_entry["decision_usage"] = usage
+        by_identity = {
+            (row["memory_type"], row["memory_id"]): row for row in usage["items"]
+        }
+        if injection.get("schema_version") == "memory-context.v1":
+            for observation in observations:
+                row = by_identity.get(
+                    (observation.memory_type, observation.memory_id), {}
+                )
+                observation.injected = bool(row.get("delivered"))
+                observation.prompt_delivered = observation.injected
+                observation.planner_selected = bool(row.get("accepted"))
+                observation.action_observed = row.get("action_observed")
+                observation.target_verified = row.get("target_verified")
+                observation.decision_evidence_refs = [
+                    request["payload_ref"] for request in row.get("requests", [])
+                ]
+                observation.outcome = "unknown"
+                observation.outcome_basis = "no_verified_related_action"
+                if row.get("action_observed") is True:
+                    observation.outcome = "neutral"
+                    observation.outcome_basis = (
+                        "observed_action_not_attributable_utility"
+                    )
+            stage_entry["utility_observations"] = [
+                row.model_dump(mode="json") for row in observations
+            ]
         self._save()
         return observations
+
+    def placement_experience_catalog(self) -> dict[str, Any]:
+        """Export exact episode content, not filesystem references or summaries."""
+        entries = [
+            row["entry"] for row in self._payload.get("stage_attempt_history", [])
+        ]
+        entries += list(self._payload["stages"].values())
+        return {
+            "schema_version": "placement-experience-catalog.v1",
+            "episodes": [
+                episode
+                for entry in entries
+                for episode in (entry.get("placement_episodes") or {}).get(
+                    "episodes", []
+                )
+            ],
+            "warnings": sorted(
+                {
+                    warning
+                    for entry in entries
+                    for warning in (entry.get("placement_episodes") or {}).get(
+                        "warnings", []
+                    )
+                }
+            ),
+        }
 
     @staticmethod
     def _classify_outcome(
@@ -248,6 +335,14 @@ class MemoryActivityLogger:
         """Record candidate generation and the final promotion decision."""
         self._payload["writer"] = {
             "status": "failed" if error else "completed",
+            "model_status": (
+                "succeeded" if writer_trace.get("success") else "failed_or_not_run"
+            ),
+            "persistence_status": (
+                "not_confirmed"
+                if error or apply_summary is None
+                else "changed" if apply_summary.get("changed") else "no_change"
+            ),
             "proposed_ops": [
                 op.model_dump(mode="json") if hasattr(op, "model_dump") else op
                 for op in proposed_ops
@@ -318,6 +413,15 @@ class MemoryActivityLogger:
             retrieval = entry.get("retrieval") or {}
             injection = entry.get("injection") or {}
             report = entry.get("verify_report") or {}
+            rejected = [
+                item
+                for item in retrieval.get("selection_decisions", []) or []
+                if isinstance(item, dict) and item.get("decision") == "rejected"
+            ]
+            rejected_summary = "; ".join(
+                f"{item.get('memory_id', '')} ({', '.join(item.get('reasons') or [])})"
+                for item in rejected
+            )
             lines.extend(
                 [
                     f"## {stage}",
@@ -329,6 +433,12 @@ class MemoryActivityLogger:
                     "- Selected IDs: `"
                     + ", ".join(injection.get("selected_memory_ids", []))
                     + "`",
+                    "- Injection policy: `"
+                    + json.dumps(
+                        retrieval.get("selection_policy", {}), ensure_ascii=False
+                    )
+                    + "`",
+                    "- Rejected candidates: `" + (rejected_summary or "none") + "`",
                     "- Injection hash: `"
                     + str(
                         (entry.get("execution_evidence") or {}).get(

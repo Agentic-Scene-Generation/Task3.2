@@ -28,6 +28,18 @@ stage_policy:
   ceiling_mounted: "${oc.env:SCENEEXPERT_STAGE_POLICY_CEILING_MOUNTED,''}"
   manipuland: "${oc.env:SCENEEXPERT_STAGE_POLICY_MANIPULAND,''}"
 
+# Strict paired-evaluation contract. Leave these fields empty/false for normal
+# generation. The canonical Full Memory pair launcher sets all four fields and
+# the factory then opens the existing memory bank read-only.
+evaluation:
+  pair_id: "${oc.env:SCENEEXPERT_EVAL_PAIR_ID,''}"
+  controlled_dimension: "${oc.env:SCENEEXPERT_EVAL_DIMENSION,''}"
+  arm: "${oc.env:SCENEEXPERT_EVAL_ARM,''}"
+  require_frozen_memory: ${oc.env:SCENEEXPERT_EVAL_REQUIRE_FROZEN_MEMORY,false}
+  # Pair-scoped, cross-arm cache for the exact TaskCompiler and critic intent
+  # inputs. The controlled pair launcher sets this automatically.
+  compiled_inputs_dir: "${oc.env:SCENEEXPERT_EVAL_COMPILED_INPUTS_DIR,''}"
+
 # Independent component gates. ``null`` inherits the legacy mode preset; an
 # explicit true/false overrides it. This preserves existing experiment names
 # while allowing strict single-variable ablations.
@@ -96,8 +108,10 @@ structured_llm:
       response_format: "json_schema"
     global_planner:
       thinking_mode: "none"
-      max_tokens: 1024
-      retry_max_tokens: 2048
+      # Same Planner call now includes explicit per-memory adaptations. These
+      # are output-token ceilings, not extra calls or Harness repair budgets.
+      max_tokens: 2048
+      retry_max_tokens: 4096
       timeout_seconds: 60
       temperature: 0.1
       max_attempts: 2
@@ -154,9 +168,29 @@ memory:
     # Prevent an identical prompt from retrieving its own earlier output. This
     # makes 4c evidence genuinely cross-task rather than replay leakage.
     exclude_same_task: ${oc.env:SCENEEXPERT_MEMORY_EXCLUDE_SAME_TASK,true}
+  # Retrieval may recall several candidates for audit, but only this bounded,
+  # cross-bank set can reach GlobalPlanner or a native designer prompt.
+  injection_budget:
+    max_total_records: ${oc.env:SCENEEXPERT_MEMORY_MAX_TOTAL_RECORDS,3}
+    max_success_cases: ${oc.env:SCENEEXPERT_MEMORY_INJECT_MAX_SUCCESS,1}
+    max_failure_cases: ${oc.env:SCENEEXPERT_MEMORY_INJECT_MAX_FAILURE,1}
+    max_skills: ${oc.env:SCENEEXPERT_MEMORY_INJECT_MAX_SKILLS,1}
+    max_total_chars: ${oc.env:SCENEEXPERT_MEMORY_MAX_INJECTION_CHARS,8000}
+    require_verified_failures: ${oc.env:SCENEEXPERT_MEMORY_REQUIRE_VERIFIED_FAILURES,true}
+    require_failure_grounding: ${oc.env:SCENEEXPERT_MEMORY_REQUIRE_FAILURE_GROUNDING,true}
   writer:
     # Success memory requires both final/stage pass evidence and this score.
     success_min_overall_score: ${oc.env:SCENEEXPERT_MEMORY_SUCCESS_MIN_SCORE,0.75}
+    # Stage-local Skill candidates remain non-retrievable until this many
+    # distinct prompt/task identities provide compatible positive evidence.
+    skill_min_independent_support: ${oc.env:SCENEEXPERT_SKILL_MIN_INDEPENDENT_SUPPORT,2}
+    # Deterministically cover verified passing stages when the MemoryWriter LLM
+    # omits a Skill. These records remain candidates until independently
+    # supported by another task; planner/retrieved-memory prose is never used
+    # as bootstrap evidence.
+    skill_bootstrap_enabled: ${oc.env:SCENEEXPERT_SKILL_BOOTSTRAP_ENABLED,true}
+    skill_bootstrap_max_candidates_per_scene: ${oc.env:SCENEEXPERT_SKILL_BOOTSTRAP_MAX_CANDIDATES_PER_SCENE,5}
+    skill_bootstrap_min_procedure_steps: ${oc.env:SCENEEXPERT_SKILL_BOOTSTRAP_MIN_PROCEDURE_STEPS,2}
   embedding:
     model_id: "${oc.env:SCENEEXPERT_MEMORY_EMBEDDING_MODEL_ID,BAAI/bge-m3}"
     # Actual local loading path. Keep BGE-M3 directly under models_dir/bge-m3.

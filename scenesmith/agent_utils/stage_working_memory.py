@@ -445,9 +445,14 @@ class StageWorkingMemory:
             self.scene_root_dir / "scene_expert" / "context_bundles" / stage
         )
         public_dir = os.environ.get("SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR", "")
+        public_bank_read_only = os.environ.get(
+            "SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY", ""
+        ).strip().casefold() in {"1", "true", "yes", "on"}
         self.public_memory_dir = Path(public_dir) if public_dir else None
         self.public_events_path = (
-            self.public_memory_dir / "events.jsonl" if self.public_memory_dir else None
+            self.public_memory_dir / "events.jsonl"
+            if self.public_memory_dir and not public_bank_read_only
+            else None
         )
         self.required_counts: dict[str, int] = {}
         if enabled:

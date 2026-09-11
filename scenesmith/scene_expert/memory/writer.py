@@ -2,8 +2,10 @@
 
 The LLM only proposes compact lessons. Deterministic code owns identity, task
 metadata, critic evidence, quality gates, provenance, and promotion into the
-active memory bank. A failed or empty LLM response is a no-write outcome; it
-can never manufacture a retrievable fallback record.
+active memory bank. A failed or empty LLM response can never manufacture a
+retrievable fallback record. Deterministic code may still persist a
+non-retrievable Skill candidate when an independently executed native stage has
+an authoritative pass and a grounded task contract.
 """
 
 from __future__ import annotations
@@ -18,12 +20,31 @@ import time
 from pathlib import Path
 from typing import Any
 
+from scenesmith.scene_expert.memory.evidence import resolve_constraint_evidence
+from scenesmith.scene_expert.memory.placement import (
+    inventory_only,
+    object_role,
+    valid_episode,
+)
+from scenesmith.scene_expert.memory.placement_methods import (
+    bind_method_steps,
+    critic_catalog,
+    has_placement_action,
+    methods_valid,
+)
+from scenesmith.scene_expert.memory.placement_outcomes import (
+    episode_catalog,
+    success_scope,
+    relation_method_supported,
+)
 from scenesmith.scene_expert.memory.schemas import (
     FailureCase,
     FailureMemoryCandidate,
     MemorySourceProvenance,
     MemoryUpdateOp,
     MemoryWriterResponse,
+    PlacementEpisode,
+    PlacementExperience,
     Skill,
     SkillApplicability,
     SkillMemoryCandidate,
@@ -31,11 +52,19 @@ from scenesmith.scene_expert.memory.schemas import (
     SuccessCase,
     SuccessMemoryCandidate,
 )
+from scenesmith.scene_expert.memory.skill_bootstrap import bootstrap_grounded_skills
+from scenesmith.scene_expert.memory.skill_identity import build_skill_semantic_signature
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
+from scenesmith.scene_expert.memory.writer_prompt import (
+    WriterPromptBudgetError,
+    build_writer_prompt,
+    byte_size,
+)
 from scenesmith.scene_expert.schemas import FullVerifyReport
 from scenesmith.scene_expert.structured_llm import (
     SceneExpertStructuredLLMClient,
     StructuredLLMProfile,
+    StructuredLLMResult,
 )
 
 console_logger = logging.getLogger(__name__)
@@ -83,12 +112,59 @@ Rules:
 - stage must be one of floor_plan, furniture, wall_mounted,
   ceiling_mounted, or manipuland.
 - Do not invent IDs, scores, object coordinates, task metadata, or provenance.
-- A success lesson must describe what transferred well, not merely that a stage passed.
+- A success lesson describes an observed method, not proven transfer benefit.
+- A failed or degraded final scene may still contain a reusable success from an
+  earlier stage, but propose it only when that exact stage has an authoritative
+  passing verify_report. It will be stored as stage-local, never scene-level.
+- Exception for success cases ONLY: a failed stage's explicit passing native pair
+  relation may support a relation-local method. Name that same pair and relation
+  in the actual placement action, use pair_observation if no metric corresponds,
+  and preserve the failed stage. Unrelated passing context cannot sponsor advice.
+  A conflicting failure on that pair blocks success. Skill rules remain unchanged.
 - A failure lesson is allowed only when the trace shows a verified repair or a
   deterministic/repeatable hard failure. Never label visual opinion as deterministic.
 - A skill must contain a reusable procedure with at least two concrete steps.
+- A failed final scene may still yield a Skill candidate only from an exact
+  stage whose authoritative verify_report passed. Never propose a Skill from
+  the failed stage itself. Deterministic code decides candidate versus active.
 - Prefer empty arrays with a clear noop_reason over weak, duplicate, or speculative memory.
 - Keep each lesson concise and useful for a different scene with similar requirements.
+- Return at most two candidates total to leave enough output space for complete JSON.
+- When placement_experience_catalog is supplied, each success/failure MUST select
+  exact episode_ids from that catalog through method_steps and supply
+  applicability. An empty catalog means no new spatial success/failure, NOT
+  permission to restate the task. Required inventories remain metadata only.
+- Explain HOW to place/adjust relative to an anchor, not merely WHAT is required.
+  Include overlooked geometry, order-of-operations or a supported failure pattern.
+  A failure requires an exact failing native check for the selected object pair.
+- Treat relative offsets/yaws/AABB separation as observed source measurements,
+  never semantic front, walkable clearance, optimal values or universal thresholds.
+  Do not claim a repair worked: these final-stage episodes do not prove that.
+  Python binds observations; do not invent or rewrite measurements/evidence.
+- Optional assets and all stages may yield lessons when the catalog supports them.
+- For spatial candidates, return method_steps (1-4 substantive steps), each with instruction,
+  episode_ids and critic_refs. Bind EACH step to its own exact visible sources.
+  The union can span multiple pairs: bed-wall and bed-nightstand are distinct.
+  Root episode_ids/procedure may be empty; code derives the canonical procedure
+  and complete source union from method_steps. Do not put IDs in successful_pattern.
+- For each measured pair supply relations: episode_id, subject_id, anchor_id,
+  metric (pair_observation, aabb_separation_m, anchor_local_offset_m,
+  relative_yaw_deg, or bbox_center_distance_m). IDs must match that exact episode.
+  Fixture-fixture spacing needs TWO distinct fixtures, never fixture-wall pairs.
+  Center distance is not AABB separation, navigable clearance or light overlap.
+  If only critic text supports a step, use critic_refs, empty episode_ids/relations;
+  root episode_ids may supply same-stage context only; Python can otherwise bind
+  visible same-snapshot stage context from the cited report. Do not add filler steps.
+- Instructions describe HOW to adapt, not fixed targets. Do not write numeric
+  constants, source object IDs, absolute source poses or guarantees in instructions.
+  Python preserves exact measurements as source observations; cite critic_refs
+  for opinions and suggestions. Critic wording is not a universal physical law.
+  All methods remain transfer hypotheses until tested in a different scene.
+- Example step (replace placeholders with exact visible IDs):
+  {"instruction":"Inspect the bed footprint and recompute its gap to the wall.",
+   "episode_ids":["<bed-wall episode>"],"critic_refs":[]}
+  A lighting step may cite the exact reading-zone critic paragraph; never claim
+  a fixed light spacing guarantees non-overlapping light pools in other rooms.
 """
 
 
@@ -120,12 +196,46 @@ class MemoryWriter:
         timeout_seconds: float = 90.0,
         temperature: float = 0.1,
         success_min_overall_score: float = SUCCESS_MEMORY_MIN_OVERALL_SCORE,
+        skill_min_independent_support: int = 2,
+        skill_bootstrap_enabled: bool = True,
+        skill_bootstrap_max_candidates_per_scene: int = 5,
+        skill_bootstrap_min_procedure_steps: int = 2,
         debug_dir: str | Path | None = None,
         llm_client: SceneExpertStructuredLLMClient | None = None,
     ) -> None:
         self._model = model
         self._debug_dir = Path(debug_dir) if debug_dir else None
         self._success_min_overall_score = float(success_min_overall_score)
+        self._skill_min_independent_support = max(
+            2,
+            int(
+                os.environ.get(
+                    "SCENEEXPERT_SKILL_MIN_INDEPENDENT_SUPPORT",
+                    skill_min_independent_support,
+                )
+            ),
+        )
+        self._skill_bootstrap_enabled = self._env_bool(
+            "SCENEEXPERT_SKILL_BOOTSTRAP_ENABLED", skill_bootstrap_enabled
+        )
+        self._skill_bootstrap_max_candidates_per_scene = max(
+            0,
+            int(
+                os.environ.get(
+                    "SCENEEXPERT_SKILL_BOOTSTRAP_MAX_CANDIDATES_PER_SCENE",
+                    skill_bootstrap_max_candidates_per_scene,
+                )
+            ),
+        )
+        self._skill_bootstrap_min_procedure_steps = max(
+            2,
+            int(
+                os.environ.get(
+                    "SCENEEXPERT_SKILL_BOOTSTRAP_MIN_PROCEDURE_STEPS",
+                    skill_bootstrap_min_procedure_steps,
+                )
+            ),
+        )
         max_tokens = int(
             os.environ.get("SCENEEXPERT_MEMORY_WRITER_MAX_TOKENS", max_tokens)
         )
@@ -148,6 +258,14 @@ class MemoryWriter:
             max_attempts=2,
             response_format="json_schema",
         )
+        self._context_tokens = int(
+            os.environ.get("SCENEEXPERT_MEMORY_WRITER_CONTEXT_TOKENS", 65536)
+        )
+        self._max_input_bytes = int(
+            os.environ.get("SCENEEXPERT_MEMORY_WRITER_INPUT_MAX_BYTES", 49152)
+        )
+        if min(self._context_tokens, self._max_input_bytes) <= 0:
+            raise ValueError("MemoryWriter context and input limits must be positive")
         self._llm_client = llm_client or SceneExpertStructuredLLMClient(
             model=model,
             api_base_url=api_base_url,
@@ -158,6 +276,18 @@ class MemoryWriter:
             "source": "not_run",
             "degraded": False,
             "attempt_count": 0,
+            "persisted_count": 0,
+            "llm_skill_candidate_count": 0,
+            "bootstrap_skill_eligible_stage_count": 0,
+            "bootstrap_skill_candidate_count": 0,
+            "bootstrap_skill_persisted_candidate_count": 0,
+            "bootstrap_skill_rejected_count": 0,
+            "bootstrap_skill_decisions": [],
+            "skill_persisted_candidate_count": 0,
+            "skill_promoted_active_count": 0,
+            "skill_rejected_count": 0,
+            "skill_rejection_reasons": {},
+            "skill_decisions": [],
         }
 
     def write(
@@ -174,85 +304,235 @@ class MemoryWriter:
         identity. ``trace_summary`` remains for human context and compatibility.
         """
         evidence = dict(evidence_payload or {})
-        user_message = self._build_user_message(
-            trace_summary=trace_summary,
-            full_report=full_report,
-            related_old_memory=related_old_memory,
-            evidence_payload=evidence,
-        )
-        result = self._llm_client.complete(
-            role="memory_writer",
-            stage="full_scene",
-            event="write_long_term_memory",
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            response_model=MemoryWriterResponse,
-            profile=self._profile,
-        )
-        self.last_trace = result.status_dict()
-
-        if not result.success or result.value is None:
-            self.last_trace.update(
+        self._prompt_attempts: list[dict] = []
+        self._visible_episode_ids: set[str] | None = None
+        # Save the complete source before any model request, including failure.
+        if self._debug_dir is not None:
+            self._debug_dir.mkdir(parents=True, exist_ok=True)
+            self._atomic_write_json(
+                self._debug_dir / "memory_writer_input.json",
                 {
-                    "structured_call_source": self.last_trace.get("source", ""),
-                    "source": "no_write",
-                    "write_status": "model_failure_no_write",
-                    "promoted_count": 0,
-                    "fallback_written": False,
-                }
+                    "schema_version": "memory-writer-input.v1",
+                    "trace_summary": trace_summary,
+                    "evidence": evidence,
+                    "full_report": full_report.model_dump(),
+                    "related_old_memory": related_old_memory,
+                },
             )
-            self._save_debug_payload(
-                status="model_failure_no_write",
-                result_status=self.last_trace,
+        self._active_user_budget = self._user_budget(self._context_tokens)
+
+        def messages() -> list[dict[str, Any]]:
+            return [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": self._build_user_message(
+                        trace_summary=trace_summary,
+                        full_report=full_report,
+                        related_old_memory=related_old_memory,
+                        evidence_payload=evidence,
+                    ),
+                },
+            ]
+
+        def reduce_context(previous: list[dict], error: str) -> list[dict] | None:
+            # Read a server's per-slot limit, not its advertised total capacity.
+            match = re.search(
+                r"(?:available context size\s*\(|[\"']n_ctx[\"']\s*:\s*|maximum context length is\s*)(\d+)",
+                error,
+            )
+            limit = (
+                self._user_budget(int(match[1])) if match else self._active_user_budget
+            )
+            previous_bytes = len(str(previous[-1].get("content", "")).encode("utf-8"))
+            self._active_user_budget = min(limit, previous_bytes // 2)
+            try:
+                return messages()
+            except WriterPromptBudgetError:
+                return None
+
+        try:
+            result = self._llm_client.complete(
+                role="memory_writer",
+                stage="full_scene",
+                event="write_long_term_memory",
+                messages=messages(),
+                response_model=MemoryWriterResponse,
+                profile=self._profile,
+                context_reducer=reduce_context,
+            )
+        except WriterPromptBudgetError as exc:
+            result = StructuredLLMResult(
+                final_error_kind="context_budget", final_error=str(exc)
+            )
+        self.last_trace = result.status_dict()
+        self.last_trace["prompt_projection_attempts"] = self._prompt_attempts
+        self.last_trace.update(
+            {
+                "llm_skill_candidate_count": 0,
+                "bootstrap_skill_eligible_stage_count": 0,
+                "bootstrap_skill_candidate_count": 0,
+                "bootstrap_skill_persisted_candidate_count": 0,
+                "bootstrap_skill_rejected_count": 0,
+                "bootstrap_skill_decisions": [],
+                "skill_persisted_candidate_count": 0,
+                "skill_promoted_active_count": 0,
+                "skill_rejected_count": 0,
+                "skill_rejection_reasons": {},
+                "skill_decisions": [],
+                "persisted_count": 0,
+            }
+        )
+
+        response = result.value if result.success and result.value is not None else None
+        llm_candidate_ops = (
+            self._response_to_ops(
+                response=response,
                 trace_summary=trace_summary,
                 full_report=full_report,
                 evidence_payload=evidence,
-                response=None,
-                result_ops=[],
             )
-            console_logger.warning(
-                "MemoryWriter structured output failed after %d attempts; "
-                "the active memory bank was not modified: %s",
-                len(result.attempts),
-                result.final_error or result.final_error_kind,
-            )
-            return []
-
-        candidate_ops = self._response_to_ops(
-            response=result.value,
+            if response is not None
+            else []
+        )
+        bootstrap_ops, bootstrap_decisions = self._bootstrap_skill_ops(
             trace_summary=trace_summary,
             full_report=full_report,
             evidence_payload=evidence,
         )
+        candidate_ops = self._dedupe_candidate_ops([*llm_candidate_ops, *bootstrap_ops])
         promoted_ops = self._gate_and_enrich_ops(
             candidate_ops,
             full_report,
             evidence_payload=evidence,
         )
         mutating_ops = [op for op in promoted_ops if op.op in {"ADD", "UPDATE"}]
-        status = "promoted" if mutating_ops else "no_valid_candidates"
+        active_promotion_ops = [
+            op
+            for op in mutating_ops
+            if op.memory_type != "skill" or str(op.content.get("status")) == "active"
+        ]
+        skill_decisions = list(getattr(self, "_last_skill_decisions", []))
+        rejection_reasons: dict[str, int] = {}
+        for decision in skill_decisions:
+            if decision.get("decision") != "rejected":
+                continue
+            for reason in decision.get("reasons", []) or []:
+                reason_text = str(reason)
+                rejection_reasons[reason_text] = (
+                    int(rejection_reasons.get(reason_text, 0)) + 1
+                )
+        structured_failure = response is None
+        if structured_failure and not mutating_ops:
+            status = "model_failure_no_write"
+        else:
+            status = (
+                "promoted"
+                if active_promotion_ops
+                else "persisted_candidate" if mutating_ops else "no_valid_candidates"
+            )
+        bootstrap_persisted = sum(
+            decision.get("decision") == "persisted_candidate"
+            and decision.get("source") == "deterministic"
+            for decision in skill_decisions
+        )
+        bootstrap_rejected = sum(
+            decision.get("decision") == "rejected"
+            and decision.get("source") == "deterministic"
+            for decision in skill_decisions
+        )
+        structured_call_source = self.last_trace.get("source", "")
         self.last_trace.update(
             {
                 "write_status": status,
                 "candidate_count": len(candidate_ops),
-                "promoted_count": len(mutating_ops),
-                "noop_reason": result.value.noop_reason,
+                "generated_candidate_count": (
+                    len(response.success_cases)
+                    + len(response.failure_cases)
+                    + len(response.skills)
+                    if response is not None
+                    else 0
+                ),
+                "proposed_mutation_count": len(mutating_ops),
+                "persistence_confirmed": False,
+                "count_semantics": "writer counts are proposals; store_apply is authoritative",
+                "persisted_count": len(mutating_ops),
+                "promoted_count": len(active_promotion_ops),
+                "candidate_counts": self._op_counts(candidate_ops),
+                "persisted_counts": self._op_counts(mutating_ops),
+                "proposed_counts": self._op_counts(mutating_ops),
+                "promoted_counts": self._op_counts(active_promotion_ops),
+                "noop_reason": (
+                    response.noop_reason
+                    if response is not None
+                    else str(result.final_error or result.final_error_kind or "")
+                ),
                 "fallback_written": False,
+                "llm_skill_candidate_count": (
+                    len(response.skills) if response is not None else 0
+                ),
+                "bootstrap_skill_eligible_stage_count": sum(
+                    1
+                    for stage in {
+                        str(decision.get("stage") or "")
+                        for decision in bootstrap_decisions
+                        if decision.get("decision") == "generated"
+                    }
+                    if stage
+                ),
+                "bootstrap_skill_candidate_count": sum(
+                    op.memory_type == "skill"
+                    and str(op.content.get("source") or "") == "deterministic"
+                    for op in candidate_ops
+                ),
+                "bootstrap_skill_persisted_candidate_count": bootstrap_persisted,
+                "bootstrap_skill_rejected_count": bootstrap_rejected,
+                "bootstrap_skill_decisions": bootstrap_decisions,
+                "skill_persisted_candidate_count": sum(
+                    decision.get("decision") == "persisted_candidate"
+                    for decision in skill_decisions
+                ),
+                "skill_promoted_active_count": sum(
+                    decision.get("decision") == "promoted_active"
+                    for decision in skill_decisions
+                ),
+                "skill_rejected_count": sum(
+                    decision.get("decision") == "rejected"
+                    for decision in skill_decisions
+                ),
+                "skill_rejection_reasons": rejection_reasons,
+                "skill_decisions": skill_decisions,
             }
         )
+        if structured_failure:
+            self.last_trace.update(
+                {
+                    "structured_call_source": structured_call_source,
+                    "source": (
+                        "deterministic_skill_bootstrap" if mutating_ops else "no_write"
+                    ),
+                    "degraded": True,
+                }
+            )
         self._save_debug_payload(
             status=status,
             result_status=self.last_trace,
             trace_summary=trace_summary,
             full_report=full_report,
             evidence_payload=evidence,
-            response=result.value,
+            response=response,
             result_ops=mutating_ops,
         )
+        if structured_failure:
+            console_logger.warning(
+                "MemoryWriter structured output failed after %d attempts; "
+                "proposed %d independently gated deterministic Skill candidate(s): %s",
+                len(result.attempts),
+                bootstrap_persisted,
+                result.final_error or result.final_error_kind,
+            )
         console_logger.info(
-            "MemoryWriter: promoted %d/%d schema-valid candidates; fallback_written=false",
+            "MemoryWriter: proposed %d/%d schema-valid candidates; awaiting store; fallback_written=false",
             len(mutating_ops),
             len(candidate_ops),
         )
@@ -268,13 +548,22 @@ class MemoryWriter:
     ) -> list[MemoryUpdateOp]:
         context = self._canonical_context(evidence_payload, trace_summary)
         ops: list[MemoryUpdateOp] = []
+        self.last_trace["placement_candidate_decisions"] = []
         for candidate in response.success_cases:
             content = self._success_content(candidate, context, full_report)
+            if not self._bind_placement(
+                content, candidate, evidence_payload, failure=False
+            ):
+                continue
             ops.append(
                 MemoryUpdateOp(op="ADD", memory_type="success_case", content=content)
             )
         for candidate in response.failure_cases:
             content = self._failure_content(candidate, context)
+            if not self._bind_placement(
+                content, candidate, evidence_payload, failure=True
+            ):
+                continue
             ops.append(
                 MemoryUpdateOp(op="ADD", memory_type="failure_case", content=content)
             )
@@ -282,6 +571,240 @@ class MemoryWriter:
             content = self._skill_content(candidate, context, full_report)
             ops.append(MemoryUpdateOp(op="ADD", memory_type="skill", content=content))
         return ops
+
+    def _bind_placement(
+        self,
+        content: dict[str, Any],
+        candidate: Any,
+        evidence: dict[str, Any],
+        *,
+        failure: bool,
+    ) -> bool:
+        """Atomically bind a proposed method to exact observed episodes.
+
+        Legacy callers retain their old API. New runtime catalogs require explicit
+        evidence; missing or edited IDs cannot produce active fallback memories.
+        """
+        if "placement_experience_catalog" not in evidence:
+            return True
+        catalog = evidence["placement_experience_catalog"] or {}
+        by_id: dict[str, PlacementEpisode] = {}
+        for raw in catalog.get("episodes", []):
+            try:
+                episode = PlacementEpisode.model_validate(raw)
+            except (ValueError, TypeError):
+                continue
+            if valid_episode(episode):
+                by_id[episode.episode_id] = episode
+        quotes = {q.evidence_id: q for q in critic_catalog(evidence)}
+        steps, step_decisions = bind_method_steps(
+            candidate,
+            by_id,
+            quotes,
+            visible_episodes=getattr(self, "_visible_episode_ids", None),
+            visible_quotes=getattr(self, "_visible_critic_ids", None),
+        )
+        self.last_trace.setdefault("placement_method_decisions", []).append(
+            {"stage": candidate.stage, "steps": step_decisions}
+        )
+        ids = list(dict.fromkeys(i for step in steps for i in step.episode_ids))
+        method_ids = set(ids)
+        # A critic-only hypothesis still needs a valid stage-local spatial source.
+        if not ids:
+            ids = candidate.episode_ids or list(
+                dict.fromkeys(
+                    i for step in candidate.method_steps for i in step.episode_ids
+                )
+            )
+        episodes = [by_id[key] for key in ids if key in by_id]
+        refs = list(dict.fromkeys(i for step in steps for i in step.critic_refs))
+        if not ids and refs:
+            # Choose context, never a replacement method pair. The report and
+            # observation must be from the same visible stage/snapshot.
+            states = {quotes[i].state_fingerprint for i in refs}
+            visible_context = getattr(self, "_visible_episode_ids", None)
+            ids = (
+                sorted(
+                    e.episode_id
+                    for e in by_id.values()
+                    if e.stage == candidate.stage
+                    and e.state_fingerprint in states
+                    and (visible_context is None or e.episode_id in visible_context)
+                )[:1]
+                if len(states) == 1
+                else []
+            )
+            episodes = [by_id[i] for i in ids]
+        procedure = [step.instruction for step in steps]
+        reasons = []
+        visible = getattr(self, "_visible_episode_ids", None)
+        if visible is not None and any(eid not in visible for eid in ids):
+            reasons.append("episode_not_in_model_input")
+        if not ids or len(ids) != len(set(ids)) or len(episodes) != len(ids):
+            reasons.append("missing_or_invalid_episode_binding")
+        if (
+            len(
+                {e.state_fingerprint for e in episodes}
+                | {quotes[i].state_fingerprint for i in refs}
+            )
+            > 1
+        ):
+            reasons.append("method_snapshot_mismatch")
+        if any(e.stage != candidate.stage for e in episodes):
+            reasons.append("episode_stage_mismatch")
+        if not procedure:
+            reasons.append("no_supported_method_steps")
+        if not self._clean_list(candidate.applicability):
+            reasons.append("missing_applicability")
+        if inventory_only(procedure):
+            reasons.append("redundant_inventory_restatement")
+        if failure and not any(
+            check["status"] == "verified_fail"
+            for e in episodes
+            if e.episode_id in method_ids
+            for check in e.native_checks
+        ):
+            reasons.append("no_exact_pair_failure_evidence")
+        if not failure and any(
+            check["status"] == "verified_fail"
+            for e in episodes
+            for check in e.native_checks
+        ):
+            reasons.append("selected_pair_has_verified_failure")
+        if not failure and any(
+            success_scope(e, by_id.values()) is None for e in episodes
+        ):
+            reasons.append("selected_episode_has_no_unconflicted_success")
+        if procedure and not has_placement_action(procedure):
+            reasons.append("no_supported_placement_action")
+        experience = PlacementExperience(
+            schema_version="placement-experience.v2",
+            procedure=procedure,
+            applicability=self._clean_list(candidate.applicability),
+            episodes=episodes,
+            method_steps=steps,
+            critic_advice=[quotes[i] for i in refs],
+            source_context_episode_ids=[i for i in ids if i not in method_ids],
+        )
+        relation_local = not failure and any(
+            e.stage_passed is not True for e in episodes
+        )
+        if relation_local and not relation_method_supported(
+            experience, list(by_id.values())
+        ):
+            reasons.append("method_not_supported_by_passing_relation")
+        self.last_trace.setdefault("placement_candidate_decisions", []).append(
+            {
+                "stage": candidate.stage,
+                "episode_ids": ids,
+                "method_episode_ids": sorted(method_ids),
+                "source_context_episode_ids": [i for i in ids if i not in method_ids],
+                "decision": "rejected" if reasons else "bound",
+                "reasons": reasons,
+            }
+        )
+        if reasons:
+            return False
+        if relation_local:
+            experience.limitations.append(
+                "Source stage did not pass. Only the explicitly listed native pair relations passed; "
+                "other relations and the proposed method remain unverified. No stage success or repair improvement is implied."
+            )
+        content["placement_experience"] = experience.model_dump(mode="json")
+        # One canonical method owns all reader/embedding paths. Unbound model
+        # summaries cannot reappear through positive_guidance or legacy hints.
+        if not failure:
+            content["successful_pattern"] = list(procedure)
+            content["positive_guidance"] = list(procedure)
+        else:
+            content["repair_action"] = " ".join(procedure)
+            content["negative_constraint"] = "Transfer hypothesis: " + " ".join(
+                procedure
+            )
+            content["repair_verified"] = False
+        if not failure:
+            # These scores describe the selected attempt, not another entry
+            # for the same stage that happened before a retry.
+            content["scores"] = episodes[0].stage_scores
+        content["spatial_relations"] = []
+        for episode in episodes:
+            if episode.episode_id not in method_ids:
+                continue
+            relation = SpatialRelationMemory(
+                relation_type="observed_relative_pose",
+                subject_role=object_role(episode.subject),
+                target_role=object_role(episode.anchor),
+                evidence_source="scene_geometry",
+                evidence_ref=episode.episode_id,
+                verification_status="inconclusive",
+                confidence=0.5,
+            )
+            relation.claim_hash = relation.current_claim_hash()
+            content["spatial_relations"].append(relation.model_dump(mode="json"))
+        content["evidence_refs"] = sorted(
+            {ref for e in episodes for ref in e.evidence_refs if ref}
+            | {f"writer-critic:{i}" for i in refs}
+        )
+        content["provenance"]["evidence_refs"] = content["evidence_refs"]
+        content["provenance"]["scene_state_path"] = episodes[0].evidence_refs[0]
+        if failure:
+            content["repair_verified"] = False
+            content["is_deterministic"] = True
+            content["scope"] = "object"
+        return True
+
+    def _bootstrap_skill_ops(
+        self,
+        *,
+        trace_summary: str,
+        full_report: FullVerifyReport,
+        evidence_payload: dict[str, Any],
+    ) -> tuple[list[MemoryUpdateOp], list[dict[str, Any]]]:
+        """Build candidate-only Skills for passing stages omitted by the LLM.
+
+        This is not a free-form fallback.  The pure bootstrapper requires proof
+        that the native stage agent ran, an exact-stage main-critic pass, and a
+        grounded task contract.  Store-level independent support is still
+        required before any resulting Skill becomes retrievable.
+        """
+        if not self._skill_bootstrap_enabled:
+            return [], [
+                {
+                    "stage": "*",
+                    "decision": "disabled",
+                    "reasons": ["skill_bootstrap_disabled"],
+                }
+            ]
+        result = bootstrap_grounded_skills(
+            evidence_payload,
+            max_candidates=self._skill_bootstrap_max_candidates_per_scene,
+            min_procedure_steps=self._skill_bootstrap_min_procedure_steps,
+        )
+        context = self._canonical_context(evidence_payload, trace_summary)
+        ops = [
+            MemoryUpdateOp(
+                op="ADD",
+                memory_type="skill",
+                content=self._skill_content(
+                    draft.candidate,
+                    context,
+                    full_report,
+                    source="deterministic",
+                    activation_reason=(
+                        "verified_stage_bootstrap_awaiting_independent_support"
+                    ),
+                    required_objects_override=list(draft.required_objects),
+                    relation_types_override=(
+                        []
+                        if list(draft.relation_types) == ["required_coverage"]
+                        else list(draft.relation_types)
+                    ),
+                    constraint_ids=set(draft.constraint_ids),
+                ),
+            )
+            for draft in result.drafts
+        ]
+        return ops, [dict(item) for item in result.decisions]
 
     def _success_content(
         self,
@@ -292,9 +815,14 @@ class MemoryWriter:
         stage_evidence = self._stage_evidence(context, candidate.stage)
         required_objects = self._required_objects(context["task_spec"], candidate.stage)
         scores = self._stage_scores(stage_evidence)
+        scene_passed = bool(full_report.pass_scene)
+        promotion_scope = "scene" if scene_passed else "stage"
+        stage_quality = self._mean_score(scores)
         now = self._now()
         record = SuccessCase(
             case_id=self._record_id("success", candidate, context),
+            promotion_scope=promotion_scope,
+            source_scene_passed=scene_passed,
             room_type=context["room_type"],
             style=context["style"],
             stage=candidate.stage,
@@ -307,9 +835,14 @@ class MemoryWriter:
             trace_ref=context["trace_id"],
             required_objects=required_objects,
             functional_zones=context["functional_zones"],
-            scene_summary=f"Evidence-backed {candidate.stage} lesson from {context['trace_id']}.",
+            scene_summary=(
+                f"Evidence-backed {promotion_scope}-level {candidate.stage} lesson "
+                f"from {context['trace_id']}."
+            ),
             confidence=self._evidence_confidence(stage_evidence),
-            quality_score=float(full_report.overall_score),
+            quality_score=(
+                float(full_report.overall_score) if scene_passed else stage_quality
+            ),
             created_at=now,
             updated_at=now,
             status="active",
@@ -382,9 +915,55 @@ class MemoryWriter:
         candidate: SkillMemoryCandidate,
         context: dict[str, Any],
         full_report: FullVerifyReport,
+        *,
+        source: str = "llm",
+        activation_reason: str = "awaiting_independent_stage_support",
+        required_objects_override: list[str] | None = None,
+        relation_types_override: list[str] | None = None,
+        constraint_ids: set[str] | None = None,
     ) -> dict[str, Any]:
         stage_evidence = self._stage_evidence(context, candidate.stage)
-        required_objects = self._required_objects(context["task_spec"], candidate.stage)
+        required_objects = (
+            self._clean_list(required_objects_override)
+            if required_objects_override is not None
+            else self._required_objects(context["task_spec"], candidate.stage)
+        )
+        spatial_relations = self._spatial_relations(
+            stage_evidence,
+            constraint_ids=constraint_ids,
+        )
+        if source == "deterministic":
+            spatial_relations = [
+                relation.model_copy(
+                    update={
+                        # Counts/groups are task instances, not reusable Skill
+                        # identity. Keep structural qualifiers and instruct the
+                        # Skill to consume the current task's cardinality.
+                        "cardinality": {
+                            key: value
+                            for key, value in relation.cardinality.items()
+                            if key in {"orientation", "edge_frame"}
+                        },
+                        "template_parameters": sorted(
+                            key
+                            for key in relation.cardinality
+                            if key not in {"orientation", "edge_frame"}
+                        ),
+                    }
+                )
+                for relation in spatial_relations
+            ]
+            spatial_relations = [
+                relation.model_copy(
+                    update={"claim_hash": relation.current_claim_hash()}
+                )
+                for relation in spatial_relations
+            ]
+        relation_types = (
+            self._clean_list(relation_types_override)
+            if relation_types_override is not None
+            else self._unique(relation.relation_type for relation in spatial_relations)
+        )
         now = self._now()
         record = Skill(
             skill_name=candidate.skill_name,
@@ -394,7 +973,9 @@ class MemoryWriter:
             style=context["style"],
             required_objects=required_objects,
             functional_zones=context["functional_zones"],
-            scene_summary=f"Evidence-backed procedure from {context['trace_id']}.",
+            scene_summary=(
+                f"Evidence-backed {source} procedure from {context['trace_id']}."
+            ),
             preconditions=self._clean_list(candidate.preconditions),
             procedure=self._clean_list(candidate.procedure),
             failure_avoidance=self._clean_list(candidate.failure_avoidance),
@@ -405,8 +986,8 @@ class MemoryWriter:
             trace_ref=context["trace_id"],
             created_at=now,
             updated_at=now,
-            status="active",
-            source="llm",
+            status="candidate",
+            source=source,
             source_task_id=context["source_task_id"],
             source_run_id=context["source_run_id"],
             source_task_ids=[context["source_task_id"]],
@@ -415,12 +996,23 @@ class MemoryWriter:
             evidence_refs=self._evidence_refs(context, candidate.stage),
             critic_evidence=self._critic_evidence(stage_evidence),
             provenance=self._provenance(context, candidate.stage),
-            spatial_relations=self._spatial_relations(stage_evidence),
+            spatial_relations=spatial_relations,
             applicability=SkillApplicability(
                 room_types=[context["room_type"]] if context["room_type"] else [],
                 required_object_roles=required_objects,
-                required_relation_types=self._relation_types(stage_evidence),
+                required_relation_types=relation_types,
             ),
+            skill_aliases=[candidate.skill_name],
+            promotion_scope="stage",
+            source_scene_passed=bool(full_report.pass_scene),
+            independent_support_count=1,
+            activation_min_independent_support=max(
+                2, int(getattr(self, "_skill_min_independent_support", 2))
+            ),
+            activation_reason=activation_reason,
+        )
+        record = record.model_copy(
+            update={"semantic_signature": build_skill_semantic_signature(record)}
         )
         return record.model_dump()
 
@@ -431,6 +1023,25 @@ class MemoryWriter:
         evidence_payload: dict[str, Any] | None = None,
     ) -> list[MemoryUpdateOp]:
         """Validate persisted records and enforce deterministic promotion gates."""
+        self._last_skill_decisions: list[dict[str, Any]] = []
+        promotion_decisions = self.last_trace.setdefault(
+            "placement_promotion_decisions", []
+        )
+
+        def record_decision(op: MemoryUpdateOp, decision: str, reason: str) -> None:
+            if not op.content.get("placement_experience"):
+                return
+            promotion_decisions.append(
+                {
+                    "memory_type": op.memory_type,
+                    "stage": op.content.get("stage"),
+                    "record_id": op.content.get("case_id")
+                    or op.content.get("failure_id"),
+                    "decision": decision,
+                    "reason": reason,
+                }
+            )
+
         evidence = dict(evidence_payload or {})
         has_structured_evidence = bool(evidence.get("stages"))
         success_threshold = float(
@@ -447,32 +1058,139 @@ class MemoryWriter:
             if op.memory_type == "success_case":
                 record = self._validate_success(op.content)
                 if record is None:
+                    record_decision(op, "rejected", "schema_invalid")
                     continue
                 stage_evidence = self._stage_evidence(evidence, record.stage)
-                if (
-                    not full_report.pass_scene
-                    or full_report.overall_score < success_threshold
-                    or (
-                        has_structured_evidence
-                        and not self._stage_passed(stage_evidence)
+                stage_passed = self._stage_passed(stage_evidence)
+                relation_local_success = False
+                if record.placement_experience is not None:
+                    if not methods_valid(record.placement_experience):
+                        record_decision(op, "rejected", "invalid_method_contract")
+                        continue
+                    # A retried stage can have different outcomes in its trace.
+                    # Use the actual selected episode, never the first stage row.
+                    stage_passed = bool(record.placement_experience.episodes) and all(
+                        e.stage_passed is True and valid_episode(e)
+                        for e in record.placement_experience.episodes
                     )
+                    catalog = (
+                        episode_catalog(evidence)
+                        if "placement_experience_catalog" in evidence
+                        else record.placement_experience.episodes
+                    )
+                    eligible = all(
+                        success_scope(e, catalog) is not None
+                        for e in record.placement_experience.episodes
+                    )
+                    relation_local_success = bool(
+                        eligible
+                        and not stage_passed
+                        and relation_method_supported(
+                            record.placement_experience, catalog
+                        )
+                    )
+                    if not eligible:
+                        record_decision(
+                            op,
+                            "rejected",
+                            "selected_episode_has_no_unconflicted_success",
+                        )
+                        continue
+                    if not stage_passed and not relation_local_success:
+                        record_decision(
+                            op, "rejected", "method_not_supported_by_passing_relation"
+                        )
+                        continue
+                scene_success = bool(
+                    full_report.pass_scene
+                    and full_report.overall_score >= success_threshold
+                )
+                stage_local_success = bool(
+                    has_structured_evidence and not scene_success and stage_passed
+                )
+                if (
+                    has_structured_evidence
+                    and not stage_passed
+                    and not relation_local_success
                 ):
+                    record_decision(op, "rejected", "selected_stage_not_verified")
                     console_logger.info(
-                        "MemoryWriter: rejected success %s because final/stage "
-                        "evidence did not pass",
+                        "MemoryWriter: rejected success %s because its exact stage "
+                        "did not pass authoritative verification",
                         record.case_id,
                     )
                     continue
+                if (
+                    not scene_success
+                    and not stage_local_success
+                    and not relation_local_success
+                ):
+                    record_decision(
+                        op, "rejected", "neither_scene_nor_stage_gate_passed"
+                    )
+                    console_logger.info(
+                        "MemoryWriter: rejected success %s because neither the "
+                        "scene gate nor the stage-local degraded gate passed",
+                        record.case_id,
+                    )
+                    continue
+                if relation_local_success:
+                    record = record.model_copy(
+                        update={
+                            "promotion_scope": "relation",
+                            "source_scene_passed": bool(full_report.pass_scene),
+                            "confidence": min(float(record.confidence), 0.65),
+                            "quality_score": self._mean_score(record.scores),
+                            "scene_summary": f"Locally passing {record.stage} relation from a non-passing stage; transfer hypothesis only.",
+                        }
+                    )
+                elif stage_local_success:
+                    record = record.model_copy(
+                        update={
+                            "promotion_scope": "stage",
+                            "source_scene_passed": bool(full_report.pass_scene),
+                            "confidence": min(float(record.confidence), 0.75),
+                            "quality_score": self._mean_score(
+                                record.scores
+                                if record.placement_experience
+                                else self._stage_scores(stage_evidence)
+                            ),
+                        }
+                    )
+                else:
+                    record = record.model_copy(
+                        update={
+                            "promotion_scope": "scene",
+                            "source_scene_passed": True,
+                        }
+                    )
                 record = self._rebuild_embedding(record)
                 filtered.append(op.model_copy(update={"content": record.model_dump()}))
+                record_decision(
+                    op,
+                    "proposed_to_store",
+                    (
+                        "relation_success"
+                        if relation_local_success
+                        else "stage_success" if stage_local_success else "scene_success"
+                    ),
+                )
                 continue
 
             if op.memory_type == "failure_case":
                 record = self._validate_failure(op.content)
                 if record is None:
+                    record_decision(op, "rejected", "schema_invalid")
                     continue
                 stage_evidence = self._stage_evidence(evidence, record.stage)
-                if has_structured_evidence:
+                if record.placement_experience is not None:
+                    repair_verified = False
+                    deterministic = any(
+                        row["status"] == "verified_fail"
+                        for episode in record.placement_experience.episodes
+                        for row in episode.native_checks
+                    )
+                elif has_structured_evidence:
                     repair_verified = self._repair_verified(stage_evidence)
                     deterministic = self._deterministic_failure_in_evidence(
                         stage_evidence
@@ -483,6 +1201,7 @@ class MemoryWriter:
                         record.model_dump()
                     )
                 if not repair_verified and not deterministic:
+                    record_decision(op, "rejected", "no_verified_failure_or_repair")
                     console_logger.info(
                         "MemoryWriter: rejected unverified/non-deterministic failure %s",
                         record.failure_id,
@@ -494,7 +1213,9 @@ class MemoryWriter:
                         "is_deterministic": deterministic,
                         "scope": (
                             "stage"
-                            if deterministic and record.scope == "object"
+                            if deterministic
+                            and record.scope == "object"
+                            and record.placement_experience is None
                             else record.scope
                         ),
                         "confidence": 0.85,
@@ -502,29 +1223,188 @@ class MemoryWriter:
                 )
                 record = self._rebuild_embedding(record)
                 filtered.append(op.model_copy(update={"content": record.model_dump()}))
+                record_decision(op, "proposed_to_store", "verified_failure")
                 continue
 
             if op.memory_type == "skill":
                 record = self._validate_skill(op.content)
                 if record is None:
+                    self._last_skill_decisions.append(
+                        {
+                            "skill_name": str(op.content.get("skill_name") or ""),
+                            "stage": str(op.content.get("stage") or ""),
+                            "source": str(op.content.get("source") or "unknown"),
+                            "decision": "rejected",
+                            "reasons": ["schema_invalid"],
+                        }
+                    )
                     continue
                 stage_evidence = self._stage_evidence(evidence, record.stage)
-                if (
-                    not full_report.pass_scene
-                    or full_report.overall_score < success_threshold
-                    or (
+                stage_report = self._stage_report(stage_evidence)
+                stage_passed = self._stage_passed(stage_evidence)
+                repair_verified = self._repair_verified(stage_evidence)
+                deterministic_failure = self._deterministic_failure_in_evidence(
+                    stage_evidence
+                )
+                execution_evidence = stage_evidence.get("execution_evidence") or {}
+                if not isinstance(execution_evidence, dict):
+                    execution_evidence = {}
+                stage_agent_invoked = bool(
+                    execution_evidence.get("stage_agent_invoked", False)
+                )
+                deterministic_bootstrap = bool(
+                    record.source == "deterministic"
+                    and record.activation_reason.startswith("verified_stage_bootstrap")
+                )
+                procedure_valid = len(self._clean_list(record.procedure)) >= 2
+                active_eligible = bool(
+                    not deterministic_bootstrap
+                    and full_report.pass_scene
+                    and full_report.overall_score >= success_threshold
+                    and (not has_structured_evidence or stage_passed)
+                    and procedure_valid
+                    and not deterministic_failure
+                )
+                if deterministic_bootstrap:
+                    candidate_eligible = bool(
                         has_structured_evidence
-                        and not self._stage_passed(stage_evidence)
+                        and stage_report
+                        and stage_passed
+                        and stage_agent_invoked
+                        and procedure_valid
+                        and not deterministic_failure
                     )
-                    or len(self._clean_list(record.procedure)) < 2
-                ):
+                else:
+                    candidate_eligible = bool(
+                        has_structured_evidence
+                        and stage_report
+                        and (stage_passed or repair_verified)
+                        and procedure_valid
+                        and not deterministic_failure
+                    )
+                if not active_eligible and not candidate_eligible:
+                    reasons: list[str] = []
+                    if not full_report.pass_scene:
+                        reasons.append("scene_gate_failed")
+                    if full_report.overall_score < success_threshold:
+                        reasons.append("score_gate_failed")
+                    if has_structured_evidence and not stage_report:
+                        reasons.append("missing_stage_evidence")
+                    elif has_structured_evidence and not stage_passed:
+                        reasons.append("stage_gate_failed")
+                    if deterministic_failure:
+                        reasons.append("deterministic_stage_failure")
+                    if deterministic_bootstrap and not stage_agent_invoked:
+                        reasons.append("stage_agent_not_proven_invoked")
+                    if not procedure_valid:
+                        reasons.append("procedure_too_short")
+                    if not reasons:
+                        reasons.append("insufficient_verified_support")
+                    self._last_skill_decisions.append(
+                        {
+                            "skill_name": record.skill_name,
+                            "stage": record.stage,
+                            "semantic_signature": record.semantic_signature,
+                            "source": record.source,
+                            "decision": "rejected",
+                            "reasons": reasons,
+                        }
+                    )
                     console_logger.info(
-                        "MemoryWriter: rejected unsupported skill %s", record.skill_name
+                        "MemoryWriter: rejected unsupported skill %s reasons=%s",
+                        record.skill_name,
+                        ",".join(reasons),
                     )
                     continue
+                if active_eligible:
+                    record = record.model_copy(
+                        update={
+                            "status": "active",
+                            "promotion_scope": "scene",
+                            "source_scene_passed": True,
+                            "activation_reason": "scene_and_stage_verified",
+                        }
+                    )
+                    decision = "promoted_active"
+                else:
+                    stage_quality = self._mean_score(self._stage_scores(stage_evidence))
+                    record = record.model_copy(
+                        update={
+                            "status": "candidate",
+                            "promotion_scope": "stage",
+                            "source_scene_passed": bool(full_report.pass_scene),
+                            "quality_score": stage_quality,
+                            "success_rate": stage_quality,
+                            "confidence": min(float(record.confidence), 0.75),
+                            "activation_reason": (
+                                "verified_stage_bootstrap_awaiting_independent_support"
+                                if deterministic_bootstrap
+                                else (
+                                    "verified_repair_awaiting_independent_support"
+                                    if repair_verified and not stage_passed
+                                    else "stage_pass_awaiting_independent_support"
+                                )
+                            ),
+                        }
+                    )
+                    decision = "persisted_candidate"
                 record = self._rebuild_embedding(record)
                 filtered.append(op.model_copy(update={"content": record.model_dump()}))
+                self._last_skill_decisions.append(
+                    {
+                        "skill_name": record.skill_name,
+                        "stage": record.stage,
+                        "semantic_signature": record.semantic_signature,
+                        "source": record.source,
+                        "decision": decision,
+                        "status": record.status,
+                        "independent_support_count": record.independent_support_count,
+                        "activation_min_independent_support": (
+                            record.activation_min_independent_support
+                        ),
+                        "reasons": [],
+                    }
+                )
         return filtered
+
+    @staticmethod
+    def _dedupe_candidate_ops(ops: list[MemoryUpdateOp]) -> list[MemoryUpdateOp]:
+        """Keep one same-scene Skill per deterministic semantic identity.
+
+        LLM operations are placed before bootstrap operations, so a grounded
+        model-authored procedure wins when both encode the same semantics.  A
+        deterministic draft still covers every omitted relation/coverage scope.
+        """
+        output: list[MemoryUpdateOp] = []
+        seen_skill_signatures: set[str] = set()
+        for op in ops:
+            if op.memory_type != "skill":
+                output.append(op)
+                continue
+            signature = str(op.content.get("semantic_signature") or "")
+            if not signature:
+                signature = hashlib.sha256(
+                    json.dumps(
+                        op.content,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    ).encode("utf-8")
+                ).hexdigest()
+            if signature in seen_skill_signatures:
+                continue
+            seen_skill_signatures.add(signature)
+            output.append(op)
+        return output
+
+    @staticmethod
+    def _op_counts(ops: list[MemoryUpdateOp]) -> dict[str, int]:
+        """Return stable per-type counts for writer observability."""
+        counts = {"success_case": 0, "failure_case": 0, "skill": 0}
+        for op in ops:
+            if op.op in {"ADD", "UPDATE"} and op.memory_type in counts:
+                counts[op.memory_type] += 1
+        return counts
 
     def _validate_success(self, content: dict[str, Any]) -> SuccessCase | None:
         try:
@@ -599,14 +1479,16 @@ class MemoryWriter:
         self,
         stage_evidence: dict[str, Any],
         focus_terms: list[str] | None = None,
+        constraint_ids: set[str] | None = None,
     ) -> list[SpatialRelationMemory]:
         """Extract only relations already grounded in the intent/critic trace."""
         context = dict(stage_evidence.get("relation_context") or {})
-        report = self._stage_report(stage_evidence)
-        verified = bool(report.get("pass_stage"))
         output: list[SpatialRelationMemory] = []
         for constraint in context.get("hard_constraints", []) or []:
             if not isinstance(constraint, dict):
+                continue
+            constraint_id = str(constraint.get("constraint_id") or "")
+            if constraint_ids is not None and constraint_id not in constraint_ids:
                 continue
             if focus_terms:
                 haystack = (
@@ -666,19 +1548,30 @@ class MemoryWriter:
                     value = selector.get(key)
                     if value is not None:
                         cardinality[f"{prefix}_{key}"] = value
+            status, observations = resolve_constraint_evidence(
+                constraint, stage_evidence
+            )
+            verified = status == "verified_pass"
             output.append(
                 SpatialRelationMemory(
                     relation_type=relation_type,
                     subject_role=self._selector_label(subject),
                     target_role=self._selector_label(target),
                     cardinality=cardinality,
-                    evidence_source=("critic" if report else "task_contract"),
-                    evidence_ref=str(constraint.get("constraint_id") or ""),
+                    evidence_source=(
+                        "deterministic" if observations else "task_contract"
+                    ),
+                    evidence_ref=constraint_id,
                     geometry_verified=verified,
-                    confidence=0.85 if verified else 0.6,
+                    confidence=0.85 if verified else 0.5,
+                    verification_status=status,
+                    verification_evidence=observations,
                 )
             )
-        return output
+        return [
+            relation.model_copy(update={"claim_hash": relation.current_claim_hash()})
+            for relation in output
+        ]
 
     def _relation_types(self, stage_evidence: dict[str, Any]) -> list[str]:
         return self._unique(
@@ -785,6 +1678,14 @@ class MemoryWriter:
             if isinstance(value, (int, float))
         }
 
+    @staticmethod
+    def _mean_score(scores: dict[str, float]) -> float:
+        """Return a conservative stage quality when no scene score is valid."""
+        values = [float(value) for value in scores.values()]
+        if not values:
+            return 0.5
+        return max(0.0, min(1.0, sum(values) / len(values)))
+
     def _repair_verified(self, stage_evidence: dict[str, Any]) -> bool:
         repairs = stage_evidence.get("repair_actions") or []
         return any(
@@ -873,18 +1774,74 @@ class MemoryWriter:
         related_old_memory: str,
         evidence_payload: dict[str, Any],
     ) -> str:
-        payload = {
-            "trace_summary": trace_summary,
-            "evidence": evidence_payload,
-            "final_report": full_report.model_dump(),
-            "related_existing_memory": related_old_memory,
-        }
-        return (
-            "Analyze this terminal run, which may have completed or failed. Treat "
-            "evidence.verify_report and final_report as authoritative. Never infer "
-            "success from a failed final_report. Return only schema-valid reusable "
-            "candidates.\n" + json.dumps(payload, ensure_ascii=False, default=str)
+        message, metadata = build_writer_prompt(
+            evidence=evidence_payload,
+            final_report=full_report.model_dump(),
+            trace_summary=trace_summary,
+            related_old_memory=related_old_memory,
+            max_user_bytes=getattr(
+                self, "_active_user_budget", self._user_budget(self._context_tokens)
+            ),
         )
+        self._visible_episode_ids = (
+            set(metadata["selected_episode_ids"]) if metadata["has_catalog"] else None
+        )
+        self._visible_critic_ids = set(metadata.get("selected_critic_ids", []))
+        if not hasattr(self, "_prompt_attempts"):
+            self._prompt_attempts = []
+        self._prompt_attempts.append(metadata)
+        if self._debug_dir is not None:
+            self._debug_dir.mkdir(parents=True, exist_ok=True)
+            self._atomic_write_json(
+                self._debug_dir
+                / f"memory_writer_prompt_{len(self._prompt_attempts):02d}.json",
+                {
+                    "projection": metadata,
+                    "messages": [
+                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "user", "content": message},
+                    ],
+                },
+            )
+        return message
+
+    def _user_budget(self, context_tokens: int) -> int:
+        """Reserve schema, output and retry/framing space within a byte envelope."""
+        reserve = (
+            max(self._profile.max_tokens, self._profile.retry_max_tokens or 0)
+            + byte_size(MemoryWriterResponse.model_json_schema())
+            + len(_SYSTEM_PROMPT.encode("utf-8"))
+            + 4096
+        )
+        return min(self._max_input_bytes, context_tokens - reserve)
+
+    def record_store_result(self, summary: dict[str, Any]) -> None:
+        """Confirm actual store mutations separately from model proposals."""
+        self.last_trace.update(
+            {
+                "store_apply": dict(summary),
+                "persistence_confirmed": True,
+                "persisted_count": sum(
+                    int(summary.get(k, 0)) for k in ("added", "updated", "merged")
+                ),
+                "promoted_count": int(summary.get("active_records_changed", 0)),
+                "persisted_counts": dict(summary.get("changed_counts", {})),
+                "promoted_counts": dict(summary.get("active_changed_counts", {})),
+                "count_semantics": "persisted/promoted counts confirmed by store; proposed counts are writer output",
+            }
+        )
+        if self._debug_dir is not None:
+            path = self._debug_dir / "memory_writer_debug.json"
+            try:
+                if path.is_file():
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    payload["result_status"] = self.last_trace
+                    self._atomic_write_json(path, payload)
+            except (OSError, ValueError) as exc:
+                self.last_trace["store_audit_error"] = str(exc)
+                console_logger.warning(
+                    "Memory store succeeded but debug refresh failed: %s", exc
+                )
 
     def _save_debug_payload(
         self,
@@ -968,6 +1925,13 @@ class MemoryWriter:
     def _compact_text(value: Any, max_chars: int) -> str:
         text = str(value or "")
         return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
+
+    @staticmethod
+    def _env_bool(name: str, default: bool) -> bool:
+        value = os.environ.get(name)
+        if value is None:
+            return bool(default)
+        return str(value).strip().casefold() not in {"0", "false", "no", "off", ""}
 
     @staticmethod
     def _now() -> str:

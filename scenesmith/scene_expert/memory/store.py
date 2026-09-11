@@ -7,6 +7,7 @@ notice writes made by other processes and invalidate vector indexes safely.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -22,11 +23,12 @@ from pydantic import BaseModel
 from scenesmith.scene_expert.memory.schemas import (
     MEMORY_SCHEMA_VERSION,
     FailureCase,
-    MemoryUtilityObservation,
     MemoryUpdateOp,
+    MemoryUtilityObservation,
     Skill,
     SuccessCase,
 )
+from scenesmith.scene_expert.memory.skill_identity import build_skill_semantic_signature
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 
 console_logger = logging.getLogger(__name__)
@@ -36,21 +38,40 @@ MANIFEST_SCHEMA_VERSION = "sceneexpert.memory_manifest.v2"
 class FastMemoryStore:
     """Persistent memory banks with atomic batches and cross-process refresh."""
 
-    def __init__(self, memory_dir: str) -> None:
+    def __init__(self, memory_dir: str, *, read_only: bool = False) -> None:
         self._dir = Path(memory_dir)
-        self._dir.mkdir(parents=True, exist_ok=True)
+        self._read_only = bool(read_only)
+        if self._read_only:
+            if not self._dir.is_dir():
+                raise FileNotFoundError(
+                    f"Read-only memory bank does not exist: {self._dir}"
+                )
+        else:
+            self._dir.mkdir(parents=True, exist_ok=True)
         self._success_path = self._dir / "success_cases.jsonl"
         self._failure_path = self._dir / "failure_cases.jsonl"
         self._skills_path = self._dir / "skills.jsonl"
         self._events_path = self._dir / "events.jsonl"
         self._manifest_path = self._dir / "manifest.json"
-        for path in (
+        record_paths = (
             self._success_path,
             self._failure_path,
             self._skills_path,
             self._events_path,
-        ):
-            path.touch(exist_ok=True)
+        )
+        if self._read_only:
+            missing = [str(path) for path in record_paths if not path.is_file()]
+            if missing:
+                raise FileNotFoundError(
+                    "Read-only memory bank is incomplete: " + ", ".join(missing)
+                )
+            if not self._manifest_path.is_file():
+                raise FileNotFoundError(
+                    f"Read-only memory manifest does not exist: {self._manifest_path}"
+                )
+        else:
+            for path in record_paths:
+                path.touch(exist_ok=True)
 
         self.success_cases: list[SuccessCase] = []
         self.failure_cases: list[FailureCase] = []
@@ -65,6 +86,10 @@ class FastMemoryStore:
             self._reload_from_disk_unlocked()
             counts = self._record_counts()
             if self._manifest.get("counts") != counts:
+                if self._read_only:
+                    raise ValueError(
+                        "Read-only memory manifest counts do not match record files"
+                    )
                 self._manifest["counts"] = counts
                 self._atomic_write_json(self._manifest_path, self._manifest)
             self._loaded_revision = int(self._manifest.get("revision", 0))
@@ -94,6 +119,65 @@ class FastMemoryStore:
     @property
     def manifest(self) -> dict[str, Any]:
         return dict(self._manifest)
+
+    @property
+    def read_only(self) -> bool:
+        return self._read_only
+
+    def snapshot_identity(self, *, refresh: bool = True) -> dict[str, Any]:
+        """Return a path-independent fingerprint of retrieval-affecting state."""
+        if refresh:
+            with self._file_lock():
+                self._manifest = self._read_or_create_manifest_unlocked()
+                self._reload_from_disk_unlocked()
+                self._loaded_revision = int(self._manifest.get("revision", 0))
+                self._loaded_disk_signature = self._disk_signature()
+        payload = {
+            "schema_version": "sceneexpert.memory_snapshot.v1",
+            "manifest_schema_version": str(self._manifest.get("schema_version") or ""),
+            "record_schema_version": str(
+                self._manifest.get("record_schema_version") or ""
+            ),
+            "bank_id": self.bank_id,
+            "revision": self.revision,
+            "bank_revisions": dict(self._manifest.get("bank_revisions") or {}),
+            "records": {
+                "success": sorted(
+                    (record.model_dump(mode="json") for record in self.success_cases),
+                    key=lambda record: str(record.get("case_id") or ""),
+                ),
+                "failure": sorted(
+                    (record.model_dump(mode="json") for record in self.failure_cases),
+                    key=lambda record: str(record.get("failure_id") or ""),
+                ),
+                "skill": sorted(
+                    (record.model_dump(mode="json") for record in self.skills),
+                    key=lambda record: (
+                        str(record.get("semantic_signature") or ""),
+                        str(record.get("skill_name") or ""),
+                    ),
+                ),
+            },
+        }
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return {
+            "schema_version": payload["schema_version"],
+            "bank_id": self.bank_id,
+            "revision": self.revision,
+            "bank_revisions": payload["bank_revisions"],
+            "record_counts": self._record_counts(),
+            "content_fingerprint": (
+                f"sceneexpert.memory_snapshot.v1:{fingerprint[:24]}"
+            ),
+            "memory_dir": str(self._dir.resolve()),
+            "read_only": self._read_only,
+        }
 
     @property
     def active_success_cases(self) -> list[SuccessCase]:
@@ -157,6 +241,11 @@ class FastMemoryStore:
     @contextmanager
     def _file_lock(self):
         """Advisory directory lock (process-safe on the Linux ACP runtime)."""
+        if self._read_only:
+            # A frozen evaluator never creates even a lock file in the bank.
+            # Start/end content fingerprints detect out-of-process drift.
+            yield
+            return
         lock_path = self._dir / ".memory.lock"
         with lock_path.open("a+") as lock_file:
             try:
@@ -216,8 +305,14 @@ class FastMemoryStore:
                 manifest["record_schema_version"] = MEMORY_SCHEMA_VERSION
                 changed = True
             if changed:
+                if self._read_only:
+                    raise ValueError(
+                        "Read-only memory manifest requires an in-place migration"
+                    )
                 self._atomic_write_json(self._manifest_path, manifest)
             return manifest
+        if self._read_only:
+            raise ValueError("Read-only memory bank has no valid manifest identity")
         manifest = self._new_manifest()
         self._atomic_write_json(self._manifest_path, manifest)
         return manifest
@@ -230,6 +325,8 @@ class FastMemoryStore:
             "active_success": sum(x.status == "active" for x in self.success_cases),
             "active_failure": sum(x.status == "active" for x in self.failure_cases),
             "active_skill": sum(x.status == "active" for x in self.skills),
+            "candidate_skill": sum(x.status == "candidate" for x in self.skills),
+            "quarantined_skill": sum(x.status == "quarantined" for x in self.skills),
         }
 
     def _disk_signature(self) -> tuple[tuple[int, int], ...]:
@@ -256,6 +353,8 @@ class FastMemoryStore:
                 case.style.casefold(),
                 " ".join(sorted(x.casefold() for x in case.task_signature)),
                 " ".join(x.casefold() for x in case.successful_pattern),
+                " ".join(x.casefold() for x in case.positive_guidance),
+                FastMemoryStore._spatial_signature(case),
             ]
         )
 
@@ -269,12 +368,55 @@ class FastMemoryStore:
                 case.failure_type.casefold(),
                 case.bad_pattern.casefold(),
                 case.failure_reason.casefold(),
+                case.repair_action.casefold(),
+                FastMemoryStore._spatial_signature(case),
             ]
         )
 
     @staticmethod
     def _skill_signature(skill: Skill) -> str:
-        return skill.skill_name.strip().casefold()
+        return skill.semantic_signature or build_skill_semantic_signature(skill)
+
+    @staticmethod
+    def _spatial_signature(record: Any) -> str:
+        """Do not merge evidence for different spatial claims as one lesson."""
+        claims = {
+            json.dumps(
+                relation.model_dump(
+                    mode="json",
+                    include={
+                        "relation_type",
+                        "subject_role",
+                        "target_role",
+                        "cardinality",
+                        "normalized_offset",
+                        "yaw_delta_deg",
+                        "clearance_m",
+                        "template_parameters",
+                    },
+                ),
+                sort_keys=True,
+                ensure_ascii=False,
+            )
+            for relation in record.spatial_relations
+        }
+        experience = getattr(record, "placement_experience", None)
+        if experience is not None:
+            # Same prose/role pair can describe different procedures or exact
+            # observations. Do not merge away the incoming immutable experience
+            # while retaining only the old geometry. Legacy signatures stay unchanged.
+            claims.add(
+                "placement_experience:"
+                + hashlib.sha256(
+                    json.dumps(
+                        experience.model_dump(mode="json"),
+                        sort_keys=True,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+            )
+        return json.dumps(sorted(claims), ensure_ascii=False)
 
     def _rewrite(self, path: Path, records: list[BaseModel]) -> None:
         temporary = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
@@ -296,6 +438,7 @@ class FastMemoryStore:
 
     def append_event(self, event: dict[str, Any]) -> None:
         """Append auditable evidence without promoting it into active memory."""
+        self._ensure_writable("append_event")
         with self._file_lock():
             with self._events_path.open("a", encoding="utf-8", newline="\n") as file:
                 file.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
@@ -380,6 +523,7 @@ class FastMemoryStore:
         the run ID for provenance, and never treats the skill's source task as
         transfer evidence. Different tasks within one ACP run remain independent.
         """
+        self._ensure_writable("record_skill_outcomes")
         updated = 0
         quarantined: list[str] = []
         skipped_non_skill = 0
@@ -502,10 +646,17 @@ class FastMemoryStore:
 
     def apply_updates(self, ops: list[MemoryUpdateOp]) -> dict[str, Any]:
         """Apply one atomic, deduplicated mutation batch and increment revision once."""
+        self._ensure_writable("apply_updates")
         changed_banks: set[str] = set()
         added = 0
         updated = 0
         merged = 0
+        skill_candidate_added = 0
+        skill_candidate_merged = 0
+        skill_promoted_active = 0
+        active_records_changed = 0
+        changed_counts: dict[str, int] = {}
+        active_changed_counts: dict[str, int] = {}
         with self._file_lock():
             self._manifest = self._read_or_create_manifest_unlocked()
             self._reload_from_disk_unlocked()
@@ -515,17 +666,57 @@ class FastMemoryStore:
                 if op.op == "NOOP":
                     continue
                 if op.op == "ADD":
+                    skill_before: Skill | None = None
+                    incoming_skill: Skill | None = None
+                    if op.memory_type == "skill":
+                        incoming_skill = self._normalized_skill(op.content)
+                        skill_before = self._find_skill_unlocked(incoming_skill)
                     changed, was_merged = self._apply_add_unlocked(op, next_revision)
                     if changed:
                         changed_banks.add(op.memory_type)
+                        changed_counts[op.memory_type] = (
+                            changed_counts.get(op.memory_type, 0) + 1
+                        )
+                        if self._mutation_is_active(op):
+                            active_records_changed += 1
+                            active_changed_counts[op.memory_type] = (
+                                active_changed_counts.get(op.memory_type, 0) + 1
+                            )
                         if was_merged:
                             merged += 1
                         else:
                             added += 1
+                        if incoming_skill is not None:
+                            skill_after = self._find_skill_unlocked(incoming_skill)
+                            if skill_after is not None:
+                                if (
+                                    skill_before is None
+                                    and skill_after.status == "candidate"
+                                ):
+                                    skill_candidate_added += 1
+                                elif (
+                                    skill_before is not None
+                                    and skill_before.status == "candidate"
+                                    and skill_after.status == "candidate"
+                                ):
+                                    skill_candidate_merged += 1
+                                if skill_after.status == "active" and (
+                                    skill_before is None
+                                    or skill_before.status != "active"
+                                ):
+                                    skill_promoted_active += 1
                 elif op.op == "UPDATE":
                     if self._apply_update_unlocked(op, next_revision):
                         changed_banks.add(op.memory_type)
                         updated += 1
+                        changed_counts[op.memory_type] = (
+                            changed_counts.get(op.memory_type, 0) + 1
+                        )
+                        if self._mutation_is_active(op):
+                            active_records_changed += 1
+                            active_changed_counts[op.memory_type] = (
+                                active_changed_counts.get(op.memory_type, 0) + 1
+                            )
 
             if "success_case" in changed_banks:
                 self._rewrite(self._success_path, self.success_cases)
@@ -569,9 +760,77 @@ class FastMemoryStore:
             "updated": updated,
             "merged": merged,
             "changed_banks": sorted(changed_banks),
+            "skill_candidate_added": skill_candidate_added,
+            "skill_candidate_merged": skill_candidate_merged,
+            "skill_promoted_active": skill_promoted_active,
+            "active_records_changed": active_records_changed,
+            "changed_counts": changed_counts,
+            "active_changed_counts": active_changed_counts,
         }
         self.last_apply_summary = summary
         return summary
+
+    def _mutation_is_active(self, op: MemoryUpdateOp) -> bool:
+        """Inspect the stored result, not a candidate's requested status."""
+        records, identity, signature, model = {
+            "success_case": (
+                self.success_cases,
+                "case_id",
+                self._success_signature,
+                SuccessCase,
+            ),
+            "failure_case": (
+                self.failure_cases,
+                "failure_id",
+                self._failure_signature,
+                FailureCase,
+            ),
+            "skill": (self.skills, "skill_name", self._skill_signature, Skill),
+        }[op.memory_type]
+        target = op.target_id or str(op.content.get(identity, ""))
+        incoming = model.model_validate(op.content) if op.op == "ADD" else None
+        return any(
+            record.status == "active"
+            and (
+                (incoming is not None and signature(record) == signature(incoming))
+                or (incoming is None and str(getattr(record, identity)) == target)
+            )
+            for record in records
+        )
+
+    @staticmethod
+    def _normalized_skill(content: dict[str, Any]) -> Skill:
+        record = Skill.model_validate(content)
+        signature = record.semantic_signature or build_skill_semantic_signature(record)
+        source_tasks = FastMemoryStore._unique(
+            [
+                *record.source_task_ids,
+                record.source_task_id,
+            ]
+        )
+        aliases = FastMemoryStore._unique([*record.skill_aliases, record.skill_name])
+        return record.model_copy(
+            update={
+                "semantic_signature": signature,
+                "skill_aliases": aliases,
+                "source_task_ids": source_tasks,
+                "independent_support_count": max(1, len(source_tasks)),
+                "activation_min_independent_support": max(
+                    2, int(record.activation_min_independent_support)
+                ),
+            }
+        )
+
+    def _find_skill_unlocked(self, incoming: Skill) -> Skill | None:
+        incoming_signature = self._skill_signature(incoming)
+        return next(
+            (
+                skill
+                for skill in self.skills
+                if self._skill_signature(skill) == incoming_signature
+            ),
+            None,
+        )
 
     def _apply_add_unlocked(
         self, op: MemoryUpdateOp, revision: int
@@ -596,13 +855,31 @@ class FastMemoryStore:
                 identity=lambda item: item.failure_id,
                 signature=self._failure_signature,
             )
-        record = Skill.model_validate(op.content).model_copy(
+        record = self._normalized_skill(op.content).model_copy(
             update={"bank_version": revision}
         )
+        record_tasks = {record.source_task_id, *record.source_task_ids} - {""}
+        if any(
+            skill.skill_name.casefold() == record.skill_name.casefold()
+            and bool(
+                record_tasks & ({skill.source_task_id, *skill.source_task_ids} - {""})
+            )
+            and self._skill_signature(skill) != self._skill_signature(record)
+            for skill in self.skills
+        ):
+            # A retry of the same task is not independent evidence and must not
+            # fork an existing named Skill merely because the LLM paraphrased
+            # its procedure. A genuinely different task may still contribute a
+            # distinct, identically named Skill with different semantics.
+            return False, True
         return self._add_or_merge_unlocked(
             self.skills,
             record,
-            identity=lambda item: item.skill_name,
+            # LLM-generated names are descriptive aliases, not stable identity.
+            # Two identically named Skills may encode incompatible rooms,
+            # relations, or procedures; only the deterministic semantic
+            # signature is safe for cross-task evidence accumulation.
+            identity=self._skill_signature,
             signature=self._skill_signature,
         )
 
@@ -620,6 +897,15 @@ class FastMemoryStore:
             id_matches = identity(current) == incoming_id
             if not id_matches and signature(current) != incoming_signature:
                 continue
+            if signature(current) != incoming_signature or self._spatial_signature(
+                current
+            ) != self._spatial_signature(incoming):
+                # ADD may accumulate independent evidence for the same claim,
+                # not silently replace its meaning. Explicit UPDATE is separate.
+                console_logger.warning(
+                    "Refusing incompatible memory observation for %s", incoming_id
+                )
+                return False, True
             if (
                 id_matches
                 and incoming.source_run_id == current.source_run_id
@@ -642,7 +928,13 @@ class FastMemoryStore:
                 if (
                     not incoming_tasks
                     or not incoming_runs
-                    or not (incoming_tasks - current_tasks)
+                    or (
+                        not (incoming_tasks - current_tasks)
+                        and not (
+                            current.status == "candidate"
+                            and incoming.status == "active"
+                        )
+                    )
                 ):
                     return False, True
             merged = self._merge_observation(current, incoming)
@@ -706,6 +998,28 @@ class FastMemoryStore:
                 incoming.quality_score,
                 incoming.confidence,
             ) > (current.quality_score, current.confidence)
+            support_count = max(1, len(source_task_ids))
+            activation_threshold = max(
+                2,
+                int(current.activation_min_independent_support),
+                int(incoming.activation_min_independent_support),
+            )
+            if current.status == "quarantined":
+                lifecycle_status = "quarantined"
+                activation_reason = current.activation_reason or "harm_quarantined"
+            elif current.status == "active" or incoming.status == "active":
+                lifecycle_status = "active"
+                activation_reason = (
+                    incoming.activation_reason
+                    if incoming.status == "active"
+                    else current.activation_reason
+                ) or "scene_and_stage_verified"
+            elif support_count >= activation_threshold:
+                lifecycle_status = "active"
+                activation_reason = "independent_stage_support_threshold_met"
+            else:
+                lifecycle_status = "candidate"
+                activation_reason = "awaiting_independent_stage_support"
             updates["applicability"] = current.applicability.model_copy(
                 update={
                     "room_types": self._unique(
@@ -755,6 +1069,32 @@ class FastMemoryStore:
                     "postconditions": self._unique(
                         current.postconditions + incoming.postconditions
                     ),
+                    "semantic_signature": (
+                        current.semantic_signature
+                        or incoming.semantic_signature
+                        or self._skill_signature(current)
+                    ),
+                    "skill_aliases": self._unique(
+                        [
+                            *current.skill_aliases,
+                            current.skill_name,
+                            *incoming.skill_aliases,
+                            incoming.skill_name,
+                        ]
+                    ),
+                    "source_scene_passed": (
+                        current.source_scene_passed or incoming.source_scene_passed
+                    ),
+                    "promotion_scope": (
+                        "scene"
+                        if current.promotion_scope == "scene"
+                        or incoming.promotion_scope == "scene"
+                        else "stage"
+                    ),
+                    "independent_support_count": support_count,
+                    "activation_min_independent_support": activation_threshold,
+                    "status": lifecycle_status,
+                    "activation_reason": activation_reason,
                 }
             )
         if same_run and all(
@@ -832,6 +1172,12 @@ class FastMemoryStore:
                 output.append(text)
                 seen.add(key)
         return output
+
+    def _ensure_writable(self, operation: str) -> None:
+        if self._read_only:
+            raise RuntimeError(
+                f"Memory bank is frozen read-only; refused operation {operation}"
+            )
 
     @staticmethod
     def _now() -> str:

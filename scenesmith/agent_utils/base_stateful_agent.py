@@ -2258,6 +2258,16 @@ class BaseStatefulAgent(ABC):
             if isinstance(terminal_failure, dict) and not terminal_failure.get(
                 "recovered", False
             ):
+                failure_text = self._planner_terminal_failure_text()
+                self._persist_planner_failure_diagnostics(
+                    error_type=str(
+                        terminal_failure.get("error_type") or "RuntimeError"
+                    ),
+                    error=failure_text,
+                    finish_reason="child_delegation_failure",
+                    final_output=getattr(result, "final_output", "") or "",
+                    recovery_attempted=False,
+                )
                 planner_failure = self._planner_child_failure(terminal_failure)
                 raise planner_failure from getattr(
                     self, "_planner_terminal_exception", None
@@ -2320,7 +2330,7 @@ class BaseStatefulAgent(ABC):
                     }
                     if isinstance(terminal_failure, dict):
                         evidence["terminal_failure"] = dict(terminal_failure)
-                    raise PlannerWorkflowNoMutationError(
+                    planner_failure = PlannerWorkflowNoMutationError(
                         stage=self.agent_type.value,
                         workflow_calls=workflow_calls,
                         successful_mutations=0,
@@ -2337,18 +2347,27 @@ class BaseStatefulAgent(ABC):
                             self, "_stage_execution_attempt", 1
                         ),
                     )
-                raise PlannerStageFailure(
-                    reason="no_tool_call",
-                    stage=self.agent_type.value,
-                    workflow_calls=0,
-                    successful_mutations=0,
-                    operation="request_initial_design",
-                    stage_execution_attempt=getattr(
-                        self, "_stage_execution_attempt", 1
-                    ),
-                    retryable=False,
-                    evidence={"recovery_turn": "mandatory_workflow"},
+                else:
+                    planner_failure = PlannerStageFailure(
+                        reason="no_tool_call",
+                        stage=self.agent_type.value,
+                        workflow_calls=0,
+                        successful_mutations=0,
+                        operation="request_initial_design",
+                        stage_execution_attempt=getattr(
+                            self, "_stage_execution_attempt", 1
+                        ),
+                        retryable=False,
+                        evidence={"recovery_turn": "mandatory_workflow"},
+                    )
+                self._persist_planner_failure_diagnostics(
+                    error_type=type(planner_failure).__name__,
+                    error=str(planner_failure),
+                    finish_reason="no_scene_mutation_after_recovery",
+                    final_output=getattr(result, "final_output", "") or "",
+                    recovery_attempted=True,
                 )
+                raise planner_failure
         elif (
             getattr(self, "_planner_review_existing", False)
             and self._planner_review_existing_workflow_calls == 0
@@ -2370,7 +2389,7 @@ class BaseStatefulAgent(ABC):
                 event="coordinate_existing_candidate_recovery",
             )
             if self._planner_review_existing_workflow_calls == 0:
-                raise PlannerStageFailure(
+                planner_failure = PlannerStageFailure(
                     reason="no_tool_call",
                     stage=self.agent_type.value,
                     workflow_calls=0,
@@ -2382,6 +2401,14 @@ class BaseStatefulAgent(ABC):
                     retryable=False,
                     evidence={"recovery_turn": "existing_candidate"},
                 )
+                self._persist_planner_failure_diagnostics(
+                    error_type=type(planner_failure).__name__,
+                    error=str(planner_failure),
+                    finish_reason="no_existing_candidate_workflow_after_recovery",
+                    final_output=getattr(result, "final_output", "") or "",
+                    recovery_attempted=True,
+                )
+                raise planner_failure
 
         self._record_module_timing(
             "planner",
@@ -2907,6 +2934,86 @@ class BaseStatefulAgent(ABC):
             metadata = {}
             self.scene.metadata = metadata
         metadata["scenesmith_runtime_failure"] = dict(failure)
+
+    def _persist_planner_failure_diagnostics(
+        self,
+        *,
+        error_type: str,
+        error: str,
+        finish_reason: str,
+        final_output: str,
+        recovery_attempted: bool,
+    ) -> dict[str, Any]:
+        """Attach read-only planner counters to the scene before re-raising.
+
+        This evidence is intentionally policy-free: it neither suppresses the
+        native exception nor asks SceneExpert to repair it.  The hook layer can
+        mirror the payload into a partial trace when enabled.
+        """
+        terminal_failure = dict(getattr(self, "_planner_terminal_failure", None) or {})
+        checkpoint_state = {
+            "runtime_failure_checkpoint": dict(
+                terminal_failure.get("checkpoint") or {}
+            ),
+            "has_current_checkpoint": (
+                getattr(self, "scene_checkpoint", None) is not None
+            ),
+            "has_previous_checkpoint": (
+                getattr(self, "previous_scene_checkpoint", None) is not None
+            ),
+            "checkpoint_scene_hash": str(
+                getattr(self, "checkpoint_scene_hash", None) or ""
+            ),
+            "checkpoint_render_dir": str(
+                getattr(self, "checkpoint_render_dir", None) or ""
+            ),
+            "final_render_dir": str(getattr(self, "final_render_dir", None) or ""),
+        }
+        payload = {
+            "schema_version": "scenesmith.planner_failure.v1",
+            "stage": self.agent_type.value,
+            "error_type": str(error_type or "RuntimeError"),
+            "error": str(error),
+            "finish_reason": str(finish_reason),
+            "recovery_attempted": bool(recovery_attempted),
+            "planner_final_output": str(final_output or "")[:4000],
+            "initial_design_tool_calls": int(
+                getattr(self, "_planner_initial_design_tool_calls", 0)
+            ),
+            "critique_tool_calls": int(
+                getattr(self, "_planner_critique_tool_calls", 0)
+            ),
+            "design_change_tool_calls": int(
+                getattr(self, "_planner_design_change_tool_calls", 0)
+            ),
+            "orchestration_calls": int(
+                getattr(self, "_planner_orchestration_calls", 0)
+            ),
+            "successful_designer_mutations": int(
+                getattr(self, "_planner_successful_designer_mutations", 0)
+            ),
+            "review_existing_workflow_calls": int(
+                getattr(self, "_planner_review_existing_workflow_calls", 0)
+            ),
+            "budget_exhausted": bool(getattr(self, "_planner_budget_exhausted", False)),
+            "terminal_stop": bool(getattr(self, "_planner_terminal_stop", False)),
+            "terminal_failure": terminal_failure,
+            "checkpoint_state": checkpoint_state,
+        }
+        state = getattr(self, "scene", None)
+        if state is None:
+            state = getattr(self, "layout", None)
+        if state is None:
+            return payload
+        metadata = getattr(state, "metadata", None)
+        if not isinstance(metadata, dict):
+            metadata = {}
+            try:
+                state.metadata = metadata
+            except (AttributeError, TypeError):
+                return payload
+        metadata["scenesmith_planner_failure"] = payload
+        return payload
 
     def _stop_planner_after_failure(self, reason: str) -> str:
         """Convert a nested agent failure into a deterministic planner stop."""

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import tempfile
 import time
 
 from pathlib import Path
@@ -12,10 +13,11 @@ from typing import Any
 
 import numpy as np
 
+from scenesmith.scene_expert.memory.contracts import selection_from_record
 from scenesmith.scene_expert.memory.embedding import SceneMemoryEmbedder
 from scenesmith.scene_expert.memory.index import NumpyMemoryIndex
+from scenesmith.scene_expert.memory.placement import experience_priority
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
-from scenesmith.scene_expert.memory.skill_policy import evaluate_skill_for_task
 from scenesmith.scene_expert.memory.scoring import (
     HybridScoreWeights,
     hybrid_score,
@@ -24,8 +26,13 @@ from scenesmith.scene_expert.memory.scoring import (
     record_room_compatible,
     task_required_objects,
 )
+from scenesmith.scene_expert.memory.skill_policy import evaluate_skill_for_task
+from scenesmith.scene_expert.memory.state import observed_roles
 from scenesmith.scene_expert.memory.store import FastMemoryStore
-from scenesmith.scene_expert.memory.text_builder import build_embedding_text
+from scenesmith.scene_expert.memory.text_builder import (
+    EMBEDDING_TEXT_VERSION,
+    build_embedding_text,
+)
 from scenesmith.scene_expert.schemas import (
     MemoryPack,
     RetrievedMemorySelection,
@@ -66,6 +73,20 @@ class HybridMemoryRetriever:
         self._store = store
         self._memory_dir = Path(memory_dir)
         self._index_dir = Path(index_dir) if index_dir else self._memory_dir / "indexes"
+        if store.read_only and (
+            self._index_dir.resolve() == self._memory_dir.resolve()
+            or self._memory_dir.resolve() in self._index_dir.resolve().parents
+        ):
+            # Format upgrades rebuild derived vectors, never a frozen bank.
+            cache_key = hashlib.sha256(
+                str(self._memory_dir.resolve()).encode()
+            ).hexdigest()[:20]
+            self._index_dir = (
+                Path(tempfile.gettempdir())
+                / "scenesmith-memory-index"
+                / cache_key
+                / EMBEDDING_TEXT_VERSION
+            )
         self._embedder = embedder
         self._max_success = max_success
         self._max_failure = max_failure
@@ -88,11 +109,21 @@ class HybridMemoryRetriever:
         task_spec: SceneTaskSpec,
         stage: str,
         relation_context: StageRelationContext | None = None,
+        scene_state: dict | None = None,
     ) -> MemoryPack:
         total_start = time.perf_counter()
         if self._store.refresh_if_changed():
             self._index_cache.clear()
         query_text = build_query_text(task_spec, stage)
+        available_objects = observed_roles(scene_state)
+        if available_objects:
+            query_text += "\nObserved (not required) objects: " + ", ".join(
+                available_objects
+            )
+        if relation_context is not None:
+            query_text += "\nCurrent task relations: " + json.dumps(
+                relation_context.hard_constraints, ensure_ascii=False, sort_keys=True
+            )
         if not self._has_active_stage_records(stage):
             total_sec = time.perf_counter() - total_start
             self._record_timing(
@@ -126,6 +157,7 @@ class HybridMemoryRetriever:
             bank_timings=bank_timings,
             relation_context=relation_context,
             skill_decisions=skill_decisions,
+            available_objects=available_objects,
         )
         failure = self._retrieve_bank(
             "failure",
@@ -136,6 +168,7 @@ class HybridMemoryRetriever:
             bank_timings=bank_timings,
             relation_context=relation_context,
             skill_decisions=skill_decisions,
+            available_objects=available_objects,
         )
         skills = self._retrieve_bank(
             "skill",
@@ -146,6 +179,7 @@ class HybridMemoryRetriever:
             bank_timings=bank_timings,
             relation_context=relation_context,
             skill_decisions=skill_decisions,
+            available_objects=available_objects,
         )
 
         selected_skill_names = {
@@ -232,6 +266,7 @@ class HybridMemoryRetriever:
             memory_bank_revision=self._store.revision,
             selections=selections,
             skill_filter_decisions=list(skill_decisions.values()),
+            current_scene_state=scene_state or {},
         ).deduplicated()
 
     def _build_selections(
@@ -252,26 +287,15 @@ class HybridMemoryRetriever:
         )
         for memory_type, scored_records, filename in specs:
             for rank, (score, record) in enumerate(scored_records, start=1):
-                memory_id = _record_id(record)
-                if isinstance(record, SuccessCase):
-                    injected_text = record.to_positive_guidance()
-                elif isinstance(record, FailureCase):
-                    injected_text = record.to_negative_constraint()
-                else:
-                    injected_text = record.to_procedure_text()
                 rows.append(
-                    RetrievedMemorySelection(
-                        memory_id=memory_id,
-                        memory_type=memory_type,
+                    selection_from_record(
+                        record,
                         rank=rank,
                         score=round(float(score), 6),
                         score_components={"hybrid_total": round(float(score), 6)},
-                        source_path=str((self._memory_dir / filename).resolve()),
-                        source_task_ids=source_task_ids.get(memory_id, []),
-                        source_run_ids=source_run_ids.get(memory_id, []),
+                        memory_dir=self._memory_dir,
                         bank_id=self._store.bank_id,
                         bank_revision=self._store.revision,
-                        injected_text=injected_text,
                     )
                 )
         return rows
@@ -330,6 +354,7 @@ class HybridMemoryRetriever:
         bank_timings: list[dict[str, Any]],
         relation_context: StageRelationContext | None,
         skill_decisions: dict[str, SkillSelectionDecision],
+        available_objects: list[str] | None = None,
     ) -> list[tuple[float, MemoryRecord]]:
         bank_timing: dict[str, Any] = {
             "memory_type": memory_type,
@@ -385,6 +410,7 @@ class HybridMemoryRetriever:
                 memory_type,
                 relation_context=relation_context,
                 skill_decisions=skill_decisions,
+                available_objects=available_objects,
             ):
                 bank_timing["structured_filtered_count"] += 1
                 continue
@@ -395,10 +421,11 @@ class HybridMemoryRetriever:
                 stage=stage,
                 memory_type=memory_type,
                 weights=self._weights,
+                available_objects=available_objects,
             )
             scored.append((score, record))
 
-        scored.sort(key=lambda x: x[0], reverse=True)
+        scored.sort(key=lambda x: (experience_priority(x[1]), x[0]), reverse=True)
         output = scored[:final_top_k]
         bank_timing["rerank_sec"] = time.perf_counter() - rerank_start
         bank_timing["accepted_count"] = len(scored)
@@ -424,6 +451,7 @@ class HybridMemoryRetriever:
         *,
         relation_context: StageRelationContext | None,
         skill_decisions: dict[str, SkillSelectionDecision],
+        available_objects: list[str] | None = None,
     ) -> bool:
         if record.stage != stage:
             return False
@@ -434,13 +462,16 @@ class HybridMemoryRetriever:
                 task_spec,
                 stage,
                 relation_context=relation_context,
+                available_objects=available_objects,
             )
             skill_decisions[record.skill_name] = policy.decision
             if not policy.eligible:
                 return False
 
         if memory_type == "failure" and isinstance(record, FailureCase):
-            task_objects = task_required_objects(task_spec, stage)
+            task_objects = task_required_objects(task_spec, stage) + (
+                available_objects or []
+            )
             if record.object and (
                 object_overlap([record.object], task_objects)
                 < self._object_overlap_threshold
@@ -463,7 +494,10 @@ class HybridMemoryRetriever:
             if not record_objects:
                 return True
             return (
-                object_overlap(record_objects, task_required_objects(task_spec, stage))
+                object_overlap(
+                    record_objects,
+                    task_required_objects(task_spec, stage) + (available_objects or []),
+                )
                 >= self._object_overlap_threshold
             )
 
@@ -473,7 +507,9 @@ class HybridMemoryRetriever:
         record_objects = record_required_objects(record)
         if not record_objects:
             return True
-        task_objects = task_required_objects(task_spec, stage)
+        task_objects = task_required_objects(task_spec, stage) + (
+            available_objects or []
+        )
         if not task_objects:
             # Object-bearing success memory cannot invent furniture for a task
             # that has no explicit object requirement in this stage.
@@ -562,6 +598,8 @@ class HybridMemoryRetriever:
         if indexed_ids != record_ids:
             return False
         manifest = index.manifest or {}
+        if manifest.get("embedding_text_version") != EMBEDDING_TEXT_VERSION:
+            return False
         indexed_bank_id = str(manifest.get("memory_bank_id", ""))
         indexed_revision = manifest.get("memory_bank_revision")
         indexed_type_revision = manifest.get("memory_type_revision")
@@ -712,6 +750,7 @@ class HybridMemoryRetriever:
             stages=stages,
             memory_types=memory_types,
             embedder=self._embedder,
+            read_only_memory=self._store.read_only,
         )
 
     def _record_timing(
@@ -851,7 +890,7 @@ def _records_fingerprint(records: list[MemoryRecord]) -> str:
         {
             "memory_id": _record_id(record),
             "status": record.status,
-            "embedding_text": record.embedding_text or build_embedding_text(record),
+            "embedding_text": build_embedding_text(record),
             "quality_score": record.quality_score,
             "confidence": record.confidence,
         }

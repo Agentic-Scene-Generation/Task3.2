@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
+from scenesmith.scene_expert.memory.placement import experience_text
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
 
 MemoryRecord = SuccessCase | FailureCase | Skill
+EMBEDDING_TEXT_VERSION = "memory-text.v4"
 
 
 def _clean(value: object) -> str:
@@ -58,15 +60,16 @@ def _append_spatial_relations(lines: list[str], record: MemoryRecord) -> None:
 
 
 def _append_provenance(lines: list[str], record: MemoryRecord) -> None:
-    provenance = record.provenance
-    _append_line(lines, "source_task_id", provenance.task_id or record.source_task_id)
-    _append_line(lines, "source_run_id", provenance.run_id or record.source_run_id)
-    _append_line(lines, "critic_source", provenance.critic_source)
+    # IDs/run labels are retained in atomic selections and persisted records,
+    # not semantic retrieval features. Only the evidence kind is useful here.
+    _append_line(lines, "critic_source", record.provenance.critic_source)
 
 
 def _build_success_text(record: SuccessCase) -> str:
     lines = [
         "memory_type=success",
+        f"promotion_scope={record.promotion_scope}",
+        f"source_scene_passed={str(record.source_scene_passed).lower()}",
         f"stage={record.stage}",
         f"room_type={record.room_type}",
     ]
@@ -154,6 +157,12 @@ def _build_skill_text(record: Skill) -> str:
 
 def build_embedding_text(record: MemoryRecord) -> str:
     """Build structured retrieval text for a memory record."""
+    if record.placement_experience is not None:
+        # Source inventories/scores/IDs remain metadata, not semantic features.
+        return (
+            f"stage={record.stage}\nroom_type={record.room_type}\n"
+            + experience_text(record.placement_experience)
+        )
     if isinstance(record, SuccessCase):
         return _build_success_text(record)
     if isinstance(record, FailureCase):

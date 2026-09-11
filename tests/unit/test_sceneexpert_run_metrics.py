@@ -77,10 +77,25 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
                 "task_compiler": {"source": "llm", "degraded": False},
                 "memory_writer": {
                     "write_status": "promoted",
-                    "candidate_count": 1,
+                    "candidate_count": 2,
                     "promoted_count": 1,
                     "fallback_written": False,
-                    "store_apply": {"added": 1, "merged": 0},
+                    "llm_skill_candidate_count": 1,
+                    "bootstrap_skill_eligible_stage_count": 1,
+                    "bootstrap_skill_candidate_count": 2,
+                    "bootstrap_skill_persisted_candidate_count": 2,
+                    "bootstrap_skill_rejected_count": 0,
+                    "skill_persisted_candidate_count": 1,
+                    "skill_promoted_active_count": 0,
+                    "skill_rejected_count": 1,
+                    "skill_rejection_reasons": {"stage_gate_failed": 1},
+                    "store_apply": {
+                        "added": 1,
+                        "merged": 0,
+                        "skill_candidate_added": 1,
+                        "skill_candidate_merged": 0,
+                        "skill_promoted_active": 0,
+                    },
                 },
             },
             "stages": [
@@ -101,9 +116,27 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
                         },
                         "memory_bank_id": "bank-1",
                         "memory_bank_revision": 2,
+                        "selection_decisions": [
+                            {
+                                "memory_id": "failure-unverified",
+                                "memory_type": "failure",
+                                "decision": "rejected",
+                                "reasons": ["unverified_failure"],
+                            }
+                        ],
                     },
                     "planner_trace": {"status": "ok"},
                     "execution_evidence": {
+                        "stage_policy": "auto",
+                        "optional_assets_allowed": True,
+                        "required_objects": ["bed"],
+                        "required_first_instruction_applicable": True,
+                        "required_first_instruction_delivered": True,
+                        "optional_autonomy_preserved": True,
+                        "required_satisfied_objects": ["bed"],
+                        "required_missing_objects": [],
+                        "required_coverage": 1.0,
+                        "requirement_status": "satisfied",
                         "designer_prompt_contains_brief": True,
                         "injected_memory_hash": "abc",
                         "designer_prompt_contains_memory": True,
@@ -156,7 +189,13 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
                     ],
                 },
             ],
-            "final_report": {"overall_score": 0.8, "pass_scene": True},
+            "final_report": {
+                "overall_score": 0.8,
+                "pass_scene": True,
+                "generation_status": "complete",
+                "requirement_status": "satisfied",
+                "quality_status": "passed",
+            },
         },
     )
     _write_json(
@@ -263,14 +302,28 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
     assert metrics["summary"]["critic_mean_score"] == 1.0
     assert metrics["summary"]["hard_constraint_pass_rate"] == 1.0
     assert metrics["summary"]["mean_relation_satisfaction"] == 0.9
-    assert metrics["summary"]["memory_injection_delivery_rate"] == 1.0
-    assert metrics["summary"]["memory_cross_task_verified_scene_coverage"] == 0.5
-    assert metrics["memory_closed_loop_observed"] is True
+    assert metrics["summary"]["memory_injection_delivery_rate"] == 0.0
+    assert metrics["summary"]["generation_complete_rate"] == 0.5
+    assert metrics["summary"]["required_satisfaction_rate"] == 1.0
+    assert metrics["summary"]["mean_required_coverage"] == 1.0
+    assert metrics["summary"]["quality_pass_rate"] == 1.0
+    assert metrics["summary"]["required_first_instruction_delivery_rate"] == 1.0
+    assert metrics["summary"]["optional_autonomy_preservation_rate"] == 1.0
+    assert metrics["summary"]["memory_cross_task_verified_scene_coverage"] == 0.0
+    assert metrics["memory_closed_loop_observed"] is False
     assert metrics["summary"]["task_compiler_llm_scenes"] == 1
     assert metrics["summary"]["global_planner_llm_stage_count"] == 1
     assert metrics["summary"]["brief_injection_verified_stage_count"] == 1
     assert metrics["memory_identity"]["memory_bank_ids"] == ["bank-1"]
     assert metrics["code_provenance"]["git_revision"] == "abc123"
+    assert metrics["code_provenance"]["source_bundle_hash"]
+    assert metrics["experiment_identity"]["source_bundle_hashes"] == [
+        metrics["code_provenance"]["source_bundle_hash"]
+    ]
+    assert metrics["scenes"][0]["generation_status"] == "complete"
+    assert metrics["scenes"][0]["requirement_status"] == "satisfied"
+    assert metrics["scenes"][0]["quality_status"] == "passed"
+    assert metrics["scenes"][0]["required_objects_by_stage"] == {"furniture": ["bed"]}
     assert metrics["scenes"][0]["memory_retrieved_source_task_ids"]["success-1"] == [
         "task_from_another_prompt",
         "task_from_first_stage",
@@ -279,10 +332,25 @@ def test_metrics_survive_partial_failure_and_attribute_repairs(tmp_path) -> None
         "run-cold",
         "run-earlier",
     ]
+    assert metrics["summary"]["memory_selection_rejection_count"] == 1
+    assert metrics["summary"]["memory_selection_rejection_reasons"] == {
+        "unverified_failure": 1
+    }
     assert not any(
         "batch_001.log" in warning for warning in metrics["data_quality_warnings"]
     )
     assert metrics["summary"]["memory_writer_fallback_writes"] == 0
+    assert metrics["summary"]["memory_writer_persisted_records"] == 1
+    assert metrics["summary"]["llm_skill_candidate_count"] == 1
+    assert metrics["summary"]["bootstrap_skill_eligible_stage_count"] == 1
+    assert metrics["summary"]["bootstrap_skill_candidate_count"] == 2
+    assert metrics["summary"]["bootstrap_skill_persisted_candidate_count"] == 2
+    assert metrics["summary"]["bootstrap_skill_rejected_count"] == 0
+    assert metrics["summary"]["skill_persisted_candidate_count"] == 1
+    assert metrics["summary"]["skill_promoted_active_count"] == 0
+    assert metrics["summary"]["skill_rejected_count"] == 1
+    assert metrics["summary"]["skill_rejection_reasons"] == {"stage_gate_failed": 1}
+    assert metrics["summary"]["skill_store_candidate_added"] == 1
     assert metrics["summary"]["scenesmith_repair_events"] == 1
     assert metrics["summary"]["scenesmith_repairs_accepted"] == 1
     assert metrics["summary"]["scenesmith_repairs_resolved"] == 1
@@ -365,7 +433,7 @@ def test_recorded_failure_stays_out_of_quality_denominators(tmp_path) -> None:
 
     metrics = collect_run_metrics(output_root, process_exit_code=0)
 
-    assert metrics["schema_version"] == "sceneexpert.run_metrics.v5"
+    assert metrics["schema_version"] == "sceneexpert.run_metrics.v9"
     assert metrics["quality_comparison_ready"] is False
     assert metrics["summary"]["completed_scenes"] == 1
     assert metrics["summary"]["failed_scenes"] == 1
@@ -400,3 +468,76 @@ def test_malformed_jsonl_is_a_warning_not_a_metrics_failure(tmp_path) -> None:
         warning.startswith("malformed_jsonl:")
         for warning in metrics["data_quality_warnings"]
     )
+
+
+def test_frozen_evaluation_contract_is_materialized_in_run_metrics(tmp_path) -> None:
+    output_root = tmp_path / "memory_on"
+    batch = output_root / "critic_on" / "batch_001"
+    hydra = batch / "hydra"
+    batch.mkdir(parents=True)
+    with (batch / "batch_cases.csv").open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=("scene_index", "prompt", "case_id"))
+        writer.writeheader()
+        writer.writerow(
+            {"scene_index": 0, "prompt": "classroom", "case_id": "classroom-a"}
+        )
+    _write_json(
+        hydra / "scene_000" / "scene_status.json",
+        {"status": "completed", "prompt": "classroom"},
+    )
+    _write_json(
+        hydra / "traces" / "trace_000000.json",
+        {
+            "status": "completed",
+            "experiment_name": "ablation_5_qwen3_full",
+            "config_hash": "exact-memory-on",
+            "experiment_signature": "semantic-memory-on",
+            "control_signature": "same-non-treatment-semantics",
+            "model": "qwen-test",
+            "memory_identity": {
+                "bank_id": "bank-1",
+                "revision": 9,
+                "content_fingerprint": "sceneexpert.memory_snapshot.v1:abc",
+                "memory_dir": "/memory/frozen",
+                "read_only": True,
+            },
+            "evaluation_contract": {
+                "pair_id": "pair-1",
+                "controlled_dimension": "fast_memory_retrieval",
+                "arm": "memory_on",
+                "require_frozen_memory": True,
+                "shared_base_identity": {
+                    "fingerprint": "sceneexpert.shared_base_snapshot.v1:def"
+                },
+                "compiled_inputs_identity": {
+                    "compiled_input_fingerprint": "sceneexpert.compiled_input.v1:aaa",
+                    "task_spec_fingerprint": "sceneexpert.task_spec.v1:bbb",
+                    "intent_contract_fingerprint": "sceneexpert.intent_contract.v1:ccc",
+                },
+            },
+            "component_flags": {
+                "fast_memory_retrieval": True,
+                "memory_writer": False,
+                "slow_memory_capture": True,
+            },
+            "component_status": {
+                "memory_snapshot": {"unchanged": True, "success": True}
+            },
+            "final_report": {
+                "generation_status": "complete",
+                "requirement_status": "satisfied",
+                "quality_status": "passed",
+            },
+            "stages": [],
+        },
+    )
+
+    metrics = collect_run_metrics(output_root)
+
+    assert metrics["evaluation_contract"]["contract_ready"] is True
+    assert metrics["evaluation_contract"]["arms"] == ["memory_on"]
+    assert metrics["memory_identity"]["frozen_all_unchanged"] is True
+    assert metrics["memory_identity"]["snapshot_identity_stable"] is True
+    assert metrics["experiment_identity"]["control_signatures"] == [
+        "same-non-treatment-semantics"
+    ]

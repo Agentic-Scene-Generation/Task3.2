@@ -1777,6 +1777,24 @@ if [ "${1:-}" = "--internal-run-batch" ]; then
     exit $?
 fi
 
+# Evaluation-only inventory: write the whole assignment before workers launch.
+# Per-batch manifests alone omit cases never started after an early failure.
+if [ "$DRY_RUN" = "false" ]; then
+    mkdir -p "$OUTPUT_ROOT"
+    printf 'batch_id,scene_index,prompt,case_id,critic_goal\n' > "$OUTPUT_ROOT/assigned_cases.csv"
+    assigned_count=0
+    for index in "${!CASES[@]}"; do
+        IFS='|' read -r case_id critic_goal prompt _scene_scope <<< "${CASES[$index]}"
+        if ! case_selected "$case_id"; then continue; fi
+        if [ "$MAX_CASES" -gt 0 ] && [ "$assigned_count" -ge "$MAX_CASES" ]; then break; fi
+        batch_index=$((index / SCENE_BATCH_SIZE + 1))
+        printf 'batch_%03d,%s,%s,%s,%s\n' "$batch_index" "$index" \
+            "$(csv_quote "$prompt")" "$(csv_quote "$case_id")" "$(csv_quote "$critic_goal")" \
+            >> "$OUTPUT_ROOT/assigned_cases.csv"
+        assigned_count=$((assigned_count + 1))
+    done
+fi
+
 run_exit_code=0
 if [ "$GENERATE_SHARED_BASE" = "true" ]; then
     if run_shared_base_with_recovery; then

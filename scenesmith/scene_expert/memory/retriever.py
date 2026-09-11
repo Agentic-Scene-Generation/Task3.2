@@ -8,9 +8,16 @@ from __future__ import annotations
 
 import re
 
-from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
+from scenesmith.scene_expert.memory.contracts import selection_from_record
+from scenesmith.scene_expert.memory.placement import (
+    experience_priority,
+    experience_text,
+    object_role,
+)
 from scenesmith.scene_expert.memory.room_taxonomy import room_types_compatible
+from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
 from scenesmith.scene_expert.memory.skill_policy import evaluate_skill_for_task
+from scenesmith.scene_expert.memory.state import observed_roles
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.schemas import (
     MemoryPack,
@@ -158,22 +165,26 @@ class MemoryRetriever:
         task_spec: SceneTaskSpec,
         stage: str,
         relation_context: StageRelationContext | None = None,
+        scene_state: dict | None = None,
     ) -> MemoryPack:
         """Retrieve and format memory for injection into a StageBrief."""
         self._store.refresh_if_changed()
         query_tokens = _build_query_tokens(task_spec, stage)
+        available_objects = observed_roles(scene_state)
+        query_tokens.update(_tokenize(" ".join(available_objects)))
 
         success_hints, placement_reference, success_ids = self._retrieve_success(
-            task_spec, stage, query_tokens
+            task_spec, stage, query_tokens, available_objects
         )
         failure_hints, failure_ids = self._retrieve_failure(
-            task_spec, stage, query_tokens
+            task_spec, stage, query_tokens, available_objects
         )
         skill_texts, skill_names, skill_decisions = self._retrieve_skills(
             task_spec,
             stage,
             query_tokens,
             relation_context=relation_context,
+            available_objects=available_objects,
         )
         source_task_ids, source_run_ids = self._selected_provenance(
             [*success_ids, *failure_ids, *skill_names]
@@ -200,6 +211,7 @@ class MemoryRetriever:
             memory_bank_revision=self._store.revision,
             selections=selections,
             skill_filter_decisions=skill_decisions,
+            current_scene_state=scene_state or {},
         ).deduplicated()
 
     def _build_selections(
@@ -218,19 +230,26 @@ class MemoryRetriever:
             ("failure", failure_ids, "failure_cases.jsonl"),
             ("skill", skill_names, "skills.jsonl"),
         )
+        records = {
+            **{
+                ("success", item.case_id): item
+                for item in self._store.active_success_cases
+            },
+            **{
+                ("failure", item.failure_id): item
+                for item in self._store.active_failure_cases
+            },
+            **{("skill", item.skill_name): item for item in self._store.active_skills},
+        }
         for memory_type, record_ids, filename in specs:
             for rank, memory_id in enumerate(record_ids, start=1):
                 rows.append(
-                    RetrievedMemorySelection(
-                        memory_id=memory_id,
-                        memory_type=memory_type,
+                    selection_from_record(
+                        records[(memory_type, memory_id)],
                         rank=rank,
-                        source_path=str((self._store.memory_dir / filename).resolve()),
-                        source_task_ids=source_task_ids.get(memory_id, []),
-                        source_run_ids=source_run_ids.get(memory_id, []),
+                        memory_dir=self._store.memory_dir,
                         bank_id=self._store.bank_id,
                         bank_revision=self._store.revision,
-                        injected_text=self._selection_text(memory_type, memory_id),
                     )
                 )
         return rows
@@ -294,7 +313,11 @@ class MemoryRetriever:
         return task_ids, run_ids
 
     def _retrieve_success(
-        self, task_spec: SceneTaskSpec, stage: str, query_tokens: set[str]
+        self,
+        task_spec: SceneTaskSpec,
+        stage: str,
+        query_tokens: set[str],
+        available_objects: list[str] | None = None,
     ) -> tuple[list[str], str, list[str]]:
         """Return hints, placement reference, and source case IDs.
 
@@ -304,6 +327,7 @@ class MemoryRetriever:
         """
         scored: list[tuple[float, SuccessCase]] = []
         required_tokens = _stage_required_object_tokens(task_spec, stage)
+        required_tokens.update(_tokenize(" ".join(available_objects or [])))
         for case in self._store.active_success_cases:
             if self._same_task(case):
                 continue
@@ -312,19 +336,31 @@ class MemoryRetriever:
             ):
                 continue
             case_object_tokens = set(
-                _tokenize(" ".join(case.required_objects or case.task_signature))
+                _tokenize(
+                    " ".join(
+                        [
+                            object_role(o)
+                            for e in case.placement_experience.episodes
+                            for o in (e.subject, e.anchor)
+                        ]
+                        if case.placement_experience
+                        else case.required_objects or case.task_signature
+                    )
+                )
             )
             if case_object_tokens and not (
                 required_tokens and case_object_tokens & required_tokens
             ):
                 continue
             candidate_tokens = _tokenize(
-                " ".join([case.room_type, case.style] + case.task_signature)
+                experience_text(case.placement_experience)
+                if case.placement_experience
+                else " ".join([case.room_type, case.style] + case.task_signature)
             )
             score = _keyword_score(query_tokens, candidate_tokens) * 1.5
             scored.append((score, case))
 
-        scored.sort(key=lambda x: x[0], reverse=True)
+        scored.sort(key=lambda x: (experience_priority(x[1]), x[0]), reverse=True)
         top = [(s, c) for s, c in scored[: self._max_success] if s > 0]
 
         hints = [case.to_hint_text() for _, case in top]
@@ -340,10 +376,15 @@ class MemoryRetriever:
         return hints, placement_reference, [case.case_id for _, case in top]
 
     def _retrieve_failure(
-        self, task_spec: SceneTaskSpec, stage: str, query_tokens: set[str]
+        self,
+        task_spec: SceneTaskSpec,
+        stage: str,
+        query_tokens: set[str],
+        available_objects: list[str] | None = None,
     ) -> tuple[list[str], list[str]]:
         scored: list[tuple[float, FailureCase]] = []
         task_object_tokens = _stage_required_object_tokens(task_spec, stage)
+        task_object_tokens.update(_tokenize(" ".join(available_objects or [])))
         for case in self._store.active_failure_cases:
             if self._same_task(case):
                 continue
@@ -351,18 +392,30 @@ class MemoryRetriever:
                 case.room_type, task_spec.room_type
             ):
                 continue
-            case_object_tokens = set(_tokenize(case.object))
+            case_object_tokens = set(
+                _tokenize(
+                    " ".join(
+                        object_role(o)
+                        for e in case.placement_experience.episodes
+                        for o in (e.subject, e.anchor)
+                    )
+                    if case.placement_experience
+                    else case.object
+                )
+            )
             if case_object_tokens and not (case_object_tokens & task_object_tokens):
                 continue
             candidate_tokens = _tokenize(
-                " ".join(
+                experience_text(case.placement_experience)
+                if case.placement_experience
+                else " ".join(
                     [case.room_type, case.object, case.failure_type, case.bad_pattern]
                 )
             )
             score = _keyword_score(query_tokens, candidate_tokens) * 1.5
             scored.append((score, case))
 
-        scored.sort(key=lambda x: x[0], reverse=True)
+        scored.sort(key=lambda x: (experience_priority(x[1]), x[0]), reverse=True)
         top = [
             (score, case) for score, case in scored[: self._max_failure] if score > 0
         ]
@@ -378,6 +431,7 @@ class MemoryRetriever:
         query_tokens: set[str],
         *,
         relation_context: StageRelationContext | None = None,
+        available_objects: list[str] | None = None,
     ) -> tuple[list[str], list[str], list[SkillSelectionDecision]]:
         scored: list[tuple[float, Skill]] = []
         decisions: dict[str, SkillSelectionDecision] = {}
@@ -391,6 +445,7 @@ class MemoryRetriever:
                 task_spec,
                 stage,
                 relation_context=relation_context,
+                available_objects=available_objects,
             )
             decisions[skill.skill_name] = policy.decision
             if not policy.eligible:

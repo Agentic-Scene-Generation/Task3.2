@@ -25,6 +25,7 @@ from scenesmith.agent_utils.thinking import (
     thinking_directive_from_effort,
 )
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
+from scenesmith.scene_expert.memory.adaptation import effective_relation_grade
 from scenesmith.scene_expert.schemas import (
     HarnessContext,
     MemoryPack,
@@ -73,6 +74,21 @@ You MUST output valid JSON matching this exact schema:
     }
   ],
   "stage_objective": "string — one clear sentence describing the goal for this stage",
+  "memory_adaptations": [
+    {
+      "memory_type": "success, failure, or skill",
+      "memory_id": "exact candidate memory_id",
+      "source_content_hash": "exact candidate content_hash",
+      "decision": "accepted, adapted, or rejected",
+      "reason": "why applicable to this current design problem or why rejected",
+      "source_relation_indices": [0],
+      "bindings": [{"source_role": "source object role", "current_role": "current task or observed role", "object_ids": []}],
+      "preconditions": ["conditions that must hold in this scene"],
+      "actions": ["complete current-task design or repair procedure; preserve safety conditions"],
+      "checks": ["how the designer checks the action against the current intent"],
+      "advice_checks": []
+    }
+  ],
   "recommended_skills": ["list of skill names from memory to apply, can be empty"],
   "constraints_for_designer": [
     "list of concrete placement/arrangement rules for the designer",
@@ -88,7 +104,57 @@ You MUST output valid JSON matching this exact schema:
 
 Guidelines:
 - Be specific and actionable. Vague guidance is useless for small models.
-- Derive constraints from: the task spec, the current scene state, AND the retrieved memory.
+- Keep ordinary StageBrief fields derived ONLY from the task and current scene.
+  All memory-derived advice belongs ONLY in memory_adaptations. Never copy a
+  rejected candidate into constraints, objective, optional proposals, checks,
+  failure_patterns_to_avoid, or recommended_skills. Omitted choices abstain.
+- Decide for every typed candidate. Accept only useful, applicable experience;
+  adapt actions to current roles/anchors/supports. Unknown evidence is not a
+  verified solution. Bind existing objects by exact current ID; leave IDs empty
+  for a role still to be created. Do not invent objects, coordinates, axes or
+  measured clearance. Preserve full skill preconditions/procedure/checks.
+- Prefer methods that add a spatial decision or avoid a demonstrated mistake;
+  reject inventory/rule restatements as redundant_task_rule. Never force memory
+  use. A shared task goal is fine if the METHOD adds useful information.
+- For placement_experience candidates, include advice_checks with fields:
+  source_episode_id (exact catalog ID), metric (anchor_local_offset_m,
+  relative_yaw_deg, aabb_separation_m, bbox_center_distance_m, or native_constraint), subject_role and
+  anchor_role (exact source names), constraint_id (empty for geometry).
+  Bind these roles as usual. Select at least one available source metric.
+  These are read-only observations, not desired numeric thresholds. AABB gaps
+  are not walkable clearance; transform yaw is not semantic front. Use
+  native_constraint only for a matching current spatial predicate supported by
+  the source native checks; never substitute a required-object count.
+- Spatial method_steps are transfer_unverified hypotheses. Keep their episode
+  and critic sources distinct: a critic excerpt is a source-scene opinion, not
+  a deterministic result. Use the relevant step and its source pairs together.
+  Never turn source measurements or quoted thresholds into fixed action/check
+  constants or guarantees. Describe how to recompute for current assets instead.
+  Set source_method_step_indices to the relevant zero-based method steps and
+  retain ALL of those steps' episode references in source_relation_indices.
+  For relation_bindings, observe each declared metric on its exact source pair;
+  do not substitute a wall gap for fixture spacing or AABB gap for center distance.
+  bbox_center_distance_m means bounding-box centers, NOT optical light centers.
+  A critic-advice-only step has no geometric verdict: leave advice_checks empty
+  and do not select source_context_episode_ids as method evidence. Its current
+  behavior may be observed, but never report a measured spatial success for it.
+  Unrelated steps may be excluded. Null means all method steps, not automatic filtering.
+- Source cases may include unrelated objects and whole-scene inventories.
+  Select only the source relation_index rows actually used by your advice in
+  source_relation_indices. Bind EVERY nonempty subject_role and target_role in
+  those rows, including wall/room anchors; do not bind unrelated source objects
+  merely to complete the source scene. Never copy unselected source relations
+  into actions, checks, or preconditions. Spatial candidates require at least
+  one selected row, except when only critic-advice-only steps are selected;
+  use [] for those steps or when the candidate has no spatial relations.
+  Null is the legacy all-rows scope, not an automatic choice of relevant rows.
+  Example: a bedroom source includes (0) bed against_wall wall and (1) wardrobe
+  corner_of_room room. For bed anchoring alone select [0], bind bed to current
+  bed (IDs empty if not created), and wall to a real current wall ID or an
+  explicit current task anchor. Do NOT import wardrobe/corner placement.
+- An observed optional object is context, NOT a required asset. For template
+  counts/groups use the exact current hard intent, never the source quantities.
+  A suggestion cannot alter critic scoring, skip a stage, or suppress autonomy.
 - The Authoritative Stage Intent section contains the exact hard contract rows
   for this stage. Cover every constraint_id and never rewrite, weaken, or
   replace one with a convention.
@@ -106,7 +172,9 @@ Guidelines:
   circulation, and opening-free wall length. Do not invent rooms, partitions,
   or other structural markers unless the Immutable User Task explicitly asks
   for structural separation.
-- Prioritize failure patterns from memory — they encode hard-won lessons.
+- Build the plan from the immutable task and positive guidance first. Treat the
+  bounded, verified failure pattern from memory as one local guardrail; it must
+  not suppress required assets, optional design autonomy, or an entire stage.
 - When an Immutable User Task is supplied, its explicit object, topology, and
   facing relations are authoritative. Memory and current-scene observations may
   refine only non-conflicting details. Omit a suggestion instead of replacing an
@@ -687,19 +755,66 @@ def _add_floor_plan_reservation_guidance(
 
 
 def _format_memory_for_prompt(memory_pack: MemoryPack) -> str:
-    """Format memory pack into a compact text block."""
-    parts: list[str] = []
-    if memory_pack.success_hints:
-        parts.append("Success patterns from similar scenes:")
-        parts.extend(f"  {i+1}. {h}" for i, h in enumerate(memory_pack.success_hints))
-    if memory_pack.failure_hints:
-        parts.append("Known failure patterns to avoid:")
-        parts.extend(f"  {i+1}. {h}" for i, h in enumerate(memory_pack.failure_hints))
-    if memory_pack.skill_texts:
-        parts.append("Applicable skills:")
-        for skill_text in memory_pack.skill_texts:
-            parts.append(skill_text)
-    return "\n".join(parts) if parts else "No relevant memory retrieved for this stage."
+    """Expose complete, identity-bound candidates to the existing Planner call."""
+    rows = memory_pack.deduplicated().selections
+    if not rows:
+        return "No identity-bound memory candidates. Return memory_adaptations=[]."
+    return json.dumps(
+        [
+            {
+                "memory_type": row.memory_type,
+                "memory_id": row.memory_id,
+                "content_hash": row.content_hash,
+                "advice": row.injected_text,
+                "verified_spatial_reference": row.placement_text,
+                "spatial_relations": [
+                    {
+                        **{
+                            key: value
+                            for key, value in relation.items()
+                            if key not in {"verification_evidence", "geometry_verified"}
+                        },
+                        "verification_status": effective_relation_grade(relation),
+                        "relation_index": index,
+                    }
+                    for index, relation in enumerate(row.spatial_relations)
+                ],
+                "applicability": row.applicability,
+                "placement_experience": (
+                    {
+                        "procedure": row.placement_experience.get("procedure", []),
+                        "method_steps": row.placement_experience.get(
+                            "method_steps", []
+                        ),
+                        "critic_advice": row.placement_experience.get(
+                            "critic_advice", []
+                        ),
+                        "applicability": row.placement_experience.get(
+                            "applicability", []
+                        ),
+                        "episodes": [
+                            {
+                                "episode_id": e["episode_id"],
+                                "subject_role": e["subject"].get("name")
+                                or e["subject"].get("category"),
+                                "anchor_role": e["anchor"].get("name")
+                                or e["anchor"].get("category"),
+                                "measurements": e["measurements"],
+                                "native_checks": e.get("native_checks", []),
+                            }
+                            for e in row.placement_experience.get("episodes", [])
+                        ],
+                    }
+                    if row.placement_experience
+                    else {}
+                ),
+                "evidence_warnings": row.evidence_warnings,
+            }
+            for row in rows
+        ],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
 
 
 def _stage_required_objects(task_spec: SceneTaskSpec, stage: str) -> list[str]:
