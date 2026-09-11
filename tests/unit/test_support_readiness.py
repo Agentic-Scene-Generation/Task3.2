@@ -40,7 +40,7 @@ def _case(target: dict) -> dict:
     }
 
 
-def test_support_readiness_fails_present_target_without_verified_surface() -> None:
+def test_support_readiness_defers_soft_furnishing_on_upholstered_seat() -> None:
     target = {
         "id": "armchair_0",
         "category": "armchair",
@@ -52,9 +52,10 @@ def test_support_readiness_fails_present_target_without_verified_surface() -> No
     results = evaluate_intent_contract_extensions(_case(target))
 
     assert [(row["relation_type"], row["label"]) for row in results] == [
-        ("support_readiness", "fail")
+        ("support_readiness", "unknown")
     ]
     assert results[0]["primary_object"] == "armchair_0"
+    assert results[0]["diagnostics"]["deferred_surface_policy"] == ("upholstered_seat")
 
 
 def test_support_readiness_failure_is_due_at_target_owning_stage() -> None:
@@ -66,6 +67,11 @@ def test_support_readiness_failure_is_due_at_target_owning_stage() -> None:
         "support_surfaces": [],
     }
     case_pack = _case(target)
+    case_pack["intent_contract"]["constraints"][0]["subjects"] = {
+        "category": "cup",
+        "count": 1,
+        "stage": "manipuland",
+    }
     results = evaluate_intent_contract_extensions(case_pack)
 
     apply_contract_execution_states(case_pack, results)

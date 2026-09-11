@@ -85,6 +85,9 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.constants im
     SEATING,
 )
 from scenesmith.scenebenchmark_critic.object_taxonomy import canonical_object_category
+from scenesmith.scenebenchmark_critic.relation_registry import (
+    UPHOLSTERED_SEAT_MANIPULAND_TOKENS,
+)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.seat_surface_assignment import (
     assign_work_seats_to_surfaces,
     room_bounds_from_case_pack,
@@ -122,10 +125,6 @@ _REQUIRED_BBOX_SUPPORT_CATEGORIES = frozenset(
         "dresser",
         "tv_stand",
     }
-)
-
-_UPHOLSTERED_SEAT_MANIPULAND_TOKENS = frozenset(
-    {"cushion", "pillow", "bolster", "blanket", "throw"}
 )
 
 
@@ -1979,7 +1978,7 @@ class StatefulManipulandAgent(BaseStatefulAgent, BaseManipulandAgent):
             if (
                 cohort.target_id == str(furniture_id)
                 and cohort.relation == "on_top_of"
-                and subject_tokens & _UPHOLSTERED_SEAT_MANIPULAND_TOKENS
+                and subject_tokens & UPHOLSTERED_SEAT_MANIPULAND_TOKENS
             ):
                 return "upholstered_seat"
         return "general"

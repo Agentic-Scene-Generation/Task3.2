@@ -539,6 +539,55 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertNotIn("glass bowl", bowl_spec.required_large_objects)
         self.assertEqual("manipuland", bowl_contract["constraints"][0]["stage"])
 
+    def test_tabletop_picture_frames_remain_manipuland_inventory(self) -> None:
+        contract = {
+            "constraints": [
+                {
+                    "relation": "required_count",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "subjects": {"category": "picture_frame", "count": 3},
+                },
+                {
+                    "relation": "on_top_of",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "subjects": {"category": "picture_frame", "count": 3},
+                    "targets": {"category": "dresser", "count": 1},
+                },
+            ]
+        }
+
+        reconciled = _reconcile_task_spec_stage_ownership(
+            SceneTaskSpec(
+                room_type="bedroom",
+                style="modern",
+                required_large_objects=["dresser"],
+                required_small_objects=["picture_frame"] * 3,
+            ),
+            contract,
+        )
+
+        self.assertEqual(["dresser"], reconciled.required_large_objects)
+        self.assertEqual(
+            ["picture_frame"] * 3,
+            reconciled.required_small_objects,
+        )
+        self.assertTrue(
+            all(row["stage"] == "manipuland" for row in contract["constraints"])
+        )
+
+    def test_explicit_wall_mount_still_owns_picture_frame(self) -> None:
+        self.assertEqual(
+            "wall_mounted",
+            generation_owner(
+                "picture_frame",
+                relation="mounted_on_wall",
+                endpoint="subject",
+                declared_owner="manipuland",
+            ),
+        )
+
     def test_subject_support_ownership_beats_passive_media_target(self) -> None:
         faces = {
             "relation": "faces",
