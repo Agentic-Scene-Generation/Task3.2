@@ -96,9 +96,18 @@ labels without `causal_link_verified=true` are rejected.
 
 ## 3. Export preference pairs
 
-Repeat generation from a frozen shared base, memory snapshot, prompt, tool set, and
-configuration. Disable MemoryWriter during repeated candidate collection so the
-injected context does not drift.
+Each preference group must share the exact decision input and pre-decision state.
+Repeating a whole scene from a shared floor plan does not guarantee this,
+especially for repair decisions with persistent conversation history.
+
+MemoryWriter may remain active between groups through the normal completed-scene
+lifecycle. Within a group, freeze the actual injected context and isolate
+candidate writes so siblings cannot change one another's inputs. The existing
+whole-run controlled evaluation launcher uses Writer OFF; this is not a blanket
+requirement for all future collection. See the
+[Qwen3.8 paired recollection protocol](sceneexpert_qwen_paired_collection.md) for
+the proposed decision-level sampler, memory lifecycle, and experiment gates.
+That sampler is not supplied by the existing Full capture preset.
 
 ```bash
 python scripts/export_sceneexpert_dpo.py \
