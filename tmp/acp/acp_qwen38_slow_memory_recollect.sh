@@ -14,13 +14,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ACP-local project mount. Override only when the operator's mount differs.
 PROJECT_ROOT="${PROJECT_ROOT:-/mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2}"
 FULL_LAUNCHER="${FULL_LAUNCHER:-$SCRIPT_DIR/acp_qwen38_full_generate.sh}"
+TASK3_SHARED_ROOT="${TASK3_SHARED_ROOT:-/mnt/afs/task3_2}"
 
 # This batch is deliberately Qwen3.8-only. Generic repository fallbacks remain
 # untouched; a mismatched alias is a collection error rather than silent drift.
 MODEL_NAME="${MODEL_NAME:-unsloth/Qwen3.8-27B-GGUF}"
 EXPECTED_MODEL_NAME="unsloth/Qwen3.8-27B-GGUF"
-MODEL="${MODEL:-Qwen3.8-27B-UD-Q8_K_XL.gguf}"
-MMPROJ="${MMPROJ:-mmproj-F16.gguf}"
+if [[ -z "${QWEN38_MODEL_ROOT:-}" ]]; then
+  if [[ -f "$TASK3_SHARED_ROOT/share_model/Qwen/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q8_K_XL.gguf" ]]; then
+    QWEN38_MODEL_ROOT="$TASK3_SHARED_ROOT/share_model/Qwen/Qwen3.8-27B-GGUF"
+  else
+    QWEN38_MODEL_ROOT="$TASK3_SHARED_ROOT/share_model/unsloth/Qwen3.8-27B-GGUF"
+  fi
+fi
+MODEL_DIR="${MODEL_DIR:-$QWEN38_MODEL_ROOT}"
+MODEL="${MODEL:-$MODEL_DIR/Qwen3.8-27B-UD-Q8_K_XL.gguf}"
+MMPROJ="${MMPROJ:-$MODEL_DIR/mmproj-F16.gguf}"
 
 # Begin with a bounded ordered batch. Set MAX_CASES=0 only after the first
 # export has been reviewed. Ordered scenes keep Writer updates causal: a memory
@@ -73,9 +82,11 @@ echo "Collection root: $COLLECTION_ROOT"
 
 env \
   PROJECT_ROOT="$PROJECT_ROOT" \
+  TASK3_SHARED_ROOT="$TASK3_SHARED_ROOT" \
   RUN_ID="$RUN_ID" \
   OUTPUT_ROOT="$OUTPUT_ROOT" \
   MODEL_NAME="$MODEL_NAME" \
+  MODEL_DIR="$MODEL_DIR" \
   MODEL="$MODEL" \
   MMPROJ="$MMPROJ" \
   CASE_SET="$CASE_SET" \
