@@ -2916,7 +2916,13 @@ class BaseStatefulAgent(ABC):
             state = json.loads(state_path.read_text(encoding="utf-8"))
             objects = state.get("objects") if isinstance(state, dict) else None
             valid = isinstance(objects, (dict, list)) and bool(objects)
-        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (
+            AttributeError,
+            OSError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
             failure["checkpoint"] = {
                 "validation": "error",
                 "error": f"{type(exc).__name__}: {exc}",

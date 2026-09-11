@@ -17,7 +17,7 @@ import numpy as np
 import trimesh
 import yaml
 
-from agents import Agent, FunctionTool, Runner, RunResult
+from agents import Agent, FunctionTool, ModelSettings, Runner, RunResult
 from omegaconf import DictConfig
 from pydrake.all import RigidTransform, RotationMatrix
 
@@ -153,6 +153,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
 
         # Vision tools for floor plan rendering (lazy initialized).
         self._vision_tools: FloorPlanVisionTools | None = None
+        self._critic_floor_plan_tools: FloorPlanTools | None = None
 
         # Geometry cache for reusing unchanged room geometry across iterations.
         self._geometry_cache: GeometryCache | None = None
@@ -255,6 +256,7 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             polygon_config=self._create_polygon_validation_config(),
             reservation_manifest=self.reservation_manifest,
         )
+        self._critic_floor_plan_tools = floor_plan_tools
 
         return list(vision_tools.tools.values()) + [floor_plan_tools.tools["validate"]]
 
@@ -375,8 +377,9 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
     async def _request_critique_impl(self, update_checkpoint: bool = True) -> str:
         """Implementation for critique request.
 
-        Runs critic which calls observe_scene, render_ascii, and validate tools.
-        Images persist in session via ToolOutputImage.
+        Collects render and validation evidence directly, then performs one
+        tool-free structured scoring request. This keeps llama.cpp from having
+        to combine a forced tool call with a structured-output grammar.
 
         Args:
             update_checkpoint: Whether to shift checkpoints. Set to False for
@@ -395,18 +398,73 @@ class StatefulFloorPlanAgent(BaseStatefulAgent, BaseFloorPlanAgent):
             f"{critique_instruction}\n\n{format_floor_plan_critic_context(self.layout)}"
         )
 
-        # Run critic.
-        # Critic will call observe_scene, render_ascii, and validate tools.
+        vision_tools = self._get_vision_tools()
+        validation_tools = self._critic_floor_plan_tools
+        if validation_tools is None:
+            raise RuntimeError("Floor-plan validation tools were not initialized")
+
+        # These calls are deterministic and read-only. Supplying their results
+        # directly avoids relying on model-selected tool orchestration for critic
+        # evidence and leaves the scoring request with no tools at all.
+        ascii_layout = vision_tools._render_ascii_impl()
+        validation = validation_tools._validate_impl()
+        direct_outputs = list(vision_tools._observe_scene_impl() or [])
+        image_parts: list[dict[str, str]] = []
+        for output in direct_outputs:
+            image_url = getattr(output, "image_url", None)
+            if image_url and len(image_parts) < 3:
+                image_parts.append(
+                    {"type": "input_image", "image_url": str(image_url)}
+                )
+        if not image_parts:
+            raise RuntimeError("Floor-plan critic render produced no images")
+
+        base_settings = self.critic.model_settings or ModelSettings()
+        score_instructions = self.critic.instructions
+        if isinstance(score_instructions, str):
+            score_instructions += (
+                "\n\nHARNESS EVIDENCE HANDOFF: The harness has already completed "
+                "the mandatory observe_scene, render_ascii, and validate steps. "
+                "Their exact outputs are attached to the scoring request. Do not "
+                "attempt to call tools; evaluate only that supplied evidence and "
+                "return the required structured score object."
+            )
+        critic_score = self.critic.clone(
+            tools=[],
+            instructions=score_instructions,
+            model_settings=base_settings.resolve(
+                ModelSettings(tool_choice="none", parallel_tool_calls=False)
+            ),
+        )
+        score_prompt = (
+            f"{critique_instruction}\n\n"
+            "The observation, ASCII rendering, and deterministic validation are "
+            "complete. Evaluate this exact candidate and return only the complete "
+            "structured score object required by your output schema. Do not call "
+            "tools and do not use Markdown or code fences.\n\n"
+            "DETERMINISTIC VALIDATION:\n"
+            f"layout={validation.layout}; connectivity={validation.connectivity}\n\n"
+            f"ASCII FLOOR PLAN:\n{ascii_layout}"
+        )
+        score_input: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": score_prompt},
+                    *image_parts,
+                ],
+            }
+        ]
+
         async with self._reasoning_persistence_context_for_session(self.critic_session):
             result = await Runner.run(
-                starting_agent=self.critic,
-                input=critique_instruction,
-                session=self.critic_session,
+                starting_agent=critic_score,
+                input=score_input,
+                session=None,
                 max_turns=self.cfg.agents.critic_agent.max_turns,
                 run_config=self._create_run_config(),
             )
         log_agent_usage(result=result, agent_name="CRITIC (FLOOR PLAN)")
-        vision_tools = self._get_vision_tools()
 
         # Parse structured output.
         response = result.final_output_as(FloorPlanCritiqueWithScores)
