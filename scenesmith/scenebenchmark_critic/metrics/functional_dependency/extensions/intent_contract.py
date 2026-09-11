@@ -32,6 +32,7 @@ from scenesmith.scenebenchmark_critic.relation_registry import (
     MANIPULAND_CATEGORIES,
     ROOM_RELATIVE_WALL_CATEGORIES,
     STAGE_ORDER,
+    UPHOLSTERED_SEAT_MANIPULAND_TOKENS,
     WALL_MOUNTED_CATEGORIES,
     relation_spec,
 )
@@ -54,7 +55,10 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.profiles imp
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.support_scoring import (
     build_support_surface_candidates,
 )
-from scenesmith.scenebenchmark_critic.object_taxonomy import generation_owner
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    canonical_object_category,
+    generation_owner,
+)
 
 
 _ENTRANCE_CATEGORIES = frozenset({"door", "entrance", "entry"})
@@ -439,6 +443,7 @@ def _evaluate_support_readiness(
     target_selector = constraint.get("targets") or {}
     subject_category = str(subject_selector.get("category") or "")
     target_category = str(target_selector.get("category") or "")
+    subject_tokens = set(canonical_object_category(subject_category).split("_"))
     declared_subject_stage = str(subject_selector.get("stage") or "")
     if not declared_subject_stage and str(constraint.get("stage") or "") in {
         "wall_mounted",
@@ -498,11 +503,27 @@ def _evaluate_support_readiness(
                 "object_function_profile",
             )
         )
+        deferred_surface_policy = ""
         if verified_candidates:
             label = "pass"
             reason = (
                 f"Support target `{target_id}` exposes {len(verified_candidates)} verified "
                 f"surface candidate(s) before `{subject_category}` is generated."
+            )
+        elif profile.is_seating and (
+            subject_tokens & UPHOLSTERED_SEAT_MANIPULAND_TOKENS
+        ):
+            # Prompt-owned soft furnishings on upholstered seats are handled by
+            # the manipuland stage's dedicated HSSD surface policy.  The seat
+            # surface is intentionally extracted there, so its absence from the
+            # furniture checkpoint is pending evidence rather than proof that
+            # the target is unusable.
+            label = "unknown"
+            deferred_surface_policy = "upholstered_seat"
+            reason = (
+                f"Support readiness for `{target_id}` is deferred: the manipuland "
+                f"stage resolves `{subject_category}` with the upholstered-seat "
+                "surface policy."
             )
         elif inferred_candidates:
             label = "unknown"
@@ -547,6 +568,7 @@ def _evaluate_support_readiness(
                         {candidate.source for candidate in candidates}
                     ),
                     "support_profile_source": profile.source,
+                    "deferred_surface_policy": deferred_surface_policy,
                     "has_bbox": has_bbox,
                     "has_support_declaration": has_support_declaration,
                 },

@@ -76,6 +76,7 @@ MANIPULAND_CATEGORIES = frozenset(
         "plate",
         "pen",
         "pen_holder",
+        "picture_frame",
         "pillow",
         "plush_toy",
         "record",
@@ -86,6 +87,14 @@ MANIPULAND_CATEGORIES = frozenset(
         "vase",
         "wastebasket",
     }
+)
+
+# Soft furnishings can use the narrowly gated upholstered-seat extraction
+# policy in the manipuland stage.  Keep this vocabulary shared with the critic
+# so its earlier support-readiness check does not reject a target that the
+# downstream executor is explicitly able to resolve.
+UPHOLSTERED_SEAT_MANIPULAND_TOKENS = frozenset(
+    {"blanket", "bolster", "cushion", "pillow", "throw"}
 )
 
 
