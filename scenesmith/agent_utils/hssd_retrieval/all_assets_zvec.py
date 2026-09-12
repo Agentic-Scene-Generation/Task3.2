@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,13 +13,45 @@ from typing import Any
 import numpy as np
 import trimesh
 
+from scenesmith.agent_utils.hssd_retrieval.alignment import (
+    apply_hssd_alignment_transform,
+)
 from scenesmith.agent_utils.hssd_retrieval.config import HssdZvecConfig
+from scenesmith.agent_utils.hssd_retrieval.data_loader import (
+    HssdMeshMetadata,
+    load_hssd_metadata_by_wordnet,
+)
 from scenesmith.agent_utils.hssd_retrieval.zvec_similarity import (
     LlamaTextEmbeddingClient,
 )
 from scenesmith.agent_utils.mesh_frame import gltf_y_up_dimensions_to_scene_z_up
 
 console_logger = logging.getLogger(__name__)
+
+_PLANAR_WALL_DECOR_TOKENS = frozenset(
+    {
+        "art",
+        "artwork",
+        "blackboard",
+        "canvas",
+        "chalkboard",
+        "clock",
+        "frame",
+        "map",
+        "mirror",
+        "painting",
+        "panel",
+        "photo",
+        "picture",
+        "poster",
+        "print",
+        "screen",
+        "sign",
+        "television",
+        "tv",
+    }
+)
+_MAX_PLANAR_WALL_DEPTH_RATIO = 0.5
 
 
 @dataclass
@@ -39,7 +72,13 @@ class AllAssetsZvecRetriever:
     ``asset_id`` (for example ``3dfuture:<uuid>``), not an HSSD SHA-1.
     """
 
-    def __init__(self, config: HssdZvecConfig, top_k: int) -> None:
+    def __init__(
+        self,
+        config: HssdZvecConfig,
+        top_k: int,
+        *,
+        hssd_preprocessed_path: Path | None = None,
+    ) -> None:
         if top_k < 1:
             raise ValueError("top_k must be positive")
         self.config = config
@@ -47,6 +86,40 @@ class AllAssetsZvecRetriever:
         self._client = LlamaTextEmbeddingClient(config)
         self._collection: Any | None = None
         self._unit_scales = self._load_unit_scales(config.all_assets_manifest_path)
+        self._hssd_metadata_by_id = self._load_hssd_orientation_metadata(
+            hssd_preprocessed_path
+        )
+
+    @staticmethod
+    def _load_hssd_orientation_metadata(
+        preprocessed_path: Path | None,
+    ) -> dict[str, HssdMeshMetadata]:
+        if preprocessed_path is None:
+            return {}
+        metadata_by_wordnet = load_hssd_metadata_by_wordnet(
+            preprocessed_path / "hssd_wnsynsetkey_index.json"
+        )
+        return {
+            metadata.mesh_id: metadata
+            for entries in metadata_by_wordnet.values()
+            for metadata in entries
+        }
+
+    def _align_source_mesh(
+        self, mesh_id: str, mesh: trimesh.Trimesh
+    ) -> trimesh.Trimesh:
+        """Restore source-specific mesh-frame normalization before export."""
+        if not mesh_id.startswith("hssd:"):
+            return mesh
+
+        raw_hssd_id = mesh_id.removeprefix("hssd:")
+        metadata = self._hssd_metadata_by_id.get(raw_hssd_id)
+        if metadata is None:
+            raise ValueError(
+                "HSSD orientation metadata is required in all-assets mode: "
+                f"{mesh_id}"
+            )
+        return apply_hssd_alignment_transform(mesh, metadata)
 
     @staticmethod
     def _load_unit_scales(manifest_path: Path | None) -> dict[str, float]:
@@ -103,6 +176,34 @@ class AllAssetsZvecRetriever:
         )
         return float(np.sum(np.abs(desired_dimensions - scene_extents)))
 
+    @staticmethod
+    def _is_candidate_geometry_compatible(
+        description: str,
+        object_type: str,
+        mesh: trimesh.Trimesh,
+    ) -> bool:
+        """Reject deep meshes retrieved for explicitly planar wall decor.
+
+        Cross-source embeddings can match an object depicted *in* an artwork
+        instead of an artwork asset itself (for example, a game controller for
+        a controller poster). Keep protruding wall lights and shelves valid by
+        applying this guard only when the request names a planar decor type.
+        """
+        if object_type.upper() != "WALL_MOUNTED":
+            return True
+        tokens = set(re.findall(r"[a-z0-9]+", description.lower()))
+        if not tokens.intersection(_PLANAR_WALL_DECOR_TOKENS):
+            return True
+
+        width, depth, height = (
+            abs(float(axis))
+            for axis in gltf_y_up_dimensions_to_scene_z_up(mesh.extents)
+        )
+        planar_span = max(width, height)
+        return planar_span > 0.0 and depth <= (
+            planar_span * _MAX_PLANAR_WALL_DEPTH_RATIO
+        )
+
     def retrieve_multiple(
         self,
         description: str,
@@ -116,7 +217,6 @@ class AllAssetsZvecRetriever:
         is intentionally not mapped to HSSD WordNet categories: the all-source
         collection has heterogeneous taxonomies.
         """
-        del object_type
         import zvec
 
         requested = max_candidates or self.top_k
@@ -145,6 +245,18 @@ class AllAssetsZvecRetriever:
                 unit_scale_to_m = self._unit_scales.get(mesh_id, 1.0)
                 if unit_scale_to_m != 1.0:
                     mesh.apply_scale(unit_scale_to_m)
+                mesh = self._align_source_mesh(mesh_id, mesh)
+                if not self._is_candidate_geometry_compatible(
+                    description, object_type, mesh
+                ):
+                    console_logger.warning(
+                        "Skipping non-planar all-assets candidate %s for planar "
+                        "wall request %r (scene dimensions=%s)",
+                        mesh_id,
+                        description,
+                        gltf_y_up_dimensions_to_scene_z_up(mesh.extents),
+                    )
+                    continue
             except Exception as exc:
                 console_logger.warning(
                     "Skipping unreadable all-assets candidate %s at %s: %s",

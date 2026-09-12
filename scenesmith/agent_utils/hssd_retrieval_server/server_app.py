@@ -192,7 +192,9 @@ class HssdRetrievalApp(flask.Flask):
                         "all_assets_embedding requires " "HSSD_ALL_ASSETS_MANIFEST_PATH"
                     )
                 self._retriever = AllAssetsZvecRetriever(
-                    config=zvec_config, top_k=self._hssd_top_k
+                    config=zvec_config,
+                    top_k=self._hssd_top_k,
+                    hssd_preprocessed_path=Path(preprocessed_path),
                 )
                 return self._retriever
 
