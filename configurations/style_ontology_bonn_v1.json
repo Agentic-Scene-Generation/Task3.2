@@ -1,0 +1,41 @@
+{
+  "schema_version": "bonn_furniture_styles_hierarchical@1.0",
+  "scope": "indoor furniture, lighting, decor, and manipulable objects",
+  "source": {
+    "title": "Learning Style Compatibility for Furniture",
+    "citation": "Aggarwal, Valiyev, Sener, and Yao, ECCV 2018 Workshops",
+    "url": "https://cg.cs.uni-bonn.de/backend/v2/files/publications/aggarwal-2018-learning/pdf/stylefurniture_4a15521dd0.pdf"
+  },
+  "level_1": {
+    "asian": {"id":"asian","display_name":"Asian","positive_criteria":["recognizable East, South, or Southeast Asian furniture language","regional joinery, silhouette, ornament, or material cues"],"exclusion_criteria":["region-neutral modern furniture","Asian room context without asset-level cues"],"confused_with":["modern","traditional","tropical"]},
+    "beach": {"id":"beach","display_name":"Beach / Coastal","positive_criteria":["light coastal palette","weathered or woven casual coastal construction"],"exclusion_criteria":["generic pale furniture without coastal cues","tropical motifs alone"],"confused_with":["farmhouse","scandinavian","tropical"]},
+    "contemporary": {"id":"contemporary","display_name":"Contemporary","positive_criteria":["current-era mixed materials and silhouettes","refined present-day design without one historic movement"],"exclusion_criteria":["canonical early modern language","specific midcentury cues"],"confused_with":["modern","transitional","eclectic"]},
+    "craftsman": {"id":"craftsman","display_name":"Craftsman","positive_criteria":["honest joinery and substantial wood construction","restrained handcrafted geometric detail"],"exclusion_criteria":["rough rustic construction","ornate Victorian decoration"],"confused_with":["rustic","traditional","farmhouse"]},
+    "eclectic": {"id":"eclectic","display_name":"Eclectic","positive_criteria":["intentional combination of visibly different style languages","contrasting historical or regional cues in one asset"],"exclusion_criteria":["uncertain single-style classification","ordinary mixed materials"],"confused_with":["contemporary","transitional","traditional"]},
+    "farmhouse": {"id":"farmhouse","display_name":"Farmhouse","positive_criteria":["country utilitarian form","painted, distressed, plank, trestle, or apron construction"],"exclusion_criteria":["unrefined rustic object without farmhouse form","formal traditional ornament"],"confused_with":["rustic","beach","craftsman"]},
+    "industrial": {"id":"industrial","display_name":"Industrial","positive_criteria":["exposed metal structure or hardware","factory-derived utilitarian form and raw finishes"],"exclusion_criteria":["polished metal alone","minimal furniture without industrial structure"],"confused_with":["modern","rustic","contemporary"]},
+    "mediterranean": {"id":"mediterranean","display_name":"Mediterranean","positive_criteria":["Southern European carved, wrought, tiled, or warm rustic cues","curved silhouettes with substantial ornament or texture"],"exclusion_criteria":["generic European traditional furniture","tropical woven furniture"],"confused_with":["traditional","rustic","tropical"]},
+    "midcentury": {"id":"midcentury","display_name":"Midcentury Modern","positive_criteria":["tapered or splayed legs","low profile, organic curve, and 1940s-1960s modern cues"],"exclusion_criteria":["generic current modern form","Victorian revival furniture"],"confused_with":["modern","scandinavian","contemporary"]},
+    "modern": {"id":"modern","display_name":"Modern","positive_criteria":["clean functional geometry and low ornament","deliberate modernist simplification"],"exclusion_criteria":["present-day styling without modernist cues","historical revival ornament"],"confused_with":["contemporary","midcentury","scandinavian"]},
+    "rustic": {"id":"rustic","display_name":"Rustic","positive_criteria":["rough natural material and visibly robust construction","aged, unfinished, or irregular craft character"],"exclusion_criteria":["refined farmhouse furniture","clean Scandinavian natural wood"],"confused_with":["farmhouse","craftsman","mediterranean"]},
+    "scandinavian": {"id":"scandinavian","display_name":"Scandinavian","positive_criteria":["light wood, restrained form, and functional warmth","slender clean construction with Nordic material restraint"],"exclusion_criteria":["generic white minimalist furniture","dark ornamental traditional furniture"],"confused_with":["modern","midcentury","beach"]},
+    "southwestern": {"id":"southwestern","display_name":"Southwestern","positive_criteria":["American Southwest regional motifs or carved forms","earth palette with leather, wood, or geometric textile cues"],"exclusion_criteria":["generic rustic furniture","Mediterranean ornament"],"confused_with":["rustic","traditional","mediterranean"]},
+    "traditional": {"id":"traditional","display_name":"Traditional","positive_criteria":["historical revival proportions and ornament","formal wood construction, moldings, carving, or cabriole forms"],"exclusion_criteria":["specifically Victorian when strong Victorian cues dominate","plain contemporary furniture"],"confused_with":["victorian","transitional","craftsman"]},
+    "transitional": {"id":"transitional","display_name":"Transitional","positive_criteria":["balanced combination of traditional structure and simplified current detailing","formal proportions with restrained ornament"],"exclusion_criteria":["unresolved traditional versus modern decision","strong single-period furniture"],"confused_with":["traditional","contemporary","modern"]},
+    "tropical": {"id":"tropical","display_name":"Tropical","positive_criteria":["rattan, cane, bamboo, or tropical motif used as a design language","lightweight resort or island-region construction"],"exclusion_criteria":["woven material alone without tropical form","coastal painted furniture"],"confused_with":["beach","asian","mediterranean"]},
+    "victorian": {"id":"victorian","display_name":"Victorian","positive_criteria":["dense nineteenth-century revival ornament","dark wood, tufting, curved carving, or elaborate silhouette"],"exclusion_criteria":["generic formal traditional furniture","light restrained neoclassical furniture"],"confused_with":["traditional","transitional","craftsman"]}
+  },
+  "level_2": {
+    "american_country": {"id":"american_country","display_name":"American Country","parent_level_1_id":"farmhouse","source_datasets":["3dfuture"],"source_labels":["American Country"]},
+    "minimalist": {"id":"minimalist","display_name":"Minimalist","parent_level_1_id":"modern","source_datasets":["3dfuture"],"source_labels":["Minimalist"]},
+    "light_luxury": {"id":"light_luxury","display_name":"Light Luxury","parent_level_1_id":"contemporary","source_datasets":["3dfuture"],"source_labels":["Light Luxury"]},
+    "japanese": {"id":"japanese","display_name":"Japanese","parent_level_1_id":"asian","source_datasets":["3dfuture"],"source_labels":["Japanese"]},
+    "korean": {"id":"korean","display_name":"Korean","parent_level_1_id":"asian","source_datasets":["3dfuture"],"source_labels":["Korean"]},
+    "southeast_asian": {"id":"southeast_asian","display_name":"Southeast Asian","parent_level_1_id":"asian","source_datasets":["3dfuture"],"source_labels":["Southeast Asia"]},
+    "new_chinese": {"id":"new_chinese","display_name":"New Chinese","parent_level_1_id":"asian","source_datasets":["3dfuture"],"source_labels":["New Chinese"]},
+    "ming_qing": {"id":"ming_qing","display_name":"Ming-Qing","parent_level_1_id":"asian","source_datasets":["3dfuture"],"source_labels":["Ming Qing"]},
+    "chinoiserie": {"id":"chinoiserie","display_name":"Chinoiserie","parent_level_1_id":"asian","source_datasets":["3dfuture"],"source_labels":["Chinoiserie"]},
+    "neoclassical": {"id":"neoclassical","display_name":"Neoclassical","parent_level_1_id":"traditional","source_datasets":["3dfuture"],"source_labels":["Neoclassical"]},
+    "european_classic": {"id":"european_classic","display_name":"European Classic","parent_level_1_id":"traditional","source_datasets":["3dfuture"],"source_labels":["European Classic"]}
+  }
+}

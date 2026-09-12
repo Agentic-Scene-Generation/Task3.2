@@ -1,0 +1,29 @@
+{
+  "passed": true,
+  "timestamp": 1788980150.5856075,
+  "collection": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_gpu_compact_20260909",
+  "manifest_sha256": "8983ccd27ea00e8816fbdef5591df08ab83a9e218a1b3c34c8b68f1136567263",
+  "model_id": "Qwen3-VL-Embedding-2B-Q8_0_llamacpp_0b5be7e4_cuda12_sm90",
+  "manifest_rows": 31903,
+  "verified_vectors": 30830,
+  "dimension": 2048,
+  "all_fields_match_manifest": true,
+  "all_vectors_finite_unit_norm": true,
+  "ledger_unique_and_complete": true,
+  "source_counts": {
+    "3dfuture": 14823,
+    "hssd": 10843,
+    "others:abo": 1113,
+    "others:gso": 1030,
+    "others:objaverse": 2490,
+    "others:polyhaven": 395,
+    "others:smithsonian": 57,
+    "others:ycb": 79
+  },
+  "pending_status_counts": {
+    "missing_geometry": 102,
+    "missing_images": 418,
+    "needs_generated_mesh_render": 553
+  },
+  "quality_retrieval_benchmark": "not performed"
+}

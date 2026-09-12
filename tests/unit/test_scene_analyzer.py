@@ -8,7 +8,7 @@ from unittest.mock import Mock
 from omegaconf import OmegaConf
 
 from scenesmith.agent_utils.room import ObjectType, RoomScene, UniqueID
-from scenesmith.agent_utils.scene_analyzer import SceneAnalyzer
+from scenesmith.agent_utils.scene_analyzer import SceneAnalyzer, VLMResponseFormatError
 from scenesmith.utils.llm_json import parse_llm_json, parse_llm_json_object
 
 
@@ -122,7 +122,7 @@ class TestSceneAnalyzer(unittest.TestCase):
         self.mock_scene.room_geometry = None
         self.mock_scene.text_description = "A simple study."
         self.scene_analyzer.analyze_scene = Mock(
-            return_value='''```json
+            return_value="""```json
             {
               "furniture_selections": [
                 {
@@ -133,7 +133,7 @@ class TestSceneAnalyzer(unittest.TestCase):
                 }
               ]
             }
-            ```'''
+            ```"""
         )
 
         selections = self.scene_analyzer.analyze_furniture_for_manipulands(
@@ -143,6 +143,70 @@ class TestSceneAnalyzer(unittest.TestCase):
 
         self.assertEqual(len(selections), 1)
         self.assertEqual(selections[0].furniture_id, UniqueID("desk_0"))
+
+    def test_analyze_furniture_raises_typed_error_after_invalid_responses(self):
+        """Exhausted parse retries should retain typed retry provenance."""
+        furniture = Mock()
+        furniture.object_id = UniqueID("desk_0")
+        furniture.name = "desk"
+        furniture.description = "wood desk"
+        furniture.object_type = ObjectType.FURNITURE
+        furniture.immutable = False
+        furniture.bbox_min = [0, 0, 0]
+        furniture.bbox_max = [1, 1, 1]
+
+        self.mock_scene.objects = {"desk_0": furniture}
+        self.mock_scene.room_geometry = None
+        self.mock_scene.text_description = "A simple study."
+        self.scene_analyzer.analyze_scene = Mock(side_effect=["[]", '"invalid"'])
+
+        with self.assertRaises(VLMResponseFormatError) as raised:
+            self.scene_analyzer.analyze_furniture_for_manipulands(
+                scene=self.mock_scene,
+                prompt_enum=Mock(),
+            )
+
+        error = raised.exception
+        self.assertEqual(error.stage, "manipuland")
+        self.assertEqual(error.reason, "invalid_model_response")
+        self.assertEqual(error.attempts, 2)
+        self.assertEqual(self.scene_analyzer.analyze_scene.call_count, 2)
+        self.assertIsInstance(error.__cause__, ValueError)
+        self.assertIn("Expected top-level JSON object", str(error.__cause__))
+
+    def test_analyze_furniture_retries_invalid_selection_schema(self):
+        """A non-list selection field should use the same typed retry path."""
+        furniture = Mock()
+        furniture.object_id = UniqueID("desk_0")
+        furniture.name = "desk"
+        furniture.description = "wood desk"
+        furniture.object_type = ObjectType.FURNITURE
+        furniture.immutable = False
+        furniture.bbox_min = [0, 0, 0]
+        furniture.bbox_max = [1, 1, 1]
+
+        self.mock_scene.objects = {"desk_0": furniture}
+        self.mock_scene.room_geometry = None
+        self.mock_scene.text_description = "A simple study."
+        invalid_schemas = (
+            '{"furniture_selections": {"furniture_id": "desk_0"}}',
+            "{}",
+        )
+        for invalid_schema in invalid_schemas:
+            with self.subTest(response=invalid_schema):
+                self.scene_analyzer.analyze_scene = Mock(return_value=invalid_schema)
+
+                with self.assertRaises(VLMResponseFormatError) as raised:
+                    self.scene_analyzer.analyze_furniture_for_manipulands(
+                        scene=self.mock_scene,
+                        prompt_enum=Mock(),
+                    )
+
+                self.assertEqual(self.scene_analyzer.analyze_scene.call_count, 2)
+                self.assertIsInstance(raised.exception.__cause__, ValueError)
+                self.assertIn(
+                    "non-list furniture_selections", str(raised.exception.__cause__)
+                )
 
 
 if __name__ == "__main__":

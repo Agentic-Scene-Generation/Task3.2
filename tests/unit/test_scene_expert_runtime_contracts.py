@@ -105,6 +105,30 @@ class SceneExpertRuntimeBoundaryTest(unittest.TestCase):
             runner_source,
         )
 
+    def test_parallel_runner_enables_auditable_chat_streaming(self) -> None:
+        runner_source = self._source("scripts/run_parallel_critic_on.sh")
+
+        self.assertIn(
+            'SCENEEXPERT_CHAT_COMPLETIONS_STREAM="${SCENEEXPERT_CHAT_COMPLETIONS_STREAM:-true}"',
+            runner_source,
+        )
+        self.assertIn(
+            'SCENEEXPERT_CHAT_COMPLETIONS_STREAM="$(normalize_bool "$SCENEEXPERT_CHAT_COMPLETIONS_STREAM")"',
+            runner_source,
+        )
+        self.assertIn(
+            "ERROR: SCENEEXPERT_CHAT_COMPLETIONS_STREAM must be true or false",
+            runner_source,
+        )
+        self.assertIn(
+            "export SCENEEXPERT_CHAT_COMPLETIONS_STREAM",
+            runner_source,
+        )
+        self.assertIn(
+            'echo "Chat Completions streaming: $SCENEEXPERT_CHAT_COMPLETIONS_STREAM"',
+            runner_source,
+        )
+
     def test_parallel_runner_preserves_generation_exit_on_metrics_failure(
         self,
     ) -> None:

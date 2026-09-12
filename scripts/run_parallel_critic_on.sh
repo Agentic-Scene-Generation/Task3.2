@@ -337,6 +337,10 @@ QUALITY_FAILURE_POLICY="${QUALITY_FAILURE_POLICY:-degraded}"
 # A typed scene-local failure remains visible in artifacts and metrics but does
 # not block critic-probe batches. Shared-base generation overrides this to strict.
 SCENE_FAILURE_POLICY="${SCENE_FAILURE_POLICY:-record}"
+# Stream active Chat Completions so the HTTP read timeout measures idle time,
+# not the total duration of a long llama.cpp generation. The client wrapper
+# assembles the chunks back into the standard non-streaming response contract.
+SCENEEXPERT_CHAT_COMPLETIONS_STREAM="${SCENEEXPERT_CHAT_COMPLETIONS_STREAM:-true}"
 BRANCH_FROM_SHARED_BASE="${BRANCH_FROM_SHARED_BASE:-false}"
 SHARED_BASE_STOP_STAGE="${SHARED_BASE_STOP_STAGE:-floor_plan}"
 SHARED_BASE_ROOT="${SHARED_BASE_ROOT:-}"
@@ -345,6 +349,7 @@ MAX_CASES="${MAX_CASES:-0}"
 CASE_FILTER="${CASE_FILTER:-}"
 INCLUDE_HOLDOUT_CASES="${INCLUDE_HOLDOUT_CASES:-false}"
 DRY_RUN="${DRY_RUN:-false}"
+SCENEEVAL_AFTER_RUN="${SCENEEVAL_AFTER_RUN:-auto}"
 CRITIC_PROBE_RENDER_FINAL_VIEWS="${CRITIC_PROBE_RENDER_FINAL_VIEWS:-false}"
 CRITIC_PROBE_FINAL_VIEW_PARALLELISM="${CRITIC_PROBE_FINAL_VIEW_PARALLELISM:-1}"
 FINAL_VIEW_PYTHON_BIN="${FINAL_VIEW_PYTHON_BIN:-$PYTHON_BIN}"
@@ -357,6 +362,7 @@ SKIP_MAIN_BPY_IMPORT="${SCENEEXPERT_SKIP_MAIN_BPY_IMPORT:-true}"
 HSSD_RETRIEVAL_BACKEND="${HSSD_RETRIEVAL_BACKEND:-clip}"
 HSSD_RENDERED_ASSET_CHOICE="${HSSD_RENDERED_ASSET_CHOICE:-false}"
 HSSD_ZVEC_COLLECTION_PATH="${HSSD_ZVEC_COLLECTION_PATH:-}"
+HSSD_ALL_ASSETS_MANIFEST_PATH="${HSSD_ALL_ASSETS_MANIFEST_PATH:-}"
 # A directory check alone is insufficient for BGE-M3: recent Transformers
 # releases reject pickle checkpoints when the active Torch is too old. Load it
 # once in the controller before any batch starts so an incompatible runtime
@@ -543,6 +549,20 @@ if [[ "$CASE_SET" != sceneeval* && "$DIFFICULTY_SELECTION" != "all" ]]; then
     echo "ERROR: --difficulty is supported only with SceneEval case sets" >&2
     exit 2
 fi
+case "${SCENEEVAL_AFTER_RUN,,}" in
+    auto)
+        if [[ "$CASE_SET" == sceneeval* ]]; then
+            SCENEEVAL_AFTER_RUN=true
+        else
+            SCENEEVAL_AFTER_RUN=false
+        fi
+        ;;
+    true|false) ;;
+    *)
+        echo "ERROR: SCENEEVAL_AFTER_RUN must be auto, true, or false" >&2
+        exit 2
+        ;;
+esac
 
 if [ $((CRITIC_PROBE_PORT_BASE + 374)) -gt 65535 ]; then
     echo "ERROR: CRITIC_PROBE_PORT_BASE leaves no room for one 375-port service block: $CRITIC_PROBE_PORT_BASE" >&2
@@ -636,8 +656,8 @@ if ! SKIP_MAIN_BPY_IMPORT="$(normalize_bool "$SKIP_MAIN_BPY_IMPORT")"; then
     echo "ERROR: SCENEEXPERT_SKIP_MAIN_BPY_IMPORT must be true or false" >&2
     exit 1
 fi
-if [[ "$HSSD_RETRIEVAL_BACKEND" != "clip" && "$HSSD_RETRIEVAL_BACKEND" != "embedding" ]]; then
-    echo "ERROR: HSSD_RETRIEVAL_BACKEND must be clip or embedding" >&2
+if [[ "$HSSD_RETRIEVAL_BACKEND" != "clip" && "$HSSD_RETRIEVAL_BACKEND" != "embedding" && "$HSSD_RETRIEVAL_BACKEND" != "all_assets_embedding" ]]; then
+    echo "ERROR: HSSD_RETRIEVAL_BACKEND must be clip, embedding, or all_assets_embedding" >&2
     exit 1
 fi
 if ! HSSD_RENDERED_ASSET_CHOICE="$(normalize_bool "$HSSD_RENDERED_ASSET_CHOICE")"; then
@@ -658,6 +678,10 @@ if [[ "$QUALITY_FAILURE_POLICY" != "strict" && "$QUALITY_FAILURE_POLICY" != "deg
 fi
 if [[ "$SCENE_FAILURE_POLICY" != "strict" && "$SCENE_FAILURE_POLICY" != "record" ]]; then
     echo "ERROR: SCENE_FAILURE_POLICY must be strict or record" >&2
+    exit 1
+fi
+if ! SCENEEXPERT_CHAT_COMPLETIONS_STREAM="$(normalize_bool "$SCENEEXPERT_CHAT_COMPLETIONS_STREAM")"; then
+    echo "ERROR: SCENEEXPERT_CHAT_COMPLETIONS_STREAM must be true or false" >&2
     exit 1
 fi
 if ! CRITIC_PROBE_RENDER_FINAL_VIEWS="$(normalize_bool "$CRITIC_PROBE_RENDER_FINAL_VIEWS")"; then
@@ -979,6 +1003,7 @@ export FINAL_VIEW_PYTHON_BIN
 export PIPELINE_STOP_STAGE BRANCH_FROM_SHARED_BASE SHARED_BASE_STOP_STAGE
 export SHARED_BASE_ROOT GENERATE_SHARED_BASE MAX_CASES CASE_FILTER
 export INCLUDE_HOLDOUT_CASES DRY_RUN SCENE_SELECTION SCENE_SELECTION_EXPLICIT
+export SCENEEVAL_AFTER_RUN
 export REPLAY_FROM_PATH REPLAY_MODE RESUME_FURNITURE_RENDER_MODE
 export SCENEEXPERT_DISABLE_ARTICULATED="$DISABLE_ARTICULATED"
 export SCENEEXPERT_DISABLE_MATERIALS="$DISABLE_MATERIALS"
@@ -986,8 +1011,10 @@ export SCENEEXPERT_DISABLE_BWRAP="$DISABLE_BWRAP"
 export SCENEEXPERT_SKIP_MAIN_BPY_IMPORT="$SKIP_MAIN_BPY_IMPORT"
 export FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS
 export QUALITY_FAILURE_POLICY SCENE_FAILURE_POLICY
+export SCENEEXPERT_CHAT_COMPLETIONS_STREAM
 export HSSD_RETRIEVAL_BACKEND HSSD_RENDERED_ASSET_CHOICE
 export HSSD_ZVEC_COLLECTION_PATH
+export HSSD_ALL_ASSETS_MANIFEST_PATH
 export CONVEX_MAX_OMP_THREADS SCENEEXPERT_OMP_NUM_THREADS
 export FLOOR_PLAN_DESIGNER_THINKING FLOOR_PLAN_CRITIC_THINKING
 export FURNITURE_DESIGNER_THINKING FURNITURE_CRITIC_THINKING
@@ -1083,17 +1110,25 @@ echo "final-view parallelism: $CRITIC_PROBE_FINAL_VIEW_PARALLELISM"
 echo "fail unresolved furniture hard constraints: $FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS"
 echo "quality failure policy: $QUALITY_FAILURE_POLICY"
 echo "critic-on scene failure policy: $SCENE_FAILURE_POLICY (shared-base: strict)"
+echo "Chat Completions streaming: $SCENEEXPERT_CHAT_COMPLETIONS_STREAM"
 echo "HSSD retrieval: backend=$HSSD_RETRIEVAL_BACKEND rendered_asset_choice=$HSSD_RENDERED_ASSET_CHOICE"
-if [ "$HSSD_RETRIEVAL_BACKEND" = "embedding" ]; then
+if [ "$HSSD_RETRIEVAL_BACKEND" = "embedding" ] || [ "$HSSD_RETRIEVAL_BACKEND" = "all_assets_embedding" ]; then
     if [ -z "$HSSD_ZVEC_COLLECTION_PATH" ]; then
         echo "ERROR: HSSD_ZVEC_COLLECTION_PATH is required for embedding retrieval" >&2
         exit 1
     fi
-    if [ ! -f "$HSSD_ZVEC_COLLECTION_PATH/0/embedding.index.3.proxima" ]; then
-        echo "ERROR: HSSD zvec index is missing or unreadable: $HSSD_ZVEC_COLLECTION_PATH" >&2
+    if ! compgen -G "$HSSD_ZVEC_COLLECTION_PATH/0/embedding.index.*.proxima" > /dev/null; then
+        echo "ERROR: Zvec index is missing or unreadable: $HSSD_ZVEC_COLLECTION_PATH" >&2
         exit 1
     fi
     echo "HSSD zvec collection: $HSSD_ZVEC_COLLECTION_PATH"
+    if [ "$HSSD_RETRIEVAL_BACKEND" = "all_assets_embedding" ]; then
+        if [ -z "$HSSD_ALL_ASSETS_MANIFEST_PATH" ] || [ ! -f "$HSSD_ALL_ASSETS_MANIFEST_PATH" ]; then
+            echo "ERROR: HSSD_ALL_ASSETS_MANIFEST_PATH must name the shared all-assets JSONL manifest" >&2
+            exit 1
+        fi
+        echo "HSSD all-assets manifest: $HSSD_ALL_ASSETS_MANIFEST_PATH"
+    fi
 fi
 echo "skip controller bpy import: $SKIP_MAIN_BPY_IMPORT"
 if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
@@ -1109,6 +1144,7 @@ echo "thinking profile: floor_plan=${FLOOR_PLAN_DESIGNER_THINKING}/${FLOOR_PLAN_
 echo "shared base: $BRANCH_FROM_SHARED_BASE (generate=$GENERATE_SHARED_BASE)"
 echo "replay source: ${REPLAY_FROM_PATH:-none} (mode=$REPLAY_MODE)"
 echo "holdout cases: $INCLUDE_HOLDOUT_CASES"
+echo "SceneEval no-VLM geometry after run: $SCENEEVAL_AFTER_RUN"
 echo "scene selection: $SCENE_SELECTION"
 echo "==============================================="
 
@@ -1280,7 +1316,7 @@ append_sceneexpert_component_override SCENEEXPERT_COMPONENT_TRACE_ENABLED trace
 append_sceneexpert_component_override SCENEEXPERT_COMPONENT_STRUCTURED_LLM_ENABLED structured_llm
 append_sceneexpert_component_override SCENEEXPERT_COMPONENT_SLOW_MEMORY_CAPTURE_ENABLED slow_memory_capture
 
-if [ "$HSSD_RETRIEVAL_BACKEND" = "embedding" ]; then
+if [ "$HSSD_RETRIEVAL_BACKEND" = "embedding" ] || [ "$HSSD_RETRIEVAL_BACKEND" = "all_assets_embedding" ]; then
     # Do not rely on paths.hssd_data_dir for the zvec index: on ACP hosts it
     # resolves through the protected /mnt/afs FUSE mount. Explicitly override
     # every agent so the override survives internal batch re-entry and Hydra
@@ -1826,6 +1862,20 @@ if [ "$DRY_RUN" = "false" ]; then
         echo "ERROR: run metrics collection failed with exit code $metrics_exit_code; generation artifacts are unchanged" >&2
         if [ "$run_exit_code" -eq 0 ]; then
             run_exit_code="$metrics_exit_code"
+        fi
+    fi
+    if [ "$SCENEEVAL_AFTER_RUN" = "true" ]; then
+        echo "collecting SceneEval no-VLM geometry metrics: $OUTPUT_ROOT/sceneeval"
+        sceneeval_exit_code=0
+        if "$PYTHON_BIN" -m scenesmith.scene_expert.sceneeval_geometry \
+            --output-root "$OUTPUT_ROOT"; then
+            :
+        else
+            sceneeval_exit_code=$?
+            echo "ERROR: SceneEval geometry collection failed with exit code $sceneeval_exit_code; generation artifacts are unchanged" >&2
+            if [ "$run_exit_code" -eq 0 ]; then
+                run_exit_code="$sceneeval_exit_code"
+            fi
         fi
     fi
 fi
