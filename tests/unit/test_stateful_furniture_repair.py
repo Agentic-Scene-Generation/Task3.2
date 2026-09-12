@@ -2225,6 +2225,83 @@ class StatefulFurnitureRepairTest(unittest.TestCase):
         StatefulFurnitureAgent is None,
         f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
     )
+    def test_task_stage_ownership_drops_prompt_only_manipuland_count(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            objects={},
+            scene_expert_task_spec={
+                "required_large_objects": ["tv_stand"],
+                "required_small_objects": ["television", "cup"],
+            },
+            scenebenchmark_intent_contract={
+                "constraints": [
+                    {
+                        "relation": "required_count",
+                        "stage": "manipuland",
+                        "strength": "hard",
+                        "subjects": {"category": "television", "count": 1},
+                    },
+                    {
+                        "relation": "on_top_of",
+                        "stage": "manipuland",
+                        "strength": "hard",
+                        "subjects": {"category": "television", "count": 1},
+                        "targets": {"category": "tv_stand", "count": 1},
+                    },
+                ]
+            },
+        )
+        agent.furniture_safety_controller = SimpleNamespace(
+            enabled=True,
+            required_counts={"television": 1, "tv_stand": 1},
+            required_terms={"television", "tv_stand"},
+        )
+        agent.stage_working_memory = MagicMock()
+
+        agent._synchronize_task_required_counts()
+
+        self.assertEqual(
+            agent.furniture_safety_controller.required_counts,
+            {"tv_stand": 1},
+        )
+        self.assertEqual(
+            agent.furniture_safety_controller.required_terms,
+            {"tv_stand"},
+        )
+        agent.stage_working_memory.set_required_counts.assert_called_once_with(
+            {"tv_stand": 1}
+        )
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
+    def test_task_stage_ownership_can_clear_all_prompt_furniture_counts(self) -> None:
+        agent = object.__new__(StatefulFurnitureAgent)
+        agent.scene = SimpleNamespace(
+            objects={},
+            scene_expert_task_spec={
+                "required_large_objects": [],
+                "required_small_objects": ["television"],
+            },
+        )
+        agent.furniture_safety_controller = SimpleNamespace(
+            enabled=True,
+            required_counts={"television": 1},
+            required_terms={"television"},
+        )
+        agent.stage_working_memory = MagicMock()
+
+        agent._synchronize_task_required_counts()
+
+        self.assertEqual(agent.furniture_safety_controller.required_counts, {})
+        self.assertEqual(agent.furniture_safety_controller.required_terms, set())
+        agent.stage_working_memory.set_required_counts.assert_called_once_with({})
+
+    @unittest.skipIf(
+        StatefulFurnitureAgent is None,
+        f"requires pydrake/stateful furniture imports: {_IMPORT_ERROR}",
+    )
     def test_intent_contract_subtype_replaces_generic_task_count(self) -> None:
         agent = object.__new__(StatefulFurnitureAgent)
         agent.scene = SimpleNamespace(

@@ -2975,12 +2975,21 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
     def _repair_required_counts(self) -> dict[str, int]:
         """Merge inventory counts with authoritative prompt-contract counts."""
         controller = getattr(self, "furniture_safety_controller", None)
-        counts = dict(getattr(controller, "required_counts", {}) or {})
         task_spec = getattr(self.scene, "scene_expert_task_spec", None)
-        if not task_spec:
+        if task_spec is None:
             metadata = getattr(self.scene, "metadata", {}) or {}
             if isinstance(metadata, dict):
                 task_spec = metadata.get("scene_expert_task_spec")
+        # The safety controller's prompt parser predates typed stage ownership.
+        # Once a TaskSpec exists, its furniture inventory replaces those broad
+        # prompt guesses so a later-stage object mentioned in the same sentence
+        # cannot be repaired into the furniture stage. Keep the legacy parser
+        # only for scenes that genuinely have no compiled/checkpointed TaskSpec.
+        counts = (
+            {}
+            if task_spec is not None
+            else dict(getattr(controller, "required_counts", {}) or {})
+        )
         required = (
             task_spec.get("required_large_objects", [])
             if isinstance(task_spec, dict)
@@ -3038,7 +3047,13 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             return
         counts = self._repair_required_counts()
         if not counts:
-            return
+            task_spec = getattr(self.scene, "scene_expert_task_spec", None)
+            if task_spec is None:
+                metadata = getattr(self.scene, "metadata", {}) or {}
+                if isinstance(metadata, dict):
+                    task_spec = metadata.get("scene_expert_task_spec")
+            if task_spec is None:
+                return
         controller.required_counts = counts
         # ``counts`` already merges the immutable contract with TaskCompiler
         # inventory. Replacing terms prevents an obsolete generic label (such
