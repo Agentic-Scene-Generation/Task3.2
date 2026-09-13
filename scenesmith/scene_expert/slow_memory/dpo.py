@@ -97,6 +97,7 @@ def load_trajectories(
     """Load and deduplicate both legacy and v2 trajectory rows."""
 
     trajectories: dict[str, TrajectoryRecord] = {}
+    payload_hashes: dict[str, str] = {}
     diagnostics: list[dict[str, Any]] = []
     for source in paths:
         source = Path(source)
@@ -147,6 +148,22 @@ def load_trajectories(
                         }
                     )
                     continue
+                # Compare the immutable serialized observation before rebasing
+                # media paths. ACP archives often contain byte-identical hydra
+                # and latest-run copies; their local absolute paths differ.
+                payload_hash = _hash(_canonical(record.model_dump(mode="json")), 64)
+                previous_hash = payload_hashes.get(record.trajectory_id)
+                if previous_hash is not None:
+                    if previous_hash != payload_hash:
+                        trajectories.pop(record.trajectory_id, None)
+                        _append_diagnostic(
+                            diagnostics,
+                            reason="trajectory_id_collision",
+                            detail="same trajectory_id has different serialized payloads; quarantined",
+                            trajectories=[record],
+                        )
+                    continue
+                payload_hashes[record.trajectory_id] = payload_hash
                 resolved_refs: list[dict[str, Any]] = []
                 for reference in record.image_refs:
                     normalized = dict(reference)
@@ -158,15 +175,6 @@ def load_trajectories(
                 record = record.model_copy(
                     update={"image_refs": resolved_refs}, deep=True
                 )
-                existing = trajectories.get(record.trajectory_id)
-                if existing is not None and existing != record:
-                    _append_diagnostic(
-                        diagnostics,
-                        reason="trajectory_id_collision",
-                        detail="same trajectory_id has different payloads",
-                        trajectories=[existing, record],
-                    )
-                    continue
                 trajectories[record.trajectory_id] = record
     return list(trajectories.values()), diagnostics
 
