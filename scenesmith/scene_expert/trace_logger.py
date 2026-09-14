@@ -39,6 +39,9 @@ console_logger = logging.getLogger(__name__)
 
 
 _DEFAULT_CODE_PROVENANCE_PATHS = (
+    "main.py",
+    "pyproject.toml",
+    "uv.lock",
     "configurations/config.yaml",
     "configurations/experiment/ablation_4c_qwen3_hybrid_memory.yaml",
     "configurations/experiment/ablation_5_qwen3_full.yaml",
@@ -85,19 +88,24 @@ _DEFAULT_CODE_PROVENANCE_PATHS = (
     "tmp/acp/acp_qwen38_4c_reuse.sh",
     "tmp/acp/acp_qwen38_full_reuse.sh",
     "tmp/acp/acp_qwen38_slow_memory_recollect.sh",
+    "tmp/acp/acp_qwen38_full_generate.sh",
+    "tmp/acp/acp_qwen38_initial_pairs.sh",
 )
 
 
 def collect_code_provenance(
     repo_root: Path | None = None,
     source_paths: Iterable[str] = _DEFAULT_CODE_PROVENANCE_PATHS,
+    *,
+    include_git: bool | None = None,
 ) -> dict[str, object]:
     """Capture the code identity loaded at scene-run startup.
 
     A replay can outlive a commit or start from a dirty worktree.  Resolved
     Hydra configuration alone therefore cannot identify the code that produced
-    a trace.  This helper intentionally records both Git state and hashes of
-    the modules that own the SceneExpert/repair behavior under investigation.
+    a trace. Source hashes work in manually synchronized directories too. Git
+    metadata is optional: disable it explicitly or through
+    SCENEEXPERT_CODE_PROVENANCE_GIT_ENABLED=false on collection servers.
     """
     root = repo_root or Path(__file__).resolve().parents[2]
     root = root.resolve()
@@ -111,7 +119,12 @@ def collect_code_provenance(
         "source_bundle_hash": "",
     }
 
-    git_executable = _git_executable()
+    if include_git is None:
+        include_git = os.environ.get(
+            "SCENEEXPERT_CODE_PROVENANCE_GIT_ENABLED", "true"
+        ).strip().lower() not in {"0", "false", "no", "off"}
+    git_executable = _git_executable() if include_git else None
+    provenance["git_metadata_enabled"] = include_git
 
     def git_output(*args: str) -> str:
         if git_executable is None:
@@ -133,7 +146,9 @@ def collect_code_provenance(
     status = git_output("status", "--porcelain=v1", "--untracked-files=normal")
     provenance["git_revision"] = revision
     provenance["git_status"] = status
-    provenance["git_status_hash"] = hashlib.sha256(status.encode("utf-8")).hexdigest()
+    provenance["git_status_hash"] = (
+        hashlib.sha256(status.encode("utf-8")).hexdigest() if include_git else ""
+    )
     provenance["dirty"] = bool(status) if revision else None
 
     resolved_source_paths = list(source_paths)

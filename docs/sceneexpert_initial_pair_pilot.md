@@ -14,8 +14,8 @@ scene parallelism must stay at one.
 At the first furniture `request_initial_design` boundary, the SceneExpert adapter:
 
 1. Requires an unfurnished state, first stage attempt, pinned Qwen alias, and empty
-   Designer/Critic histories. It records the resolved agent configuration, clean
-   Git revision, complete serialized room/house state, assets, scene attributes,
+   Designer/Critic histories. It records the resolved agent configuration, source
+   content fingerprint, complete serialized room/house state, assets, scene attributes,
    actual instruction, system prompt, tool declarations, safety-controller state,
    placement-noise profile, renderer caches/counters, and local Python/NumPy RNG.
    Live SQLite handles are not copied; verified-empty candidate sessions are fresh.
@@ -66,12 +66,17 @@ improvement. No training is launched by this script.
 
 ## Run on ACP
 
+Manually synchronize the latest development code to the server before running.
+No Git executable, repository metadata, clean-worktree check or Git network access
+is required. The launcher disables optional Git queries in canonical trace logging
+and fingerprints source files, prompts, configurations, launchers and dependency
+manifests. That fingerprint is pinned from startup through both candidates. Source
+changes still fail the gate; output/log/cache changes do not.
+
 ```bash
 set -euo pipefail
 cd /mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2
-git pull --ff-only origin dev_lwz_maintain
-
-RUN_ID=qwen38_initial_pairs_006 \
+RUN_ID=qwen38_initial_pairs_007 \
 PAIR_GROUPS=2 \
 CASE_SET=legacy8 \
 SCENE_SELECTION=default_bedroom,default_living_room \
@@ -86,6 +91,14 @@ Use a new RUN_ID if this one exists. The launcher rejects overwrites. It reuses
 the validated Full startup/server orchestration. It generates fresh floor plans,
 then runs normal full canonical scenes with the extra furniture B at each supported
 boundary. This is not a two-call-only GPU workload.
+
+The 006 launch reported `detected dubious ownership` from the old Git-dependent
+preflight and exited before generation. This was a deployment assumption in the
+collector, not a Qwen inference failure. Do not change global Git ownership
+exceptions to run this experiment. Version 2 snapshots use `code_provenance` with
+`identity_kind=source_bundle_sha256`; a digest is never mislabeled as a Git commit.
+Older Git-only snapshots can still be audited but cannot be resumed under the new
+content-identity contract. Use a fresh RUN_ID after synchronizing the fix.
 
 Optional: `SCENEEXPERT_PAIR_TIMEOUT=3600` bounds each B worker. Failed workers
 produce diagnostics; cancellation attempts cleanup and then terminates the private
@@ -138,13 +151,17 @@ Do not lower the pair gate or turn infrastructure failures into rejected answers
 
 ```bash
 python -m pytest --confcutdir=tests/unit \
+  tests/unit/test_pair_code_provenance.py \
   tests/unit/test_initial_pairs.py \
   tests/unit/test_initial_pair_execution.py \
   tests/unit/test_slow_memory_collection.py \
-  tests/unit/test_slow_memory_collection_launcher.py -q
+  tests/unit/test_slow_memory_collection_launcher.py \
+  tests/unit/test_trace_logger.py -q
 bash -n tmp/acp/acp_qwen38_initial_pairs.sh
 ```
 
 These tests cover proof tampering, files/media, native seam ordering with simulator
 doubles, an actual OpenAI HTTP client with mocked transport, and shell orchestration
-with stub workers. They do not substitute for the Linux/Drake/Qwen execution above.
+with stub workers. The code-identity regressions cover absent/unusable Git, manual
+copies, Windows/Linux newlines, ignored outputs and rejected source changes. They
+do not substitute for the Linux/Drake/Qwen execution above.
