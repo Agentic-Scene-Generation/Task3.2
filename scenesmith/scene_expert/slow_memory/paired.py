@@ -160,9 +160,14 @@ def audit_pairs(
     for group in sorted(root.glob("group_*")):
         reasons: list[str] = []
         try:
-            snapshot = read_json(group / "snapshot.json")
-            if read_json(group / "status.json").get("status") != "completed":
+            status = read_json(group / "status.json")
+            if status.get("status") != "completed":
                 reasons.append("group_execution_incomplete")
+                if status.get("error"):
+                    reasons.append(
+                        f"group_failure[{status.get('phase', 'unknown')}]: {status['error']}"
+                    )
+            snapshot = read_json(group / "snapshot.json")
             proof = read_json(group / "continuation_proof.json")
             if (
                 proof["canonical_before"] != proof["canonical_after"]

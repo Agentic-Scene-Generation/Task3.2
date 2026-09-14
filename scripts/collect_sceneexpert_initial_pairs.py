@@ -22,11 +22,30 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--worker-group", type=Path)
     mode.add_argument("--audit-root", type=Path)
+    mode.add_argument("--preflight", action="store_true")
+    parser.add_argument("--preflight-report", type=Path)
     parser.add_argument("--expected-groups", type=int, default=2)
     parser.add_argument("--min-pairs", type=int, default=1)
     args = parser.parse_args()
     if args.min_pairs < 0 or not 1 <= args.expected_groups <= 4:
         parser.error("expected groups must be 1..4 and min pairs must be nonnegative")
+    if args.preflight:
+        from scenesmith.scene_expert.slow_memory.paired_runtime import (
+            snapshot_codec_preflight,
+        )
+
+        try:
+            result = snapshot_codec_preflight()
+        except (ImportError, TypeError, ValueError) as exc:
+            result = {
+                "status": "failed",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+        if args.preflight_report:
+            write_json(args.preflight_report, result)
+        print(json.dumps(result, indent=2))
+        return 0 if result["status"] == "passed" else 2
     if args.worker_group:
         from scenesmith.scene_expert.slow_memory.paired_runtime import (
             run_shadow,

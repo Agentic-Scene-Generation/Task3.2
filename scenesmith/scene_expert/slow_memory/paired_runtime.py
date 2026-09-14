@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import hashlib
+import json
 import logging
 import os
 import random
@@ -33,36 +34,97 @@ from scenesmith.scene_expert.slow_memory.paired import (
     validate_tool_execution,
     write_json,
 )
-from scenesmith.scene_expert.slow_memory.paired_wire import capture_wire
 from scenesmith.scene_expert.slow_memory.paired_provenance import (
     verify_pair_code_provenance,
 )
+from scenesmith.scene_expert.slow_memory.paired_wire import capture_wire
 
 LOGGER = logging.getLogger(__name__)
 REPO = Path(__file__).resolve().parents[3]
 
 
-def json_value(value: Any) -> Any:
+def json_value(value: Any, *, field_path: str = "$") -> Any:
     """Serialize complete runtime data, never truncate unknown state silently."""
+    from httpx import Timeout
     from omegaconf import OmegaConf
 
     if OmegaConf.is_config(value):
-        return OmegaConf.to_container(value, resolve=True)
+        return json_value(
+            OmegaConf.to_container(value, resolve=True), field_path=field_path
+        )
+    if isinstance(value, Timeout):
+        # Transport settings are part of the contract, not a model-request body.
+        # B rebuilds its real Timeout via the native agent, then compares this
+        # representation before execution. Preserve disabled (None) dimensions.
+        return {
+            "__type__": "httpx.Timeout",
+            "values": json_value(value.as_dict(), field_path=field_path),
+        }
     if isinstance(value, Path):
         return str(value)
     if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json")
+        return json_value(value.model_dump(mode="python"), field_path=field_path)
     if dataclasses.is_dataclass(value):
-        return json_value(dataclasses.asdict(value))
+        return {
+            field.name: json_value(
+                getattr(value, field.name), field_path=f"{field_path}.{field.name}"
+            )
+            for field in dataclasses.fields(value)
+        }
     if isinstance(value, dict):
-        return {str(k): json_value(v) for k, v in value.items()}
+        return {
+            str(k): json_value(v, field_path=f"{field_path}.{k}")
+            for k, v in value.items()
+        }
     if isinstance(value, (list, tuple)):
-        return [json_value(v) for v in value]
+        return [
+            json_value(v, field_path=f"{field_path}[{i}]") for i, v in enumerate(value)
+        ]
     if isinstance(value, set):
-        return sorted(json_value(v) for v in value)
+        return sorted(json_value(v, field_path=field_path) for v in value)
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
-    raise TypeError(f"unsupported initial snapshot value: {type(value).__name__}")
+    raise TypeError(
+        f"unsupported initial snapshot value at {field_path}: {type(value).__name__}"
+    )
+
+
+def snapshot_codec_preflight() -> dict[str, Any]:
+    """Check the installed SDK's snapshot values without models, services or GPU."""
+    from importlib.metadata import version
+
+    from agents import ModelSettings
+    from agents.model_settings import Reasoning
+    from httpx import Timeout
+
+    settings = ModelSettings(
+        extra_args={"timeout": Timeout(connect=10.0, read=600, write=600, pool=None)},
+        reasoning=Reasoning(effort="high"),
+        max_tokens=1024,
+    )
+    serialized = json_value(settings, field_path="model_settings")
+    if json.loads(json.dumps(serialized)) != serialized:
+        raise ValueError("model settings snapshot did not round-trip through JSON")
+    timeout = serialized["extra_args"]["timeout"]
+    if timeout != {
+        "__type__": "httpx.Timeout",
+        "values": settings.extra_args["timeout"].as_dict(),
+    }:
+        raise ValueError("model settings timeout contract was not preserved")
+    return {
+        "schema_version": "sceneexpert.snapshot_codec_preflight.v1",
+        "status": "passed",
+        "openai_agents_version": version("openai-agents"),
+        "httpx_version": version("httpx"),
+        "timeout_contract": timeout,
+        "scope": "snapshot_serialization_only",
+    }
+
+
+def validate_model_settings(settings: Any, expected: Any) -> None:
+    """Reject changes to sampling or transport settings before the shadow runs."""
+    if json_value(settings, field_path="model_settings") != expected:
+        raise ValueError("reconstructed model settings differ")
 
 
 def tool_schemas(tools: list[Any]) -> list[dict[str, Any]]:
@@ -140,6 +202,7 @@ async def open_initial_pair(agent: Any, input_message: Any) -> "InitialPair | No
     if group is None:
         return None
     write_json(group / "status.json", {"status": "preparing", "canonical": "A"})
+    phase = "snapshot_serialization"
     try:
         from scenesmith.utils.openai import (
             reasoning_persistence_enabled,
@@ -152,7 +215,6 @@ async def open_initial_pair(agent: Any, input_message: Any) -> "InitialPair | No
             if key.startswith("scene_expert_")
             or key == "scenebenchmark_intent_contract"
         }
-        files = copy_scene_tree(scene_root, group / "input_scene")
         ctor = {
             name: getattr(agent, name)
             for name in (
@@ -185,7 +247,9 @@ async def open_initial_pair(agent: Any, input_message: Any) -> "InitialPair | No
             "constructor": ctor,
             "input": json_value(input_message),
             "system": json_value(agent.designer.instructions),
-            "model_settings": json_value(agent.designer.model_settings),
+            "model_settings": json_value(
+                agent.designer.model_settings, field_path="model_settings"
+            ),
             "tools": tool_schemas(agent.designer.tools),
             "designer_history": [],
             "critic_history": [],
@@ -217,8 +281,12 @@ async def open_initial_pair(agent: Any, input_message: Any) -> "InitialPair | No
                 if agent.house_layout
                 else None
             ),
-            "files": files,
         }
+        # Validate all runtime values before spending time copying native assets.
+        snapshot = json_value(snapshot, field_path="snapshot")
+        phase = "snapshot_assets"
+        snapshot["files"] = copy_scene_tree(scene_root, group / "input_scene")
+        phase = "snapshot_commit"
         write_json(group / "snapshot.json", snapshot)
         (group / "A").mkdir()
         write_json(
@@ -226,7 +294,15 @@ async def open_initial_pair(agent: Any, input_message: Any) -> "InitialPair | No
         )
         return InitialPair(group, snapshot)
     except Exception as exc:
-        write_json(group / "status.json", {"status": "failed", "error": str(exc)})
+        write_json(
+            group / "status.json",
+            {
+                "status": "failed",
+                "phase": phase,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
         raise
 
 
@@ -592,8 +668,9 @@ async def run_shadow(group: Path) -> None:
         )
         if tool_schemas(agent.designer.tools) != snapshot["tools"]:
             raise ValueError("reconstructed tool schemas differ")
-        if json_value(agent.designer.model_settings) != snapshot["model_settings"]:
-            raise ValueError("reconstructed model settings differ")
+        validate_model_settings(
+            agent.designer.model_settings, snapshot["model_settings"]
+        )
         agent.designer.instructions = snapshot["system"]
         for name, value in mapped["renderer"].items():
             if name == "_render_cache":
