@@ -4,6 +4,11 @@ Implementation: 2026-09-14. Local contract tests pass; native Linux/Drake/GPU
 execution must be validated by the ACP pilot below. Smoke 005 need not be rerun.
 Run 007 completed canonical scenes but failed before A/B snapshots; see
 [the 007 review and 008 recovery plan](sceneexpert_initial_pairs_007_review.md).
+Run 008 completed A/B execution but revealed stale cached physics labels. The
+**current next step is offline rescoring of retained 008 candidates**, not another
+generation run; use the commands and matching packaging script in
+[the 008 review and 009 rescoring plan](sceneexpert_initial_pairs_008_review.md).
+The generation commands below remain the historical pilot reference.
 
 ## What this entrypoint executes
 
@@ -48,8 +53,11 @@ execution and default HTTP client remain unchanged.
 
 ## What labels mean
 
-The pilot uses the existing read-only Main deterministic room evaluator on each
-raw furniture result. A report must contain effective scored checks and no unknown
+The pilot freshly computes native collisions on each raw furniture result using
+the frozen physics tolerances, then runs existing Main checks on a detached case
+pack with that fresh evidence. It never uses cached tool physics as a final raw
+measurement. `evaluation_proof.json` binds the raw state/assets, fresh physics and
+report; the export gate requires this proof. A report must contain effective scored checks and no unknown
 checks. Zero failures means accepted; one or more failures means rejected.
 This first pilot measures deterministic execution quality, not learned visual or
 style preference. Native end-of-call corrections/rollback are recorded separately;
@@ -102,7 +110,8 @@ preflight and exited before generation. This was a deployment assumption in the
 collector, not a Qwen inference failure. Do not change global Git ownership
 exceptions to run this experiment. Version 2 snapshots use `code_provenance` with
 `identity_kind=source_bundle_sha256`; a digest is never mislabeled as a Git commit.
-Older Git-only snapshots can still be audited but cannot be resumed under the new
+Historical cached-physics snapshots require independent fresh rescoring before
+preference export. Older Git-only snapshots cannot be resumed under the new
 content-identity contract. Use a fresh RUN_ID after synchronizing the fix.
 
 Optional: `SCENEEXPERT_PAIR_TIMEOUT=3600` bounds each B worker. Failed workers
@@ -118,10 +127,13 @@ Results live under `outputs/slow_memory/$RUN_ID/runs/paired_initial/`:
 
 - `pair_audit.json`: must have `gate_passed=true`, the requested number of valid
   groups, two candidate records per group, no errors, and `eligible_pair_count >= 1`.
+  `execution_integrity_passed` and `preference_gate_passed` identify execution/evidence
+  integrity separately from the existence of an eligible training pair.
 - `dpo/manifest.json`, `all.jsonl`, `images/`, and diagnostics: portable pair export.
 - `group_*/snapshot.json`, `input_scene/`: common initial state and input assets.
 - `group_*/A/` and `B/`: first HTTP request, raw state/assets, independent Main
-  report, full candidate trajectory/media, native safety message and returned state.
+  report, fresh `physics.json` and `evaluation_proof.json`, full candidate
+  trajectory/media, native safety message and returned state.
 - `group_*/continuation_proof.json`: unchanged canonical state/assets/memory hashes.
 - `group_*/status.json`, `shadow.log`, and optional `B/failure.json`: failure phase
   and subprocess diagnostics.
@@ -208,9 +220,10 @@ candidate or a passing experiment.
 
 ## Next experiment decisions
 
-1. Run the one-group recovery pilot above; inspect the first exported tool trajectories,
-   images, state hashes and raw Main report for one accepted/rejected pair. Package
-   the stopped run using the matching command above, even if execution failed.
+1. Rescore retained 008 raw states using the current 009 plan linked above; verify
+   fresh physical evidence and execution integrity before interpreting pair yield.
+   Package the stopped run with the matching RUN_ID, even if it exits 2. Two
+   accepted candidates without supported relative ranking remain zero pairs.
 2. If isolation and pairing pass, run two to four fresh furniture initial groups with a
    new RUN_ID and explicit legacy task names. Measure valid-group rate,
    eligible-pair yield, failure causes and cost per valid pair. These are development
@@ -232,10 +245,12 @@ python -m pytest --confcutdir=tests/unit \
   tests/unit/test_initial_pairs.py \
   tests/unit/test_initial_pair_execution.py \
   tests/unit/test_initial_pair_snapshot.py \
+  tests/unit/test_initial_pair_scoring.py \
   tests/unit/test_slow_memory_collection.py \
   tests/unit/test_slow_memory_collection_launcher.py \
   tests/unit/test_trace_logger.py -q
 bash -n tmp/acp/acp_qwen38_initial_pairs.sh
+bash -n tmp/acp/acp_qwen38_initial_pairs_rescore.sh
 python -m pytest --confcutdir=tests/unit tests/unit/test_review_package.py -q
 bash -n tmp/acp/pack_qwen38_initial_pairs.sh
 ```
