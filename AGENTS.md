@@ -650,3 +650,15 @@ synchronizes the server code; collection must work without Git access or `.git`
 metadata. Use source-content fingerprints for runtime reproducibility instead
 of requiring a clean Git checkout. Local development commit/push delivery above
 remains in effect.
+
+## Experiment Delivery Convention
+
+Every next-step experiment plan must include its runnable ACP command and a
+matching lightweight results-packaging command/script. ACP commands must contain
+no Git operations. Preserve the original project-relative directory hierarchy
+inside the download archive. Include diagnostic logs, run configuration, metrics,
+traces, pairing/audit reports and relevant evidence media within explicit size
+limits; omit large models, meshes, databases, replay asset copies and redundant
+outputs. Record omissions, truncation and checksums in a package manifest. Keep
+original server results untouched. A lightweight review package does not replace
+full server-side replay, pair auditing or a complete training dataset.
