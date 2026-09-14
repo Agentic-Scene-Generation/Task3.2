@@ -84,7 +84,7 @@ preserving the scene output and trajectories.
 
 ```bash
 cd /mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2
-git pull --ff-only origin dev_lwz_maintain
+# Manually synchronize the latest dev_lwz_maintain code before this ACP run.
 
 PYTHON_BIN="$PWD/.venv/bin/python"
 if [[ ! -x "$PYTHON_BIN" ]]; then
