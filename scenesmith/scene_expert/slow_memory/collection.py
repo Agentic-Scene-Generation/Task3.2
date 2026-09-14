@@ -34,10 +34,19 @@ def audit_collection(
         raise ValueError("min_pairs must be nonnegative")
     run_root, output_dir = Path(run_root), Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Candidate snapshots and their explicit labels have a separate audit. They
+    # must not inflate canonical scene coverage or inherit stage-final labels.
+    trajectory_paths = [
+        path
+        for path in sorted(run_root.rglob("trajectories*.jsonl"))
+        if "paired_initial" not in path.relative_to(run_root).parts
+    ]
     manifest = export_dpo_dataset(
-        trajectory_sources=[run_root], output_dir=output_dir / "dpo_probe"
+        trajectory_sources=trajectory_paths, output_dir=output_dir / "dpo_probe"
     )
-    records, load_errors = load_trajectories([run_root])
+    records, load_errors = load_trajectories(trajectory_paths)
+    if not trajectory_paths:
+        load_errors.append({"reason": "no_trajectory_files"})
     designers = [r for r in records if r.task_type in DEFAULT_TRAINING_TASK_TYPES]
     errors = sorted({row["reason"] for row in load_errors})
     if not designers:
@@ -51,7 +60,7 @@ def audit_collection(
     # that the archive retained the images. Includes tool-observation images.
     media_errors: list[dict[str, str]] = []
     checked_media: set[tuple[str, str]] = set()
-    for path in sorted(run_root.rglob("trajectories*.jsonl")):
+    for path in trajectory_paths:
         for line in path.read_text(encoding="utf-8").splitlines():
             try:
                 row = TrajectoryRecord.model_validate_json(line)
@@ -117,7 +126,11 @@ def audit_collection(
     trace_payloads: dict[tuple[str, ...], str] = {}
     for path in sorted(run_root.rglob("trace_*.json")):
         parts = path.relative_to(run_root).parts
-        if "shared_base" in parts or path.stem.endswith("_partial"):
+        if (
+            "shared_base" in parts
+            or "paired_initial" in parts
+            or path.stem.endswith("_partial")
+        ):
             continue
         try:
             trace = json.loads(path.read_text(encoding="utf-8"))

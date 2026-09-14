@@ -1,8 +1,10 @@
 # Qwen3.8-only paired recollection
 
-Status: proposed implementation and experiment protocol, 2026-09-11.
-The decision-level collection runner described below is **not implemented** by
-this document. Existing Full capture is an observer, not a paired sampler.
+Status: furniture initial-decision pilot implemented, 2026-09-14; GPU validation
+pending. See [the executable pilot and acceptance gates](sceneexpert_initial_pair_pilot.md).
+The broader protocol below remains the design target. Repair, nonempty-session
+replay, other stages, and independently isolated VLM judging are not implemented
+by this pilot. Ordinary Full capture remains an observer.
 
 ## Decision
 
