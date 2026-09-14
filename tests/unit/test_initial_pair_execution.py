@@ -22,6 +22,9 @@ from scenesmith.scene_expert.slow_memory.paired import (
 )
 from scenesmith.scene_expert.slow_memory.paired_wire import capture_wire, client_options
 from scenesmith.scene_expert.slow_memory import paired_runtime
+from scenesmith.scene_expert.slow_memory.paired_provenance import (
+    collect_pair_code_provenance,
+)
 from scenesmith.scene_expert.slow_memory.dpo import (
     export_dpo_dataset,
     load_trajectories,
@@ -317,7 +320,7 @@ def test_runtime_raw_capture_to_export_binds_each_candidate_before_safety(
         "source_scene_root": str(source),
         "files": files,
         "cfg": {},
-        "code_revision": "test",
+        "code_provenance": collect_pair_code_provenance(),
         "room_id": "bedroom",
         "input": "Place a bed",
         "scene_attributes": {

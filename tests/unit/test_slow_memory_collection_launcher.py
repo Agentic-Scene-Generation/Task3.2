@@ -126,6 +126,8 @@ mkdir -p "$OUTPUT_ROOT"
 [[ "$ACP_PARALLELISM" == 1 && "$MIN_DPO_PAIRS" == 0 ]]
 [[ "$MAX_CASES" == 2 && "$SCENEEXPERT_PAIR_MAX_GROUPS" == 2 ]]
 [[ "$CASE_SET" == legacy8 && "$SCENE_SELECTION" == default_bedroom,default_living_room ]]
+[[ "$SCENEEXPERT_CODE_PROVENANCE_GIT_ENABLED" == false ]]
+[[ "$SCENEEXPERT_PAIR_SOURCE_HASH" =~ ^[0-9a-f]{64}$ ]]
 exit "$STUB_GENERATION_EXIT"
 """,
     )
@@ -133,7 +135,10 @@ exit "$STUB_GENERATION_EXIT"
     _script(
         python_stub,
         """
-if [[ "$1" == "-c" ]]; then exit 0; fi
+if [[ "$1" == "-c" ]]; then
+  if [[ "$2" == *collect_pair_code_provenance* ]]; then printf '%064d\\n' 1; fi
+  exit 0
+fi
 shift
 [[ "$1" == --audit-root ]]
 mkdir -p "$2"
@@ -163,6 +168,7 @@ exit "$STUB_PAIR_EXIT"
     assert (root / "stub_audit.env").exists()
     status = (root / "exit_status.env").read_text()
     assert f"pair_audit_exit={pair_exit}" in status
+    assert "git_metadata=disabled" in (root / "pair_manifest.env").read_text()
     retry = subprocess.run(
         [_bash(), _path(launcher)], env=env, capture_output=True, text=True
     )

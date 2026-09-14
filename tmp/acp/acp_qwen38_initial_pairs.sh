@@ -3,7 +3,7 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-/mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2}"
-RUN_ID="${RUN_ID:-qwen38_initial_pairs_006_$(date +%Y%m%d_%H%M%S)}"
+RUN_ID="${RUN_ID:-qwen38_initial_pairs_007_$(date +%Y%m%d_%H%M%S)}"
 PAIR_GROUPS="${PAIR_GROUPS:-2}"
 [[ "$PAIR_GROUPS" =~ ^[1-4]$ ]] || { echo 'PAIR_GROUPS must be 1..4' >&2; exit 2; }
 [[ "${ACP_PARALLELISM:-1}" == 1 ]] || { echo 'Initial pair pilot requires ACP_PARALLELISM=1' >&2; exit 2; }
@@ -16,7 +16,14 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
 fi
 [[ -x "$PYTHON_BIN" ]] || { echo "No collection Python: $PYTHON_BIN" >&2; exit 2; }
 [[ ! -e "$COLLECTION_ROOT" ]] || { echo "Collection already exists: $COLLECTION_ROOT" >&2; exit 2; }
-(cd "$PROJECT_ROOT" && "$PYTHON_BIN" -c 'from scenesmith.scene_expert.slow_memory.paired_runtime import open_initial_pair, code_revision; from scenesmith.furniture_agents.stateful_furniture_agent import StatefulFurnitureAgent; from openai import DefaultAsyncHttpxClient; code_revision()')
+# ACP receives a manually synchronized source tree. Content identity is required;
+# Git metadata, repository ownership and network access are not runtime inputs.
+export SCENEEXPERT_CODE_PROVENANCE_GIT_ENABLED=false
+SCENEEXPERT_PAIR_SOURCE_HASH="$(cd "$PROJECT_ROOT" && "$PYTHON_BIN" -c 'from scenesmith.scene_expert.slow_memory.paired_provenance import collect_pair_code_provenance; print(collect_pair_code_provenance()["source_bundle_hash"])')"
+[[ "$SCENEEXPERT_PAIR_SOURCE_HASH" =~ ^[0-9a-f]{64}$ ]] || { echo 'Invalid pair source fingerprint' >&2; exit 2; }
+export SCENEEXPERT_PAIR_SOURCE_HASH
+echo "Pair source SHA256: $SCENEEXPERT_PAIR_SOURCE_HASH"
+(cd "$PROJECT_ROOT" && "$PYTHON_BIN" -c 'from scenesmith.scene_expert.slow_memory.paired_runtime import open_initial_pair; from scenesmith.furniture_agents.stateful_furniture_agent import StatefulFurnitureAgent; from openai import DefaultAsyncHttpxClient')
 
 # Observer audit and pair audit are separate gates. A zero-pair observer probe
 # cannot make this wrapper succeed: the final pair gate always requires >=1 pair.
@@ -38,6 +45,7 @@ cp "${BASH_SOURCE[0]}" "$PAIR_ROOT/entrypoint.sh"
 printf '%s\n' 'collection_kind=furniture_initial_independent_pairs' \
   "expected_groups=$PAIR_GROUPS" 'candidates_per_group=2' 'canonical_candidate=A' \
   'scoring=raw_candidate_main_deterministic_checks' 'min_pairs=1' \
+  "source_bundle_hash=$SCENEEXPERT_PAIR_SOURCE_HASH" 'git_metadata=disabled' \
   > "$PAIR_ROOT/pair_manifest.env"
 printf '%s\n' "generation_exit=$generation_exit" "pair_audit_exit=$pair_exit" \
   > "$PAIR_ROOT/exit_status.env"

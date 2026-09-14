@@ -34,6 +34,9 @@ from scenesmith.scene_expert.slow_memory.paired import (
     write_json,
 )
 from scenesmith.scene_expert.slow_memory.paired_wire import capture_wire
+from scenesmith.scene_expert.slow_memory.paired_provenance import (
+    verify_pair_code_provenance,
+)
 
 LOGGER = logging.getLogger(__name__)
 REPO = Path(__file__).resolve().parents[3]
@@ -60,17 +63,6 @@ def json_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     raise TypeError(f"unsupported initial snapshot value: {type(value).__name__}")
-
-
-def code_revision() -> str:
-    revision = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=REPO, text=True
-    ).strip()
-    if subprocess.check_output(
-        ["git", "status", "--porcelain"], cwd=REPO, text=True
-    ).strip():
-        raise ValueError("paired runtime requires a clean committed checkout")
-    return revision
 
 
 def tool_schemas(tools: list[Any]) -> list[dict[str, Any]]:
@@ -181,8 +173,8 @@ async def open_initial_pair(agent: Any, input_message: Any) -> "InitialPair | No
                 ctor[f"{prefix}_server_host"] = parsed.hostname
                 ctor[f"{prefix}_server_port"] = parsed.port
         snapshot = {
-            "schema_version": "sceneexpert.initial_snapshot.v1",
-            "code_revision": code_revision(),
+            "schema_version": "sceneexpert.initial_snapshot.v2",
+            "code_provenance": verify_pair_code_provenance(repo_root=REPO),
             "model": EXPECTED_MODEL,
             "source_scene_root": str(scene_root),
             "room_relative": scene_dir.relative_to(scene_root).as_posix(),
@@ -267,6 +259,9 @@ class InitialPair:
 
     def capture_returned(self, agent: Any, message: str, candidate: str) -> None:
         """Commit completion only after native safety and its returned state exist."""
+        verify_pair_code_provenance(
+            self.snapshot.get("code_provenance", {}), repo_root=REPO
+        )
         directory = self.group / candidate
         state = json_value(agent.scene.to_state_dict())
         write_json(directory / "returned_state.json", state)
@@ -281,6 +276,9 @@ class InitialPair:
 
     def capture_raw(self, agent: Any, result: Any, *, candidate: str = "A") -> None:
         """Score exactly the post-Runner state before native end-of-call safety."""
+        verify_pair_code_provenance(
+            self.snapshot.get("code_provenance", {}), repo_root=REPO
+        )
         from scenesmith.agent_utils.stage_working_memory import (
             _extract_agent_result_trace,
         )
@@ -345,7 +343,7 @@ class InitialPair:
             task_spec=SceneTaskSpec.model_validate(task_spec),
             model_id=EXPECTED_MODEL,
             config_hash=digest(self.snapshot["cfg"]),
-            code_provenance={"git_revision": self.snapshot["code_revision"]},
+            code_provenance=self.snapshot["code_provenance"],
             max_prompt_chars=4 * 1024**2,
             max_response_chars=4 * 1024**2,
         )
@@ -510,6 +508,11 @@ def shadow_environment(group: Path) -> dict[str, str]:
 
 async def run_shadow(group: Path) -> None:
     """Reconstruct fresh clients, tools, renderer and empty sessions for B."""
+    snapshot = read_json(group / "snapshot.json")
+    verify_pair_code_provenance(snapshot.get("code_provenance", {}), repo_root=REPO)
+    if tree_hashes(group / "input_scene") != snapshot["files"]:
+        raise ValueError("snapshot files changed; refuse shadow replay")
+
     from agents import Runner
     from omegaconf import OmegaConf
     from scenesmith.agent_utils.house import HouseLayout, RoomGeometry
@@ -520,12 +523,6 @@ async def run_shadow(group: Path) -> None:
     from scenesmith.utils.logging import ConsoleLogger
     from scenesmith.utils.openai import configure_reasoning_persistence
 
-    snapshot = read_json(group / "snapshot.json")
-    if (
-        code_revision() != snapshot["code_revision"]
-        or tree_hashes(group / "input_scene") != snapshot["files"]
-    ):
-        raise ValueError("snapshot/code changed; refuse shadow replay")
     destination = group / "B"
     if (destination / "result.json").exists():
         if (

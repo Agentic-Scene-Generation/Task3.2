@@ -644,3 +644,9 @@ The current target is `dev_lwz_maintain` and `origin/dev_lwz_maintain`; follow a
 explicitly requested branch change. Stage only the intended task changes. Verify
 the push result and report any failure rather than claiming synchronization.
 This convention does not authorize force-pushing or overwriting unrelated work.
+
+ACP/server run commands must contain no Git operations. The user manually
+synchronizes the server code; collection must work without Git access or `.git`
+metadata. Use source-content fingerprints for runtime reproducibility instead
+of requiring a clean Git checkout. Local development commit/push delivery above
+remains in effect.
