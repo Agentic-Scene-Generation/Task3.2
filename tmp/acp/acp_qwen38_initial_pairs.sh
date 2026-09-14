@@ -3,7 +3,7 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-/mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2}"
-RUN_ID="${RUN_ID:-qwen38_initial_pairs_007_$(date +%Y%m%d_%H%M%S)}"
+RUN_ID="${RUN_ID:-qwen38_initial_pairs_008_$(date +%Y%m%d_%H%M%S)}"
 PAIR_GROUPS="${PAIR_GROUPS:-2}"
 [[ "$PAIR_GROUPS" =~ ^[1-4]$ ]] || { echo 'PAIR_GROUPS must be 1..4' >&2; exit 2; }
 [[ "${ACP_PARALLELISM:-1}" == 1 ]] || { echo 'Initial pair pilot requires ACP_PARALLELISM=1' >&2; exit 2; }
@@ -23,6 +23,11 @@ SCENEEXPERT_PAIR_SOURCE_HASH="$(cd "$PROJECT_ROOT" && "$PYTHON_BIN" -c 'from sce
 [[ "$SCENEEXPERT_PAIR_SOURCE_HASH" =~ ^[0-9a-f]{64}$ ]] || { echo 'Invalid pair source fingerprint' >&2; exit 2; }
 export SCENEEXPERT_PAIR_SOURCE_HASH
 echo "Pair source SHA256: $SCENEEXPERT_PAIR_SOURCE_HASH"
+PAIR_LOG_DIR="${ACP_LOG_ROOT:-$PROJECT_ROOT/tmp/acp_logs}/$RUN_ID"
+mkdir -p "$PAIR_LOG_DIR"
+"$PYTHON_BIN" "$PROJECT_ROOT/scripts/collect_sceneexpert_initial_pairs.py" \
+  --preflight --preflight-report "$PAIR_LOG_DIR/pair_preflight.json" \
+  2>&1 | tee "$PAIR_LOG_DIR/pair_preflight.log"
 (cd "$PROJECT_ROOT" && "$PYTHON_BIN" -c 'from scenesmith.scene_expert.slow_memory.paired_runtime import open_initial_pair; from scenesmith.furniture_agents.stateful_furniture_agent import StatefulFurnitureAgent; from openai import DefaultAsyncHttpxClient')
 
 # Observer audit and pair audit are separate gates. A zero-pair observer probe

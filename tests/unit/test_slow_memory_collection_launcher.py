@@ -114,8 +114,9 @@ def test_full_launcher_preserves_outer_entrypoint(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("generation_exit,pair_exit", [(0, 0), (0, 2), (7, 2)])
+@pytest.mark.parametrize("preflight_exit", [0, 9])
 def test_initial_pair_launcher_requires_real_pair_gate_even_after_observer_success(
-    tmp_path: Path, generation_exit: int, pair_exit: int
+    tmp_path: Path, generation_exit: int, pair_exit: int, preflight_exit: int
 ) -> None:
     launcher = tmp_path / "acp_qwen38_initial_pairs.sh"
     shutil.copyfile(ROOT / "tmp/acp/acp_qwen38_initial_pairs.sh", launcher)
@@ -140,6 +141,15 @@ if [[ "$1" == "-c" ]]; then
   exit 0
 fi
 shift
+if [[ "$1" == --preflight ]]; then
+  [[ "$2" == --preflight-report ]]
+  if [[ "$STUB_PREFLIGHT_EXIT" != 0 ]]; then
+    printf '%s\\n' '{"status":"failed"}' > "$3"
+    exit "$STUB_PREFLIGHT_EXIT"
+  fi
+  printf '%s\\n' '{"status":"passed"}' > "$3"
+  exit 0
+fi
 [[ "$1" == --audit-root ]]
 mkdir -p "$2"
 [[ "$3" == --expected-groups && "$4" == 2 && "$5" == --min-pairs && "$6" == 1 ]]
@@ -153,17 +163,25 @@ exit "$STUB_PAIR_EXIT"
         "PROJECT_ROOT": _path(ROOT),
         "PYTHON_BIN": _path(python_stub),
         "COLLECTION_ROOT": _path(batch),
+        "ACP_LOG_ROOT": _path(tmp_path / "acp_logs"),
         "PAIR_GROUPS": "2",
         "ACP_PARALLELISM": "1",
         "CASE_SET": "legacy8",
         "SCENE_SELECTION": "default_bedroom,default_living_room",
         "STUB_GENERATION_EXIT": str(generation_exit),
         "STUB_PAIR_EXIT": str(pair_exit),
+        "STUB_PREFLIGHT_EXIT": str(preflight_exit),
     }
     result = subprocess.run(
         [_bash(), _path(launcher)], env=env, capture_output=True, text=True
     )
-    assert result.returncode == (generation_exit or pair_exit), result.stderr
+    assert result.returncode == (
+        preflight_exit or generation_exit or pair_exit
+    ), result.stderr
+    if preflight_exit:
+        assert not batch.exists()  # No model/scene job starts after failed preflight.
+        assert list((tmp_path / "acp_logs").glob("*/pair_preflight.json"))
+        return
     root = batch / "runs/paired_initial"
     assert (root / "stub_audit.env").exists()
     status = (root / "exit_status.env").read_text()
