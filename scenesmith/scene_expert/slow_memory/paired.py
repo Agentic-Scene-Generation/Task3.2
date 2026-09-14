@@ -150,10 +150,10 @@ def validate_tool_execution(
             )
 
 
-def audit_pairs(
-    root: Path, *, min_pairs: int = 1, expected_groups: int = 1
-) -> dict[str, Any]:
-    """Export only groups with independent results and identical effective requests."""
+def validate_pair_inputs(
+    root: Path, *, require_fresh_physics: bool = True
+) -> tuple[list[Path], list[dict[str, Any]], list[str]]:
+    """Validate immutable execution artifacts; legacy mode is for rescoring only."""
     sources: list[Path] = []
     groups: list[dict[str, Any]] = []
     errors: list[str] = []
@@ -186,6 +186,12 @@ def audit_pairs(
             if request_a.get("model") != EXPECTED_MODEL:
                 reasons.append("unexpected_model")
             for name, candidate in (("A", a), ("B", b)):
+                if require_fresh_physics:
+                    from scenesmith.scene_expert.slow_memory.paired_scoring import (
+                        validate_scoring_proof,
+                    )
+
+                    validate_scoring_proof(group / name, candidate)
                 if candidate.get("status") != "completed":
                     reasons.append(f"{name}_execution_failed")
                 if digest(
@@ -274,13 +280,25 @@ def audit_pairs(
             reasons.append(f"incomplete_group: {exc}")
         groups.append({"group": group.name, "valid": not reasons, "errors": reasons})
         errors.extend(f"{group.name}: {reason}" for reason in reasons)
+    return sources, groups, errors
+
+
+def audit_pairs(
+    root: Path, *, min_pairs: int = 1, expected_groups: int = 1
+) -> dict[str, Any]:
+    """Export only independent groups with fresh raw-state evidence."""
+    sources, groups, errors = validate_pair_inputs(root)
     if len(groups) != expected_groups:
         errors.append(f"group_count_mismatch: {len(groups)} != {expected_groups}")
     manifest = export_dpo_dataset(trajectory_sources=sources, output_dir=root / "dpo")
     records, diagnostics = load_trajectories(sources)
     if diagnostics:
         errors.append("trajectory_load_failed")
+    execution_integrity_passed = not errors
     count = manifest["stats"]["eligible_pair_count"]
+    preference_gate_passed = count >= min_pairs and (
+        min_pairs == 0 or manifest["validation"]["valid"]
+    )
     if count < min_pairs or (min_pairs > 0 and not manifest["validation"]["valid"]):
         errors.append("minimum_pair_gate_failed")
     result = {
@@ -288,6 +306,9 @@ def audit_pairs(
         "groups": groups,
         "errors": errors,
         "gate_passed": not errors,
+        "execution_integrity_passed": execution_integrity_passed,
+        "preference_gate_passed": preference_gate_passed,
+        "valid_group_count": sum(group["valid"] for group in groups),
         "candidate_count": len(records),
         "eligible_pair_count": count,
         "min_pairs": min_pairs,

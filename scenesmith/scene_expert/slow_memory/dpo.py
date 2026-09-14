@@ -378,7 +378,11 @@ def build_preference_pairs(
         if not accepted:
             _append_diagnostic(
                 diagnostics,
-                reason="missing_exact_context_counterpart",
+                reason=(
+                    "no_accepted_candidate"
+                    if len(records) > 1
+                    else "missing_exact_context_counterpart"
+                ),
                 detail="exact context has no authoritative accepted response",
                 trajectories=records,
             )
@@ -398,7 +402,11 @@ def build_preference_pairs(
             if len(critic_ranked) < 2:
                 _append_diagnostic(
                     diagnostics,
-                    reason="missing_exact_context_counterpart",
+                    reason=(
+                        "no_eligible_preference_contrast"
+                        if len(records) > 1
+                        else "missing_exact_context_counterpart"
+                    ),
                     detail=(
                         "exact context has neither a rejected outcome nor two "
                         "independently critic-scored observed responses"

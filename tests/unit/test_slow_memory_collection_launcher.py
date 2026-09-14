@@ -37,6 +37,41 @@ def _script(path: Path, text: str) -> None:
     path.chmod(0o755)
 
 
+@pytest.mark.parametrize("exit_code", [0, 2, 7])
+def test_offline_rescore_launcher_needs_no_models_and_preserves_exit(
+    tmp_path: Path, exit_code: int
+) -> None:
+    python_stub = tmp_path / "python-stub"
+    _script(
+        python_stub,
+        """
+[[ "$2" == --rescore-source && "$4" == --rescore-output ]]
+[[ "$3" == */outputs/slow_memory/original/runs/paired_initial ]]
+mkdir -p "$5"
+printf '%s\\n' 'fresh physics audit' > "$5/stub.txt"
+exit "$STUB_EXIT"
+""",
+    )
+    command = [_bash(), _path(ROOT / "tmp/acp/acp_qwen38_initial_pairs_rescore.sh")]
+    env = {
+        **os.environ,
+        "PROJECT_ROOT": _path(tmp_path),
+        "RUN_ID": "rescore_test",
+        "SOURCE_RUN_ID": "original",
+        "PYTHON_BIN": _path(python_stub),
+        "STUB_EXIT": str(exit_code),
+    }
+    result = subprocess.run(command, env=env, capture_output=True, text=True)
+    assert result.returncode == exit_code, result.stderr
+    log = tmp_path / "tmp/acp_logs/rescore_test"
+    assert f"exit_code={exit_code}\n" in (log / "exit_status.env").read_text()
+    assert "model_calls=0" in (log / "run_metadata.env").read_text()
+    status = (log / "exit_status.env").read_bytes()
+    retry = subprocess.run(command, env=env, capture_output=True, text=True)
+    assert retry.returncode == 2 and "already exists" in retry.stderr
+    assert (log / "exit_status.env").read_bytes() == status
+
+
 @pytest.mark.parametrize("generation_exit,audit_exit", [(0, 0), (0, 2), (7, 2)])
 def test_wrapper_packages_audit_even_after_failure_and_preserves_exit_status(
     tmp_path: Path, generation_exit: int, audit_exit: int

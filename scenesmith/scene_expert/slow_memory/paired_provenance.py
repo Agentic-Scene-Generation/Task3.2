@@ -16,6 +16,7 @@ _REQUIRED_SOURCES = (
     "pyproject.toml",
     "scenesmith/agent_utils/base_stateful_agent.py",
     "scenesmith/scene_expert/slow_memory/paired_runtime.py",
+    "scenesmith/scene_expert/slow_memory/paired_scoring.py",
     "scenesmith/scene_expert/slow_memory/paired_provenance.py",
     "scenesmith/scene_expert/slow_memory/paired_wire.py",
     "scripts/collect_sceneexpert_initial_pairs.py",

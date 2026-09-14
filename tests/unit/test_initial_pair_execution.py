@@ -310,6 +310,31 @@ def test_runtime_raw_capture_to_export_binds_each_candidate_before_safety(
     cfg_module.critic_config_from_any = lambda cfg: SimpleNamespace(enabled=True)
     for module in (trace_module, api_module, cfg_module):
         monkeypatch.setitem(sys.modules, module.__name__, module)
+    from scenesmith.scene_expert.slow_memory import paired_scoring
+
+    def fresh_score(scene, cfg):
+        report = api_module.evaluate_room_scene(scene)
+        state_hash = paired_runtime.digest(
+            paired_runtime.json_value(scene.to_state_dict())
+        )
+        physics = {
+            "available": True,
+            "source_phase": "sceneexpert_raw_candidate",
+            "scene_hash": "geometry",
+            "raw_state_sha256": state_hash,
+            "collisions": [],
+        }
+        report["case_pack"] = {"physics_evidence": physics}
+        return report, {
+            "schema_version": paired_scoring.SCORING_PROTOCOL,
+            "raw_state_sha256": state_hash,
+            "evaluation_state_sha256": state_hash,
+            "scene_content_hash": "geometry",
+            "physics_sha256": paired_runtime.digest(physics),
+            "report_sha256": paired_runtime.digest(report),
+        }
+
+    monkeypatch.setattr(paired_scoring, "score_raw_candidate", fresh_score)
     source = tmp_path / "canonical"
     source.mkdir()
     (source / "geometry.sdf").write_text("room")
