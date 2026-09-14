@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Two fresh, simple scene tasks; canonical A plus one isolated furniture shadow B.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="${PROJECT_ROOT:-/mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2}"
+RUN_ID="${RUN_ID:-qwen38_initial_pairs_006_$(date +%Y%m%d_%H%M%S)}"
+PAIR_GROUPS="${PAIR_GROUPS:-2}"
+[[ "$PAIR_GROUPS" =~ ^[1-4]$ ]] || { echo 'PAIR_GROUPS must be 1..4' >&2; exit 2; }
+[[ "${ACP_PARALLELISM:-1}" == 1 ]] || { echo 'Initial pair pilot requires ACP_PARALLELISM=1' >&2; exit 2; }
+COLLECTION_ROOT="${COLLECTION_ROOT:-$PROJECT_ROOT/outputs/slow_memory/$RUN_ID}"
+OUTPUT_ROOT="$COLLECTION_ROOT/runs"
+PAIR_ROOT="$OUTPUT_ROOT/paired_initial"
+PYTHON_BIN="${PYTHON_BIN:-$PROJECT_ROOT/.venv/bin/python}"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  PYTHON_BIN=/mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-main/.venv/bin/python
+fi
+[[ -x "$PYTHON_BIN" ]] || { echo "No collection Python: $PYTHON_BIN" >&2; exit 2; }
+[[ ! -e "$COLLECTION_ROOT" ]] || { echo "Collection already exists: $COLLECTION_ROOT" >&2; exit 2; }
+(cd "$PROJECT_ROOT" && "$PYTHON_BIN" -c 'from scenesmith.scene_expert.slow_memory.paired_runtime import open_initial_pair, code_revision; from scenesmith.furniture_agents.stateful_furniture_agent import StatefulFurnitureAgent; from openai import DefaultAsyncHttpxClient; code_revision()')
+
+# Observer audit and pair audit are separate gates. A zero-pair observer probe
+# cannot make this wrapper succeed: the final pair gate always requires >=1 pair.
+generation_exit=0
+env PROJECT_ROOT="$PROJECT_ROOT" RUN_ID="$RUN_ID" COLLECTION_ROOT="$COLLECTION_ROOT" \
+  OUTPUT_ROOT="$OUTPUT_ROOT" PYTHON_BIN="$PYTHON_BIN" \
+  CASE_SET="${CASE_SET:-legacy8}" SCENE_SELECTION="${SCENE_SELECTION:-default_bedroom,default_living_room}" \
+  DIFFICULTY_SELECTION="${DIFFICULTY_SELECTION:-all}" MAX_CASES="$PAIR_GROUPS" \
+  ACP_PARALLELISM=1 MIN_DPO_PAIRS=0 \
+  SCENEEXPERT_INITIAL_PAIRS_DIR="$PAIR_ROOT" SCENEEXPERT_PAIR_MAX_GROUPS="$PAIR_GROUPS" \
+  SCENEEXPERT_PAIR_TIMEOUT="${SCENEEXPERT_PAIR_TIMEOUT:-3600}" \
+  bash "$SCRIPT_DIR/acp_qwen38_slow_memory_recollect.sh" || generation_exit=$?
+
+pair_exit=0
+"$PYTHON_BIN" "$PROJECT_ROOT/scripts/collect_sceneexpert_initial_pairs.py" \
+  --audit-root "$PAIR_ROOT" --expected-groups "$PAIR_GROUPS" --min-pairs 1 || pair_exit=$?
+mkdir -p "$PAIR_ROOT"
+cp "${BASH_SOURCE[0]}" "$PAIR_ROOT/entrypoint.sh"
+printf '%s\n' 'collection_kind=furniture_initial_independent_pairs' \
+  "expected_groups=$PAIR_GROUPS" 'candidates_per_group=2' 'canonical_candidate=A' \
+  'scoring=raw_candidate_main_deterministic_checks' 'min_pairs=1' \
+  > "$PAIR_ROOT/pair_manifest.env"
+printf '%s\n' "generation_exit=$generation_exit" "pair_audit_exit=$pair_exit" \
+  > "$PAIR_ROOT/exit_status.env"
+echo "Pair artifacts: $PAIR_ROOT"
+if [[ "$generation_exit" != 0 ]]; then exit "$generation_exit"; fi
+exit "$pair_exit"

@@ -1077,7 +1077,8 @@ class TrajectoryCollector:
             },
             metadata={
                 "task_spec": self.task_spec.model_dump(mode="json"),
-                "capture_policy": (
+                "capture_policy": payload.get("capture_policy")
+                or (
                     "only_last_designer_call_receives_stage_outcome"
                     if role == "designer"
                     else "critic_advice_requires_downstream_causal_verification"
@@ -1098,6 +1099,40 @@ class TrajectoryCollector:
             },
         )
         return self._append(record)
+
+    def capture_candidate(
+        self,
+        *,
+        payload: dict[str, Any],
+        evidence: PreferenceEvidence,
+        outcome: TrajectoryOutcome,
+        scene_state_path: str,
+    ) -> None:
+        """Capture independently evaluated data without chronological relabeling."""
+        if not evidence.authoritative or not outcome.causal_link_verified:
+            raise ValueError("candidate capture requires independently bound evidence")
+        payload = dict(payload)
+        _, prompt_media = self._externalize_media_value(
+            payload.get("conversation_messages") or [], source_kind="prompt_embedded"
+        )
+        payload["image_refs"] = [
+            str(self.output_dir / ref["path"]) for ref in prompt_media
+        ]
+        path = self.scene_debug_dir / "candidate_payload.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(_redact_value(payload), ensure_ascii=False), encoding="utf-8"
+        )
+        if not self._capture_llm_record(
+            path=path,
+            payload=payload,
+            evidence=evidence,
+            outcome=outcome,
+            report_ref=evidence.report_ref,
+            scene_state_path=scene_state_path,
+        ):
+            raise ValueError("candidate capture did not append a new observation")
+        self._write_manifest()
 
     def capture_stage(
         self,
