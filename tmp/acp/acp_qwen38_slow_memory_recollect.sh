@@ -3,7 +3,7 @@
 #
 # This starts a fresh, ordered Full-mode trajectory collection and immediately
 # exports an auditable DPO probe. It intentionally does not claim to be the
-# future decision-level paired-candidate collector: existing Full capture has
+# decision-level paired-candidate collector: existing Full capture has
 # one native Designer execution per decision. The export is therefore a quality
 # and pairing-yield diagnostic, not a training launch.
 
@@ -86,9 +86,13 @@ collection_exit() {
     > "$COLLECTION_REVIEW_DIR/collection_exit_status.env"
 }
 trap collection_exit EXIT
+PAIR_COLLECTION_STATUS=not_requested
+if [[ -n "${SCENEEXPERT_INITIAL_PAIRS_DIR:-}" ]]; then
+  PAIR_COLLECTION_STATUS=managed_by_initial_pairs_entrypoint
+fi
 printf '%s\n' \
   "collection_kind=qwen38_full_observer_recollection" \
-  "pair_collection_status=not_implemented" \
+  "pair_collection_status=$PAIR_COLLECTION_STATUS" \
   "model_name=$MODEL_NAME" \
   "model_file=$MODEL" \
   "mmproj_file=$MMPROJ" \

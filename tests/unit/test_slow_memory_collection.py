@@ -195,6 +195,20 @@ def test_missing_generation_artifacts_produce_diagnostics(tmp_path: Path) -> Non
     assert (tmp_path / "collection/collection_audit.json").is_file()
 
 
+def test_observer_excludes_all_paired_snapshots_and_candidate_copies(
+    tmp_path: Path,
+) -> None:
+    source, _ = _collection(tmp_path)
+    shadow = tmp_path / "paired_initial/group_000/A/raw_scene"
+    shutil.copytree(source.parents[2], shadow)
+    for path in shadow.rglob("trajectories.jsonl"):
+        path.write_text("invalid shadow data must not enter observer audit")
+    result = audit_collection(tmp_path, tmp_path / "collection", expected_model=MODEL)
+    assert result["observer_collection_ready"] is True
+    assert result["trajectory_count"] == 1
+    assert len(result["final_traces"]) == 1
+
+
 def test_real_two_candidate_fixture_exports_one_pair_not_duplicate_archive_pairs(
     tmp_path: Path,
 ) -> None:

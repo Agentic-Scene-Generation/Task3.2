@@ -111,3 +111,60 @@ def test_full_launcher_preserves_outer_entrypoint(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == ["outer-wrapper", "ablation_5_qwen3_full"]
+
+
+@pytest.mark.parametrize("generation_exit,pair_exit", [(0, 0), (0, 2), (7, 2)])
+def test_initial_pair_launcher_requires_real_pair_gate_even_after_observer_success(
+    tmp_path: Path, generation_exit: int, pair_exit: int
+) -> None:
+    launcher = tmp_path / "acp_qwen38_initial_pairs.sh"
+    shutil.copyfile(ROOT / "tmp/acp/acp_qwen38_initial_pairs.sh", launcher)
+    _script(
+        tmp_path / "acp_qwen38_slow_memory_recollect.sh",
+        """
+mkdir -p "$OUTPUT_ROOT"
+[[ "$ACP_PARALLELISM" == 1 && "$MIN_DPO_PAIRS" == 0 ]]
+[[ "$MAX_CASES" == 2 && "$SCENEEXPERT_PAIR_MAX_GROUPS" == 2 ]]
+[[ "$CASE_SET" == legacy8 && "$SCENE_SELECTION" == default_bedroom,default_living_room ]]
+exit "$STUB_GENERATION_EXIT"
+""",
+    )
+    python_stub = tmp_path / "python-stub"
+    _script(
+        python_stub,
+        """
+if [[ "$1" == "-c" ]]; then exit 0; fi
+shift
+[[ "$1" == --audit-root ]]
+mkdir -p "$2"
+[[ "$3" == --expected-groups && "$4" == 2 && "$5" == --min-pairs && "$6" == 1 ]]
+printf '%s\\n' "audit_ran=true" > "$2/stub_audit.env"
+exit "$STUB_PAIR_EXIT"
+""",
+    )
+    batch = tmp_path / "pair-batch"
+    env = {
+        **os.environ,
+        "PROJECT_ROOT": _path(ROOT),
+        "PYTHON_BIN": _path(python_stub),
+        "COLLECTION_ROOT": _path(batch),
+        "PAIR_GROUPS": "2",
+        "ACP_PARALLELISM": "1",
+        "CASE_SET": "legacy8",
+        "SCENE_SELECTION": "default_bedroom,default_living_room",
+        "STUB_GENERATION_EXIT": str(generation_exit),
+        "STUB_PAIR_EXIT": str(pair_exit),
+    }
+    result = subprocess.run(
+        [_bash(), _path(launcher)], env=env, capture_output=True, text=True
+    )
+    assert result.returncode == (generation_exit or pair_exit), result.stderr
+    root = batch / "runs/paired_initial"
+    assert (root / "stub_audit.env").exists()
+    status = (root / "exit_status.env").read_text()
+    assert f"pair_audit_exit={pair_exit}" in status
+    retry = subprocess.run(
+        [_bash(), _path(launcher)], env=env, capture_output=True, text=True
+    )
+    assert retry.returncode == 2
+    assert "already exists" in retry.stderr

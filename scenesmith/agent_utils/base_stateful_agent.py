@@ -61,6 +61,7 @@ from scenesmith.agent_utils.scoring import (
 )
 from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
 from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
+from scenesmith.scene_expert.slow_memory.paired_wire import capture_wire, client_options
 from scenesmith.agent_utils.thinking import (
     chat_api_reasoning_effort,
     chat_template_kwargs_from_effort,
@@ -2450,6 +2451,7 @@ class BaseStatefulAgent(ABC):
             base_url=os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
             api_key=os.environ.get("OPENAI_API_KEY", "dummy"),
             max_retries=self._provider_max_retries(),
+            **client_options(),
         )
         provider = OpenAIProvider(
             openai_client=openai_client,
@@ -4245,21 +4247,37 @@ class BaseStatefulAgent(ABC):
         # Build input (may include context image if enabled).
         input_message = self._build_initial_design_input(instruction)
 
+        # Opt-in SceneExpert observer extension. Canonical execution, safety and
+        # Planner-visible results remain native; B is a private subprocess.
+        initial_pair = None
+        if os.environ.get("SCENEEXPERT_INITIAL_PAIRS_DIR"):
+            from scenesmith.scene_expert.slow_memory.paired_runtime import (
+                open_initial_pair,
+            )
+
+            try:
+                initial_pair = await open_initial_pair(self, input_message)
+            except Exception:
+                console_logger.exception(
+                    "Initial-pair snapshot failed; canonical execution continues"
+                )
+
         # Designer runs with initial design instruction.
         designer_start = time.time()
         request_start = time.perf_counter()
         render_dir_before = self.rendering_manager.last_render_dir
         try:
-            async with self._reasoning_persistence_context_for_session(
-                self.designer_session
-            ):
-                result = await Runner.run(
-                    starting_agent=self.designer,
-                    input=input_message,
-                    session=self.designer_session,
-                    max_turns=self.cfg.agents.designer_agent.max_turns,
-                    run_config=self._create_run_config(),
-                )
+            with capture_wire(initial_pair.canonical_dir if initial_pair else None):
+                async with self._reasoning_persistence_context_for_session(
+                    self.designer_session
+                ):
+                    result = await Runner.run(
+                        starting_agent=self.designer,
+                        input=input_message,
+                        session=self.designer_session,
+                        max_turns=self.cfg.agents.designer_agent.max_turns,
+                        run_config=self._create_run_config(),
+                    )
         except Exception as exc:
             self._record_llm_call_debug(
                 agent_role="designer",
@@ -4287,7 +4305,25 @@ class BaseStatefulAgent(ABC):
                 response=result.final_output, agent_name="DESIGNER (INITIAL)"
             )
 
+        if initial_pair is not None:
+            try:
+                initial_pair.capture_raw(self, result)
+            except Exception as exc:
+                initial_pair.fail("canonical_evidence", exc)
+                console_logger.exception(
+                    "Initial-pair raw evidence failed; canonical safety continues"
+                )
+                initial_pair = None
+
         safety_msg = self._end_furniture_design_transaction(transaction)
+        if initial_pair is not None:
+            try:
+                await initial_pair.finish(self, safety_msg)
+            except Exception as exc:
+                initial_pair.fail("shadow_execution", exc)
+                console_logger.exception(
+                    "Initial-pair shadow failed; canonical continuation retained"
+                )
         self._save_designer_working_memory(
             render_dir_before=render_dir_before,
             event="initial_design",
