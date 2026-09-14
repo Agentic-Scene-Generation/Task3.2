@@ -122,23 +122,95 @@ Results live under `outputs/slow_memory/$RUN_ID/runs/paired_initial/`:
   and subprocess diagnostics.
 - `exit_status.env`, `pair_manifest.env`, `entrypoint.sh`: execution/audit results.
 
-Also return the ordinary `runs/collection/`, `runs/metrics/`, runtime model/server
-logs and canonical scene traces. The observer audit excludes paired snapshots and
-candidate copies, so they cannot inflate completed-scene counts. The observer can
-succeed with zero pairs; this new wrapper's final pair gate cannot.
+The lightweight packaging command below selects the ordinary `runs/collection/`,
+`runs/metrics/`, runtime model/server logs, canonical scene traces and pair evidence
+for download. Full assets remain on the server. The observer audit excludes paired
+snapshots and candidate copies, so they cannot inflate completed-scene counts. The
+observer can succeed with zero pairs; this new wrapper's final pair gate cannot.
 
 If both candidates execute but no eligible pair is exported, the wrapper exits 2.
 Inspect the candidate reports and DPO rejection reasons before changing anything.
 Do not lower the pair gate or turn infrastructure failures into rejected answers.
 
+## Lightweight results download (success or failure)
+
+After the ACP process has stopped, run the matching packaging script. It does not
+start models, change experiment verdicts, use Git or modify source results. Python
+3.11+ with the standard library suffices, even if the GPU environment is broken.
+If 007 is already running, wait for it to stop before synchronizing any new source
+files: the active run pins its source fingerprint. Packaging needs no rerun.
+
+```bash
+set -euo pipefail
+cd /mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2
+RUN_ID=qwen38_initial_pairs_007 \
+bash tmp/acp/pack_qwen38_initial_pairs.sh
+```
+
+Download only the generated `tmp/downloads/<RUN_ID>_review_<timestamp>.tar.gz` and
+its `.sha256` sidecar. The script prints both exact paths and the compressed size.
+It verifies every archived file before returning success. Existing output names
+are never overwritten. After extraction the layout is:
+
+```text
+<RUN_ID>_review/
+  outputs/slow_memory/<RUN_ID>/    # Original project-relative paths
+    runs/paired_initial/          # Audits, reports, trajectories, evidence media
+    runs/collection/              # Collection diagnostics
+    runs/metrics/                 # Metrics and summaries
+    memory/                       # Fast Memory records
+  tmp/acp_logs/<RUN_ID>/          # Runtime/model/service logs and run configuration
+  _package/
+    manifest.json                # Included SHA256 hashes and omitted files/subtrees
+    README.txt
+    log_excerpts/                # Explicit derivatives, only for oversized logs
+```
+
+Defaults: at most 32 MiB per original file and 512 MiB total selected, uncompressed
+file content. Tar headers and package metadata are additional; gzip determines the
+actual download size. Structured evidence is selected first, then logs, evidence
+images, and optional raw debug payloads. Ordinary included files retain their exact
+bytes. Slow Memory `media/` and DPO `images/` are retained within these limits.
+
+Models, meshes, SQLite databases, intermediate render textures, caches and duplicate
+`input_scene`/`raw_scene`/private `scene` asset trees stay on the server. Byte-identical
+`latest-run` copies are omitted only when the corresponding `hydra` file is already
+included; symlinks are never followed. Oversized logs receive labelled head/tail
+excerpts with original byte ranges under `_package/log_excerpts/`; the original
+log path is listed as omitted. Other oversized evidence and files exceeding the
+total budget are listed explicitly, with warnings. Check those warnings before
+assuming all evidence images or reports are present.
+
+For a custom result location or limits, set `COLLECTION_ROOT`, `ACP_LOG_DIR`,
+`PACKAGE_PATH`, `PACKAGE_MAX_FILE_MIB` and/or `PACKAGE_MAX_TOTAL_MIB` on the same
+command. Source roots must be inside the project, and the archive must be outside
+those roots. Missing one source root is reported but does not prevent packing the
+other. If a startup failure occurred before project logging began, save the ACP
+platform's exported console log into `tmp/acp_logs/<RUN_ID>/` before packing; the
+script cannot recover console output that was never saved.
+
+Downloaded archive integrity can also be checked locally without extraction:
+
+```bash
+python scripts/package_sceneexpert_results.py --verify /path/to/downloaded.tar.gz
+```
+
+This check verifies transfer/package integrity only. Copied `pair_audit.json` and
+other experiment reports keep the server's results, and are not recomputed by the
+packer. Full pair audits, scene replay and training still require the complete
+server artifacts. Omitted files must never be treated as evidence of a failed
+candidate or a passing experiment.
+
 ## Next experiment decisions
 
 1. Run the two-group pilot above; inspect the first exported tool trajectories,
-   images, state hashes and raw Main report for one accepted/rejected pair.
+   images, state hashes and raw Main report for one accepted/rejected pair. Package
+   the stopped run using the matching command above, even if execution failed.
 2. If isolation and pairing pass, run four fresh furniture initial groups with a
    new RUN_ID and four explicit legacy task names. Measure valid-group rate,
    eligible-pair yield, failure causes and cost per valid pair. These are development
    tasks, not held-out evaluation results.
+   Use the same packaging script with that run's new RUN_ID after it stops.
 3. Only then add verified restoration for repair/nonempty histories and additional
    stages. A 12-group multistage run requires that extension; changing this pilot's
    `PAIR_GROUPS` alone cannot provide it. Add independently isolated VLM judging
@@ -158,6 +230,8 @@ python -m pytest --confcutdir=tests/unit \
   tests/unit/test_slow_memory_collection_launcher.py \
   tests/unit/test_trace_logger.py -q
 bash -n tmp/acp/acp_qwen38_initial_pairs.sh
+python -m pytest --confcutdir=tests/unit tests/unit/test_review_package.py -q
+bash -n tmp/acp/pack_qwen38_initial_pairs.sh
 ```
 
 These tests cover proof tampering, files/media, native seam ordering with simulator
@@ -165,3 +239,6 @@ doubles, an actual OpenAI HTTP client with mocked transport, and shell orchestra
 with stub workers. The code-identity regressions cover absent/unusable Git, manual
 copies, Windows/Linux newlines, ignored outputs and rejected source changes. They
 do not substitute for the Linux/Drake/Qwen execution above.
+Packaging regressions additionally exercise original paths/bytes, relevant images,
+bounded log excerpts, quotas, missing roots, symlink exclusion, duplicate copies,
+source mutation, archive integrity and a standard-library-only CLI/Bash entrypoint.
