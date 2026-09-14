@@ -23,10 +23,34 @@ def main() -> int:
     mode.add_argument("--worker-group", type=Path)
     mode.add_argument("--audit-root", type=Path)
     mode.add_argument("--preflight", action="store_true")
+    mode.add_argument("--rescore-source", type=Path)
+    parser.add_argument("--rescore-output", type=Path)
     parser.add_argument("--preflight-report", type=Path)
     parser.add_argument("--expected-groups", type=int, default=2)
     parser.add_argument("--min-pairs", type=int, default=1)
     args = parser.parse_args()
+    if args.rescore_source:
+        if not args.rescore_output:
+            parser.error("--rescore-source requires a new --rescore-output")
+        from scenesmith.scene_expert.slow_memory.paired_rescore import rescore_pairs
+
+        result = rescore_pairs(args.rescore_source, args.rescore_output)
+        print(
+            json.dumps(
+                {
+                    key: result[key]
+                    for key in (
+                        "gate_passed",
+                        "execution_integrity_passed",
+                        "preference_gate_passed",
+                        "candidate_count",
+                        "eligible_pair_count",
+                    )
+                },
+                indent=2,
+            )
+        )
+        return 0 if result["gate_passed"] else 2
     if args.min_pairs < 0 or not 1 <= args.expected_groups <= 4:
         parser.error("expected groups must be 1..4 and min pairs must be nonnegative")
     if args.preflight:
@@ -80,6 +104,8 @@ def main() -> int:
                 key: result[key]
                 for key in (
                     "gate_passed",
+                    "execution_integrity_passed",
+                    "preference_gate_passed",
                     "candidate_count",
                     "eligible_pair_count",
                     "errors",

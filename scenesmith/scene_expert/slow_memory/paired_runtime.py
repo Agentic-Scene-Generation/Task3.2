@@ -358,8 +358,11 @@ class InitialPair:
         from scenesmith.agent_utils.stage_working_memory import (
             _extract_agent_result_trace,
         )
-        from scenesmith.scenebenchmark_critic.api import evaluate_room_scene
-        from scenesmith.scenebenchmark_critic.config import critic_config_from_any
+        from scenesmith.scene_expert.slow_memory.paired_scoring import (
+            SCORING_PROTOCOL,
+            save_scoring_proof,
+            score_raw_candidate,
+        )
         from scenesmith.scene_expert.schemas import SceneTaskSpec
         from scenesmith.scene_expert.slow_memory.schemas import (
             PreferenceEvidence,
@@ -375,12 +378,7 @@ class InitialPair:
         state = json_value(agent.scene.to_state_dict())
         raw_hash = digest(state)
         write_json(directory / "raw_state.json", state)
-        config = critic_config_from_any(agent.cfg)
-        if not config.enabled:
-            raise ValueError("paired scoring requires the Main deterministic critic")
-        report = evaluate_room_scene(
-            agent.scene, config=config, stage="furniture", raw_config=agent.cfg
-        )
+        report, scoring_proof = score_raw_candidate(agent.scene, agent.cfg)
         evaluation_hash = digest(json_value(agent.scene.to_state_dict()))
         if raw_hash != evaluation_hash:
             raise ValueError("candidate evaluator changed the state being scored")
@@ -454,10 +452,12 @@ class InitialPair:
             else directory / "scene"
         )
         raw_files = copy_scene_tree(source_root, directory / "raw_scene")
+        save_scoring_proof(directory, report, scoring_proof, raw_files)
         write_json(
             directory / "result.json",
             {
                 "status": "raw_captured",
+                "scoring_protocol": SCORING_PROTOCOL,
                 "candidate": candidate,
                 "model": wire["model"],
                 "snapshot_hash": digest(self.snapshot),

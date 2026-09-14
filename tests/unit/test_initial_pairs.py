@@ -17,10 +17,15 @@ from scenesmith.scene_expert.slow_memory.paired import (
     read_json,
     reserve_group,
     tree_hashes,
+    validate_pair_inputs,
     write_json,
     validate_tool_execution,
 )
 from scenesmith.scene_expert.slow_memory.paired_runtime import shadow_environment
+from scenesmith.scene_expert.slow_memory.paired_scoring import (
+    SCORING_PROTOCOL,
+    save_scoring_proof,
+)
 from scenesmith.scene_expert.slow_memory.paired_wire import client_options
 from scenesmith.scene_expert.slow_memory.schemas import (
     PreferenceEvidence,
@@ -35,7 +40,7 @@ def _group(root: Path) -> Path:
     input_scene = group / "input_scene"
     input_scene.mkdir()
     (input_scene / "geometry.sdf").write_text("immutable geometry")
-    snapshot = {"files": tree_hashes(input_scene), "model": EXPECTED_MODEL}
+    snapshot = {"files": tree_hashes(input_scene), "model": EXPECTED_MODEL, "cfg": {}}
     write_json(group / "snapshot.json", snapshot)
     write_json(group / "status.json", {"status": "completed"})
     write_json(
@@ -69,6 +74,27 @@ def _group(root: Path) -> Path:
             }
         }
         verdict = "accepted" if failures == 0 else "rejected"
+        physics = {
+            "available": True,
+            "source_phase": "sceneexpert_raw_candidate",
+            "scene_hash": "geometry",
+            "raw_state_sha256": digest(state),
+            "collisions": [],
+        }
+        report["case_pack"] = {"physics_evidence": physics}
+        save_scoring_proof(
+            directory,
+            report,
+            {
+                "schema_version": SCORING_PROTOCOL,
+                "raw_state_sha256": digest(state),
+                "evaluation_state_sha256": digest(state),
+                "scene_content_hash": "geometry",
+                "physics_sha256": digest(physics),
+                "report_sha256": digest(report),
+            },
+            raw_files,
+        )
         write_json(directory / "raw_state.json", state)
         write_json(directory / "returned_state.json", state)
         write_json(directory / "safety.json", {"message": ""})
@@ -78,6 +104,7 @@ def _group(root: Path) -> Path:
             directory / "result.json",
             {
                 "status": "completed",
+                "scoring_protocol": SCORING_PROTOCOL,
                 "model": EXPECTED_MODEL,
                 "snapshot_hash": digest(snapshot),
                 "raw_state_hash": digest(state),
@@ -249,3 +276,152 @@ def test_shadow_environment_cannot_write_the_shared_bank(
     assert "SCENEBENCHMARK_CRITIC_TIMING_PATH" not in env
     assert os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] == "/public/bank"
     assert client_options() == {}
+
+
+@pytest.mark.parametrize(
+    "verdict,count,reason",
+    [
+        ("rejected", 2, "no_accepted_candidate"),
+        ("accepted", 2, "no_eligible_preference_contrast"),
+        ("accepted", 1, "missing_exact_context_counterpart"),
+    ],
+)
+def test_pair_diagnostics_distinguish_contrast_from_missing_execution(
+    tmp_path: Path, verdict: str, count: int, reason: str
+) -> None:
+    from scenesmith.scene_expert.slow_memory.dpo import (
+        build_preference_pairs,
+        load_trajectories,
+    )
+
+    group = _group(tmp_path)
+    records, errors = load_trajectories(
+        [group / name / "slow_memory/trajectories.jsonl" for name in ("A", "B")]
+    )
+    assert not errors
+    for record in records:
+        record.evidence.verdict = verdict
+    pairs, diagnostics = build_preference_pairs(records[:count])
+    assert not pairs
+    assert [row["reason"] for row in diagnostics] == [reason]
+
+
+@pytest.mark.parametrize("artifact", ["evaluation_proof.json", "physics.json"])
+def test_fresh_physics_proof_is_mandatory_for_export(
+    tmp_path: Path, artifact: str
+) -> None:
+    group = _group(tmp_path)
+    (group / "B" / artifact).unlink()
+    assert not validate_pair_inputs(tmp_path, require_fresh_physics=False)[2]
+    audit = audit_pairs(tmp_path)
+    assert audit["execution_integrity_passed"] is False
+    assert audit["candidate_count"] == audit["eligible_pair_count"] == 0
+
+
+def _mock_rescore_physics(
+    monkeypatch: pytest.MonkeyPatch, *, corrupt_state: bool = False
+) -> None:
+    from scenesmith.scene_expert.slow_memory import paired_rescore
+
+    monkeypatch.setattr(
+        paired_rescore,
+        "restore_raw_scene",
+        lambda directory, snapshot: read_json(directory / "raw_state.json"),
+    )
+
+    def fresh(state: dict, cfg: object) -> tuple[dict, dict]:
+        state_hash = "wrong-state" if corrupt_state else digest(state)
+        physics = {
+            "available": True,
+            "source_phase": "sceneexpert_raw_candidate",
+            "scene_hash": "fresh-geometry",
+            "raw_state_sha256": state_hash,
+            "collisions": [],
+        }
+        report = {
+            "case_pack": {"physics_evidence": physics},
+            "summary": {
+                "scene_summary": {
+                    "total_checks": 2,
+                    "unknown": 0,
+                    "fail": 0,
+                    "score": 1.0,
+                }
+            },
+        }
+        return report, {
+            "schema_version": SCORING_PROTOCOL,
+            "raw_state_sha256": state_hash,
+            "evaluation_state_sha256": state_hash,
+            "scene_content_hash": "fresh-geometry",
+            "physics_sha256": digest(physics),
+            "report_sha256": digest(report),
+        }
+
+    monkeypatch.setattr(paired_rescore, "score_raw_candidate", fresh)
+
+
+def test_offline_rescore_preserves_original_executions_and_keeps_no_contrast_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scenesmith.scene_expert.slow_memory.paired_rescore import rescore_pairs
+
+    source, output = tmp_path / "008", tmp_path / "009"
+    group = _group(source)
+    before = tree_hashes(source)
+    _mock_rescore_physics(monkeypatch)
+    audit = rescore_pairs(source, output)
+    assert tree_hashes(source) == before
+    assert audit["execution_integrity_passed"] is True
+    assert audit["candidate_count"] == 2
+    assert audit["eligible_pair_count"] == 0
+    assert not audit["gate_passed"] and not audit["preference_gate_passed"]
+    manifest = read_json(output / "rescore_manifest.json")
+    assert manifest["model_calls"] == 0
+    assert manifest["candidates"][1]["old_verdict"] == "rejected"
+    assert manifest["candidates"][1]["new_verdict"] == "accepted"
+    old = read_json(group / "B/slow_memory/trajectories.jsonl")
+    new = read_json(output / group.name / "B/slow_memory/trajectories.jsonl")
+    assert old["trajectory_id"] != new["trajectory_id"]
+    for key in (
+        "prompt",
+        "response",
+        "response_hash",
+        "context_hash",
+        "spatial_context",
+        "tool_calls",
+        "tool_results",
+    ):
+        assert old.get(key) == new.get(key)
+    assert new["evidence"]["verdict"] == "accepted"
+    assert (
+        read_json(output / group.name / "B/rescore_origin.json")["result"]["verdict"]
+        == "rejected"
+    )
+
+
+@pytest.mark.parametrize(
+    "failure", ["tampered_asset", "restored_state", "existing_output"]
+)
+def test_offline_rescore_rejects_unverifiable_or_overwritten_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    from scenesmith.scene_expert.slow_memory.paired_rescore import rescore_pairs
+
+    source, output = tmp_path / "008", tmp_path / "009"
+    group = _group(source)
+    _mock_rescore_physics(monkeypatch, corrupt_state=failure == "restored_state")
+    if failure == "tampered_asset":
+        (group / "B/raw_scene/geometry.sdf").write_text("changed")
+    if failure == "existing_output":
+        output.mkdir()
+        (output / "keep.txt").write_text("existing run")
+    before = tree_hashes(source)
+    with pytest.raises(ValueError):
+        rescore_pairs(source, output)
+    assert tree_hashes(source) == before
+    if failure == "existing_output":
+        assert (output / "keep.txt").read_text() == "existing run"
+    if failure == "restored_state":
+        assert read_json(output / "rescore_status.json")["status"] == "failed"
+        assert not (output / "dpo/all.jsonl").exists()
