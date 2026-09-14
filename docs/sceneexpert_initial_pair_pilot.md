@@ -2,6 +2,8 @@
 
 Implementation: 2026-09-14. Local contract tests pass; native Linux/Drake/GPU
 execution must be validated by the ACP pilot below. Smoke 005 need not be rerun.
+Run 007 completed canonical scenes but failed before A/B snapshots; see
+[the 007 review and 008 recovery plan](sceneexpert_initial_pairs_007_review.md).
 
 ## What this entrypoint executes
 
@@ -76,10 +78,10 @@ changes still fail the gate; output/log/cache changes do not.
 ```bash
 set -euo pipefail
 cd /mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2
-RUN_ID=qwen38_initial_pairs_007 \
-PAIR_GROUPS=2 \
+RUN_ID=qwen38_initial_pairs_008 \
+PAIR_GROUPS=1 \
 CASE_SET=legacy8 \
-SCENE_SELECTION=default_bedroom,default_living_room \
+SCENE_SELECTION=default_bedroom \
 CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE=false \
 MODEL_DIR=/mnt/afs/task3_2/share_model/unsloth/Qwen3.8-27B-GGUF \
 MODEL=/mnt/afs/task3_2/share_model/unsloth/Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q8_K_XL.gguf \
@@ -91,6 +93,9 @@ Use a new RUN_ID if this one exists. The launcher rejects overwrites. It reuses
 the validated Full startup/server orchestration. It generates fresh floor plans,
 then runs normal full canonical scenes with the extra furniture B at each supported
 boundary. This is not a two-call-only GPU workload.
+The current command starts with one group after 007's snapshot codec failure.
+A no-GPU SDK serialization preflight runs before model/service startup and writes
+its report to `tmp/acp_logs/<RUN_ID>/pair_preflight.json`.
 
 The 006 launch reported `detected dubious ownership` from the old Git-dependent
 preflight and exited before generation. This was a deployment assumption in the
@@ -111,8 +116,8 @@ and oversized snapshots are rejected rather than partially replayed.
 
 Results live under `outputs/slow_memory/$RUN_ID/runs/paired_initial/`:
 
-- `pair_audit.json`: must have `gate_passed=true`, two valid groups, four candidate
-  records, no errors, and `eligible_pair_count >= 1`.
+- `pair_audit.json`: must have `gate_passed=true`, the requested number of valid
+  groups, two candidate records per group, no errors, and `eligible_pair_count >= 1`.
 - `dpo/manifest.json`, `all.jsonl`, `images/`, and diagnostics: portable pair export.
 - `group_*/snapshot.json`, `input_scene/`: common initial state and input assets.
 - `group_*/A/` and `B/`: first HTTP request, raw state/assets, independent Main
@@ -137,13 +142,13 @@ Do not lower the pair gate or turn infrastructure failures into rejected answers
 After the ACP process has stopped, run the matching packaging script. It does not
 start models, change experiment verdicts, use Git or modify source results. Python
 3.11+ with the standard library suffices, even if the GPU environment is broken.
-If 007 is already running, wait for it to stop before synchronizing any new source
+If a pair run is active, wait for it to stop before synchronizing any new source
 files: the active run pins its source fingerprint. Packaging needs no rerun.
 
 ```bash
 set -euo pipefail
 cd /mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2
-RUN_ID=qwen38_initial_pairs_007 \
+RUN_ID=qwen38_initial_pairs_008 \
 bash tmp/acp/pack_qwen38_initial_pairs.sh
 ```
 
@@ -203,11 +208,11 @@ candidate or a passing experiment.
 
 ## Next experiment decisions
 
-1. Run the two-group pilot above; inspect the first exported tool trajectories,
+1. Run the one-group recovery pilot above; inspect the first exported tool trajectories,
    images, state hashes and raw Main report for one accepted/rejected pair. Package
    the stopped run using the matching command above, even if execution failed.
-2. If isolation and pairing pass, run four fresh furniture initial groups with a
-   new RUN_ID and four explicit legacy task names. Measure valid-group rate,
+2. If isolation and pairing pass, run two to four fresh furniture initial groups with a
+   new RUN_ID and explicit legacy task names. Measure valid-group rate,
    eligible-pair yield, failure causes and cost per valid pair. These are development
    tasks, not held-out evaluation results.
    Use the same packaging script with that run's new RUN_ID after it stops.
@@ -226,6 +231,7 @@ python -m pytest --confcutdir=tests/unit \
   tests/unit/test_pair_code_provenance.py \
   tests/unit/test_initial_pairs.py \
   tests/unit/test_initial_pair_execution.py \
+  tests/unit/test_initial_pair_snapshot.py \
   tests/unit/test_slow_memory_collection.py \
   tests/unit/test_slow_memory_collection_launcher.py \
   tests/unit/test_trace_logger.py -q
