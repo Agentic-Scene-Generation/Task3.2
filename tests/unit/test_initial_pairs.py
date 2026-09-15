@@ -176,6 +176,41 @@ def test_independent_candidate_pair_exports_without_changing_canonical(
     assert (group / "A/raw_state.json").read_bytes() == original
 
 
+@pytest.mark.parametrize("broken", [False, True])
+def test_separate_audit_preserves_source_and_quarantines_invalid_group(
+    tmp_path: Path, broken: bool
+) -> None:
+    source = tmp_path / "source"
+    group = _group(source)
+    if broken:
+        write_json(group / "status.json", {"status": "shadow_failed"})
+    original = tree_hashes(source)
+    output = tmp_path / "review"
+    result = audit_pairs(source, output_dir=output)
+    assert tree_hashes(source) == original
+    assert result["source_pair_root"] == str(source.resolve())
+    assert result["gate_passed"] is not broken
+    assert result["eligible_pair_count"] == (0 if broken else 1)
+    assert read_json(output / "pair_audit.json") == result
+    assert read_json(output / "audit_code_provenance.json")["source_bundle_hash"]
+    before_retry = tree_hashes(output)
+    with pytest.raises(FileExistsError):
+        audit_pairs(source, output_dir=output)
+    assert tree_hashes(output) == before_retry
+
+
+@pytest.mark.parametrize("relative", [".", "child", ".."])
+def test_separate_audit_rejects_overlapping_output(
+    tmp_path: Path, relative: str
+) -> None:
+    source = tmp_path / "source"
+    _group(source)
+    before = tree_hashes(source)
+    with pytest.raises(ValueError, match="overlap"):
+        audit_pairs(source, output_dir=source / relative)
+    assert tree_hashes(source) == before
+
+
 @pytest.mark.parametrize(
     "change",
     ["request", "snapshot", "raw_state", "raw_asset", "report", "memory", "failed"],

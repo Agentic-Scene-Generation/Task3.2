@@ -293,13 +293,35 @@ def validate_pair_inputs(
 
 
 def audit_pairs(
-    root: Path, *, min_pairs: int = 1, expected_groups: int = 1
+    root: Path,
+    *,
+    min_pairs: int = 1,
+    expected_groups: int = 1,
+    output_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Export only independent groups with fresh raw-state evidence."""
+    destination = root
+    if output_dir is not None:
+        source = root.resolve()
+        destination = output_dir.resolve()
+        if not source.is_dir():
+            raise FileNotFoundError(source)
+        if destination.is_relative_to(source) or source.is_relative_to(destination):
+            raise ValueError("separate audit output must not overlap source artifacts")
+        destination.mkdir(parents=True, exist_ok=False)
+        from scenesmith.scene_expert.slow_memory.paired_provenance import (
+            collect_pair_code_provenance,
+        )
+
+        write_json(
+            destination / "audit_code_provenance.json", collect_pair_code_provenance()
+        )
     sources, groups, errors = validate_pair_inputs(root)
     if len(groups) != expected_groups:
         errors.append(f"group_count_mismatch: {len(groups)} != {expected_groups}")
-    manifest = export_dpo_dataset(trajectory_sources=sources, output_dir=root / "dpo")
+    manifest = export_dpo_dataset(
+        trajectory_sources=sources, output_dir=destination / "dpo"
+    )
     records, diagnostics = load_trajectories(sources)
     if diagnostics:
         errors.append("trajectory_load_failed")
@@ -336,9 +358,10 @@ def audit_pairs(
         "expected_groups": expected_groups,
         "scoring": "raw_candidate_main_deterministic_checks",
         "canonical_candidate": "A",
+        "source_pair_root": str(root.resolve()),
         "training_preflight_status": "not_run",
         "dpo_stats": manifest["stats"],
         "dpo_validation": manifest["validation"],
     }
-    write_json(root / "pair_audit.json", result)
+    write_json(destination / "pair_audit.json", result)
     return result
