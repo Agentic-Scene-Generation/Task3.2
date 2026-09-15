@@ -23,6 +23,11 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--worker-group", type=Path)
     mode.add_argument("--audit-root", type=Path)
+    parser.add_argument(
+        "--audit-output",
+        type=Path,
+        help="Write audit/export to a new separate directory",
+    )
     mode.add_argument("--preflight", action="store_true")
     mode.add_argument("--rescore-source", type=Path)
     parser.add_argument("--rescore-output", type=Path)
@@ -35,6 +40,8 @@ def main() -> int:
     parser.add_argument("--expected-groups", type=int, default=2)
     parser.add_argument("--min-pairs", type=int, default=1)
     args = parser.parse_args()
+    if args.audit_output and not args.audit_root:
+        parser.error("--audit-output requires --audit-root")
     if args.require_pairs and not args.rescore_source:
         parser.error(
             "--require-pairs is only valid with --rescore-source; audits already require their pair gate"
@@ -122,7 +129,10 @@ def main() -> int:
             return 2
         return 0
     result = audit_pairs(
-        args.audit_root, min_pairs=args.min_pairs, expected_groups=args.expected_groups
+        args.audit_root,
+        min_pairs=args.min_pairs,
+        expected_groups=args.expected_groups,
+        output_dir=args.audit_output,
     )
     print(
         json.dumps(
@@ -142,7 +152,7 @@ def main() -> int:
             indent=2,
         )
     )
-    print(f"Pair audit: {args.audit_root / 'pair_audit.json'}")
+    print(f"Pair audit: {(args.audit_output or args.audit_root) / 'pair_audit.json'}")
     return 0 if result["gate_passed"] else 2
 
 
