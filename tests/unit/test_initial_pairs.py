@@ -170,6 +170,8 @@ def test_independent_candidate_pair_exports_without_changing_canonical(
     assert result["gate_passed"] is True
     assert result["candidate_count"] == 2
     assert result["eligible_pair_count"] == 1
+    assert result["status"] == "completed_with_pairs"
+    assert result["candidate_verdict_counts"] == {"accepted": 1, "rejected": 1}
     assert result["canonical_candidate"] == "A"
     assert (group / "A/raw_state.json").read_bytes() == original
 
@@ -209,6 +211,7 @@ def test_any_broken_proof_quarantines_the_whole_pair(
     result = audit_pairs(tmp_path, expected_groups=1)
     assert not result["gate_passed"]
     assert result["eligible_pair_count"] == 0
+    assert result["status"] == "execution_failed"
 
 
 def test_missing_candidate_is_not_a_synthetic_negative(tmp_path: Path) -> None:
@@ -381,6 +384,11 @@ def test_offline_rescore_preserves_original_executions_and_keeps_no_contrast_gat
     assert audit["candidate_count"] == 2
     assert audit["eligible_pair_count"] == 0
     assert not audit["gate_passed"] and not audit["preference_gate_passed"]
+    assert audit["status"] == "completed_no_pairs"
+    rescore_status = read_json(output / "rescore_status.json")
+    assert rescore_status["operation_succeeded"] is True
+    assert rescore_status["preference_gate_passed"] is False
+    assert rescore_status["outcome"] == "completed_no_pairs"
     manifest = read_json(output / "rescore_manifest.json")
     assert manifest["model_calls"] == 0
     assert manifest["candidates"][1]["old_verdict"] == "rejected"

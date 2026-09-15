@@ -250,7 +250,17 @@ def rescore_pairs(source: Path, output: Path) -> dict[str, Any]:
         write_json(output / "rescore_manifest.json", origin)
         write_json(
             output / "rescore_status.json",
-            {"status": "completed", "gate_passed": audit["gate_passed"]},
+            {
+                "status": (
+                    "completed" if audit["execution_integrity_passed"] else "failed"
+                ),
+                "outcome": audit["status"],
+                "operation_succeeded": audit["execution_integrity_passed"],
+                "preference_gate_passed": audit["preference_gate_passed"],
+                "candidate_count": audit["candidate_count"],
+                "eligible_pair_count": audit["eligible_pair_count"],
+                "gate_passed": audit["gate_passed"],
+            },
         )
         return audit
     except Exception as exc:

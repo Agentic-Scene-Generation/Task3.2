@@ -1,5 +1,10 @@
 # Initial-pair rescore 009: native restoration fix and run 010
 
+Update: 010 completed successfully with two accepted candidates and no eligible
+preference contrast. Follow [the 011 collection plan](sceneexpert_initial_pairs_010_review.md);
+do not rerun the historical 010 command below. Rescore-only commands now return
+operation success separately from the dataset gate, unless `REQUIRE_PAIRS=true`.
+
 ## Confirmed failure
 
 The ACP log `logs-acp-20260915T164150.txt` terminates in `restore_raw_scene()`:
