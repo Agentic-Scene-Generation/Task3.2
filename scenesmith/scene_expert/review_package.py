@@ -94,6 +94,48 @@ def _add_bytes(archive: tarfile.TarFile, name: str, data: bytes) -> None:
     archive.addfile(item, io.BytesIO(data))
 
 
+def _finalization_evidence(
+    collection: str, logs: str, included_paths: set[str]
+) -> dict[str, Any]:
+    """Describe archived end markers without inferring process state or success."""
+    pairs = f"{collection}/runs/paired_initial"
+    audit = f"{pairs}/pair_audit.json"
+    rescore = f"{pairs}/rescore_status.json"
+    if rescore in included_paths:
+        mode = "candidate_rescore"
+        required = {audit, rescore, f"{logs}/exit_status.env"}
+    elif f"{pairs}/audit_code_provenance.json" in included_paths:
+        mode = "retained_evidence_audit"
+        required = {audit, f"{logs}/exit_status.env"}
+    elif any(path.startswith(pairs + "/") for path in included_paths):
+        mode = "initial_pair_collection"
+        required = {
+            audit,
+            f"{pairs}/exit_status.env",
+            f"{collection}/runs/collection/collection_exit_status.env",
+            f"{logs}/exit_status.env",
+        }
+    else:
+        mode, required = "unclassified", set()
+    missing = sorted(required - included_paths)
+    return {
+        "mode": mode,
+        "state": (
+            "unclassified"
+            if not required
+            else (
+                "finalization_markers_missing"
+                if missing
+                else "finalization_markers_present"
+            )
+        ),
+        "present_markers": sorted(required & included_paths),
+        "missing_from_package": missing,
+        "process_state": "unknown",
+        "success_verified": False,
+    }
+
+
 def package_results(
     *,
     project_root: Path,
@@ -303,6 +345,13 @@ def package_results(
             if not manifest["included"]:
                 raise ValueError("size limits excluded all review files")
             manifest["selected_bytes"] = total
+            manifest["finalization"] = _finalization_evidence(
+                roots[0].relative_to(project_root).as_posix(),
+                roots[1].relative_to(project_root).as_posix(),
+                set(included_originals),
+            )
+            if manifest["finalization"]["missing_from_package"]:
+                manifest["warnings"].append("finalization_not_established_by_package")
             manifest["warnings"] = sorted(set(manifest["warnings"]))
             readme = (
                 b"SceneExpert lightweight review package\n\n"
@@ -312,6 +361,9 @@ def package_results(
                 b"This is not a full scene replay or training-ready archive. Retain the\n"
                 b"complete source run on the server; full asset-based pair audits must\n"
                 b"run there. Copied experiment audit reports are not recomputed here.\n"
+                b"The finalization field inventories archived end markers only.\n"
+                b"Missing markers can mean an active, interrupted or partial run;\n"
+                b"present markers do not certify successful execution or training readiness.\n"
             )
             _add_bytes(archive, f"{prefix}/_package/README.txt", readme)
             manifest["included"].append(
@@ -343,6 +395,7 @@ def package_results(
         "included_count": len(manifest["included"]),
         "omitted_count": len(manifest["omitted"]),
         "warnings": manifest["warnings"],
+        "finalization": manifest["finalization"],
     }
 
 
