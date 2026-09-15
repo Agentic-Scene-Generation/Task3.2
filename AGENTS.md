@@ -662,3 +662,10 @@ limits; omit large models, meshes, databases, replay asset copies and redundant
 outputs. Record omissions, truncation and checksums in a package manifest. Keep
 original server results untouched. A lightweight review package does not replace
 full server-side replay, pair auditing or a complete training dataset.
+
+Every next-step plan must also estimate elapsed time as a range, with separate
+estimates for preparation, server execution, validation and packaging. Distinguish
+operator hands-on time from unattended time, cite relevant observed run timings
+when available, and state resource or incomplete-log uncertainty. Do not present
+a runtime estimate as a guarantee or treat missing finalization markers as proof
+that a server job has completed.

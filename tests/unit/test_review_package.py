@@ -89,6 +89,52 @@ def test_original_layout_evidence_and_source_bytes_are_preserved(
     assert Path(summary["checksum"]).read_text().split()[0] == digest
 
 
+@pytest.mark.parametrize("finalized", [False, True])
+def test_pair_snapshot_reports_missing_end_markers_without_claiming_success(
+    tmp_path: Path, finalized: bool
+) -> None:
+    pair = f"{RESULTS}/runs/paired_initial"
+    _write(tmp_path, f"{pair}/group_000/status.json", b'{"status":"completed"}')
+    if finalized:
+        # Failed exits still count as end markers, never as a successful run.
+        _write(tmp_path, f"{pair}/pair_audit.json", b'{"status":"execution_failed"}')
+        _write(tmp_path, f"{pair}/exit_status.env", b"pair_audit_exit=2\n")
+        _write(
+            tmp_path,
+            f"{RESULTS}/runs/collection/collection_exit_status.env",
+            b"exit_code=2\n",
+        )
+        _write(tmp_path, f"{LOGS}/exit_status.env", b"exit_code=2\n")
+    summary, manifest, _ = _bundle(tmp_path)
+    end = manifest["finalization"]
+    assert summary["finalization"] == end
+    assert end["mode"] == "initial_pair_collection"
+    assert end["process_state"] == "unknown"
+    assert end["success_verified"] is False
+    assert end["state"] == (
+        "finalization_markers_present" if finalized else "finalization_markers_missing"
+    )
+    assert len(end["missing_from_package"]) == (0 if finalized else 4)
+    assert (
+        "finalization_not_established_by_package" in manifest["warnings"]
+    ) is not finalized
+
+
+@pytest.mark.parametrize("mode", ["rescore", "audit"])
+def test_short_jobs_do_not_require_collection_end_markers(tmp_path: Path, mode: str):
+    pair = f"{RESULTS}/runs/paired_initial"
+    _write(tmp_path, f"{pair}/pair_audit.json")
+    _write(tmp_path, f"{LOGS}/exit_status.env", b"exit_code=0\n")
+    marker = (
+        "rescore_status.json" if mode == "rescore" else "audit_code_provenance.json"
+    )
+    _write(tmp_path, f"{pair}/{marker}")
+    _, manifest, _ = _bundle(tmp_path)
+    assert manifest["finalization"]["state"] == "finalization_markers_present"
+    assert not manifest["finalization"]["missing_from_package"]
+    assert manifest["finalization"]["success_verified"] is False
+
+
 def test_identical_latest_run_is_deduplicated_only_against_archived_bytes(
     tmp_path: Path,
 ) -> None:
