@@ -37,6 +37,58 @@ def _script(path: Path, text: str) -> None:
     path.chmod(0o755)
 
 
+@pytest.mark.parametrize("audit_exit,lock_exit", [(0, 0), (2, 0), (7, 0), (0, 1)])
+def test_separate_audit_launcher_keeps_source_and_refuses_active_collection(
+    tmp_path: Path, audit_exit: int, lock_exit: int
+) -> None:
+    source = tmp_path / "outputs/slow_memory/original"
+    (source / "runs/paired_initial").mkdir(parents=True)
+    (source / "runs.lock").write_text("keep existing lock bytes")
+    python_stub = tmp_path / "python-stub"
+    _script(
+        python_stub,
+        """
+[[ "$2" == --audit-root && "$4" == --audit-output ]]
+[[ "$3" == */original/runs/paired_initial && "$5" == */audit_test/runs/paired_initial ]]
+mkdir -p "$5"
+printf '%s\\n' 'audit completed' > "$5/stub.txt"
+exit "$STUB_AUDIT_EXIT"
+""",
+    )
+    command = [
+        _bash(),
+        "-c",
+        'flock() { return "$STUB_LOCK_EXIT"; }; export -f flock; exec bash "$1"',
+        "audit-test",
+        _path(ROOT / "tmp/acp/acp_qwen38_initial_pairs_audit.sh"),
+    ]
+    env = {
+        **os.environ,
+        "PROJECT_ROOT": _path(tmp_path),
+        "RUN_ID": "audit_test",
+        "SOURCE_RUN_ID": "original",
+        "PYTHON_BIN": _path(python_stub),
+        "STUB_AUDIT_EXIT": str(audit_exit),
+        "STUB_LOCK_EXIT": str(lock_exit),
+    }
+    result = subprocess.run(command, env=env, capture_output=True, text=True)
+    assert result.returncode == (2 if lock_exit else audit_exit), result.stderr
+    assert (source / "runs.lock").read_text() == "keep existing lock bytes"
+    assert not list((source / "runs/paired_initial").iterdir())
+    log = tmp_path / "tmp/acp_logs/audit_test"
+    if lock_exit:
+        assert "still running" in result.stderr
+        assert not log.exists()
+        assert not (tmp_path / "outputs/slow_memory/audit_test").exists()
+    else:
+        assert f"exit_code={audit_exit}\n" in (log / "exit_status.env").read_text()
+        assert "model_calls=0" in (log / "run_metadata.env").read_text()
+        before = (log / "exit_status.env").read_bytes()
+        retry = subprocess.run(command, env=env, capture_output=True, text=True)
+        assert retry.returncode == 2 and "already exists" in retry.stderr
+        assert (log / "exit_status.env").read_bytes() == before
+
+
 @pytest.mark.parametrize("exit_code", [0, 2, 7])
 @pytest.mark.parametrize("require_pairs", ["false", "true"])
 def test_offline_rescore_launcher_needs_no_models_and_preserves_exit(
