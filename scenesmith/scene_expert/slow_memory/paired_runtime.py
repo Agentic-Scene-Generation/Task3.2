@@ -373,7 +373,9 @@ class InitialPair:
         directory = self.group / candidate
         agent_trace = _extract_agent_result_trace(result, result.final_output or "")
         validate_tool_execution(
-            agent_trace, getattr(agent.asset_manager, "_fatal_asset_error", None)
+            agent_trace,
+            getattr(agent.asset_manager, "_fatal_asset_error", None),
+            failure_path=directory / "tool_execution_failure.json",
         )
         state = json_value(agent.scene.to_state_dict())
         raw_hash = digest(state)
