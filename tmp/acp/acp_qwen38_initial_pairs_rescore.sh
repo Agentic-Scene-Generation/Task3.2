@@ -11,6 +11,13 @@ case "$REQUIRE_PAIRS" in
   true) extra_args+=(--require-pairs) ;;
   *) echo 'REQUIRE_PAIRS must be true or false' >&2; exit 2 ;;
 esac
+if [[ -n "${RESCORE_GROUPS:-}" ]]; then
+  IFS=',' read -r -a selected_groups <<< "$RESCORE_GROUPS"
+  for group in "${selected_groups[@]}"; do
+    [[ "$group" =~ ^group_[0-9]{3}$ ]] || { echo 'Invalid RESCORE_GROUPS' >&2; exit 2; }
+  done
+  extra_args+=(--rescore-groups "${selected_groups[@]}")
+fi
 [[ "$RUN_ID" =~ ^[a-zA-Z0-9_-]+$ && "$SOURCE_RUN_ID" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo 'Invalid run ID' >&2; exit 2; }
 [[ "$RUN_ID" != "$SOURCE_RUN_ID" ]] || { echo 'Use a new output RUN_ID' >&2; exit 2; }
 COLLECTION_ROOT="$PROJECT_ROOT/outputs/slow_memory/$RUN_ID"
@@ -33,6 +40,7 @@ export SCENEEXPERT_CODE_PROVENANCE_GIT_ENABLED=false
 cp "${BASH_SOURCE[0]}" "$LOG_DIR/entrypoint_script.sh"
 printf '%s\n' "run_id=$RUN_ID" "source_pair_root=$SOURCE_PAIR_ROOT" \
   'mode=raw_candidate_rescore' 'model_calls=0' "require_pairs=$REQUIRE_PAIRS" \
+  "rescore_groups=${RESCORE_GROUPS:-all}" \
   > "$LOG_DIR/run_metadata.env"
 "$PYTHON_BIN" "$PROJECT_ROOT/scripts/collect_sceneexpert_initial_pairs.py" \
   --rescore-source "$SOURCE_PAIR_ROOT" \

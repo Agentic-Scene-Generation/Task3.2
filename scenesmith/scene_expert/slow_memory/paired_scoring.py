@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Any
 
 from scenesmith.scene_expert.slow_memory.paired import digest, read_json, write_json
+from scenesmith.scene_expert.slow_memory.paired_contract import (
+    calibrate_asset_checks,
+    calibrate_contract,
+)
 
 SCORING_PROTOCOL = "sceneexpert.raw_candidate_scoring.v3"
 
@@ -60,7 +64,9 @@ def score_raw_candidate(scene: Any, cfg: Any) -> tuple[dict[str, Any], dict[str,
         room_scene_to_case_pack(scene, stage="furniture", metrics=list(config.metrics))
     )
     case_pack["physics_evidence"] = physics
+    calibrate_contract(case_pack)
     case_pack["checks"] = build_all_checks(case_pack, metrics=list(config.metrics))
+    calibrate_asset_checks(case_pack)
     report = build_evaluation_payload(
         case_pack=case_pack,
         results=run_case_pack_checks(case_pack, config=config),
@@ -78,6 +84,9 @@ def score_raw_candidate(scene: Any, cfg: Any) -> tuple[dict[str, Any], dict[str,
         "scene_content_hash": geometry_hash,
         "physics_sha256": digest(physics),
         "report_sha256": digest(report),
+        "contract_calibration_sha256": digest(
+            case_pack["sceneexpert_contract_calibration"]
+        ),
     }
     return report, proof
 
@@ -101,6 +110,11 @@ def validate_scoring_proof(directory: Path, candidate: dict[str, Any]) -> None:
     proof = read_json(directory / "evaluation_proof.json")
     physics = read_json(directory / "physics.json")
     report = read_json(directory / "report.json")
+    calibration = report.get("case_pack", {}).get("sceneexpert_contract_calibration")
+    if (
+        calibration is not None or proof.get("contract_calibration_sha256")
+    ) and proof.get("contract_calibration_sha256") != digest(calibration):
+        raise ValueError("candidate contract calibration proof mismatch")
     if proof.get("restoration_proof_sha256"):
         from scenesmith.scene_expert.slow_memory.paired_restoration import (
             validate_restoration_proof,
