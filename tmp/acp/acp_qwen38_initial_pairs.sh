@@ -3,7 +3,7 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-/mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2}"
-RUN_ID="${RUN_ID:-qwen38_initial_pairs_008_$(date +%Y%m%d_%H%M%S)}"
+RUN_ID="${RUN_ID:-qwen38_initial_pairs_$(date +%Y%m%d_%H%M%S)}"
 PAIR_GROUPS="${PAIR_GROUPS:-2}"
 [[ "$PAIR_GROUPS" =~ ^[1-4]$ ]] || { echo 'PAIR_GROUPS must be 1..4' >&2; exit 2; }
 [[ "${ACP_PARALLELISM:-1}" == 1 ]] || { echo 'Initial pair pilot requires ACP_PARALLELISM=1' >&2; exit 2; }
@@ -44,7 +44,8 @@ env PROJECT_ROOT="$PROJECT_ROOT" RUN_ID="$RUN_ID" COLLECTION_ROOT="$COLLECTION_R
 
 pair_exit=0
 "$PYTHON_BIN" "$PROJECT_ROOT/scripts/collect_sceneexpert_initial_pairs.py" \
-  --audit-root "$PAIR_ROOT" --expected-groups "$PAIR_GROUPS" --min-pairs 1 || pair_exit=$?
+  --audit-root "$PAIR_ROOT" --expected-groups "$PAIR_GROUPS" --min-pairs 1 \
+  2>&1 | tee "$PAIR_LOG_DIR/pair_audit.log" || pair_exit=$?
 mkdir -p "$PAIR_ROOT"
 cp "${BASH_SOURCE[0]}" "$PAIR_ROOT/entrypoint.sh"
 printf '%s\n' 'collection_kind=furniture_initial_independent_pairs' \
@@ -55,5 +56,8 @@ printf '%s\n' 'collection_kind=furniture_initial_independent_pairs' \
 printf '%s\n' "generation_exit=$generation_exit" "pair_audit_exit=$pair_exit" \
   > "$PAIR_ROOT/exit_status.env"
 echo "Pair artifacts: $PAIR_ROOT"
+if [[ "$generation_exit" == 0 && "$pair_exit" == 2 ]]; then
+  echo "Pair gate not passed. Check pair_audit.json status: completed_no_pairs is a completed collection without an eligible preference contrast; execution_failed requires repair."
+fi
 if [[ "$generation_exit" != 0 ]]; then exit "$generation_exit"; fi
 exit "$pair_exit"
