@@ -1,5 +1,9 @@
 # Qwen3.8 initial pairs 008: stale physics labels and recovery
 
+Current result: 010 successfully rescored both candidates; both passed and no
+eligible pair was produced. Continue with [011 fresh collection](sceneexpert_initial_pairs_010_review.md).
+The rescore commands in this document are historical.
+
 Update: run 009 hit a native serialization equality failure. Use the
 [010 recovery plan](sceneexpert_initial_pairs_009_recovery.md) instead of the
 historical 009 command below. Scoring protocol v3 adds explicit verified

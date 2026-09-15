@@ -38,8 +38,9 @@ def _script(path: Path, text: str) -> None:
 
 
 @pytest.mark.parametrize("exit_code", [0, 2, 7])
+@pytest.mark.parametrize("require_pairs", ["false", "true"])
 def test_offline_rescore_launcher_needs_no_models_and_preserves_exit(
-    tmp_path: Path, exit_code: int
+    tmp_path: Path, exit_code: int, require_pairs: str
 ) -> None:
     python_stub = tmp_path / "python-stub"
     _script(
@@ -47,6 +48,7 @@ def test_offline_rescore_launcher_needs_no_models_and_preserves_exit(
         """
 [[ "$2" == --rescore-source && "$4" == --rescore-output ]]
 [[ "$3" == */outputs/slow_memory/original/runs/paired_initial ]]
+if [[ "$REQUIRE_PAIRS" == true ]]; then [[ "$6" == --require-pairs ]]; else [[ $# == 5 ]]; fi
 mkdir -p "$5"
 printf '%s\\n' 'fresh physics audit' > "$5/stub.txt"
 exit "$STUB_EXIT"
@@ -60,12 +62,14 @@ exit "$STUB_EXIT"
         "SOURCE_RUN_ID": "original",
         "PYTHON_BIN": _path(python_stub),
         "STUB_EXIT": str(exit_code),
+        "REQUIRE_PAIRS": require_pairs,
     }
     result = subprocess.run(command, env=env, capture_output=True, text=True)
     assert result.returncode == exit_code, result.stderr
     log = tmp_path / "tmp/acp_logs/rescore_test"
     assert f"exit_code={exit_code}\n" in (log / "exit_status.env").read_text()
     assert "model_calls=0" in (log / "run_metadata.env").read_text()
+    assert f"require_pairs={require_pairs}" in (log / "run_metadata.env").read_text()
     status = (log / "exit_status.env").read_bytes()
     retry = subprocess.run(command, env=env, capture_output=True, text=True)
     assert retry.returncode == 2 and "already exists" in retry.stderr

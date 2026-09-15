@@ -12,6 +12,7 @@ import json
 import math
 import re
 import shutil
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -309,8 +310,17 @@ def audit_pairs(
     )
     if count < min_pairs or (min_pairs > 0 and not manifest["validation"]["valid"]):
         errors.append("minimum_pair_gate_failed")
+    if not execution_integrity_passed:
+        status = "execution_failed"
+    elif count == 0:
+        status = "completed_no_pairs"
+    elif not preference_gate_passed:
+        status = "completed_dataset_gate_failed"
+    else:
+        status = "completed_with_pairs"
     result = {
         "schema_version": "sceneexpert.initial_pairs_audit.v1",
+        "status": status,
         "groups": groups,
         "errors": errors,
         "gate_passed": not errors,
@@ -318,6 +328,9 @@ def audit_pairs(
         "preference_gate_passed": preference_gate_passed,
         "valid_group_count": sum(group["valid"] for group in groups),
         "candidate_count": len(records),
+        "candidate_verdict_counts": dict(
+            Counter(record.evidence.verdict for record in records)
+        ),
         "eligible_pair_count": count,
         "min_pairs": min_pairs,
         "expected_groups": expected_groups,

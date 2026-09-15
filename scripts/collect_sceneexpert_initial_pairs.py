@@ -26,10 +26,19 @@ def main() -> int:
     mode.add_argument("--preflight", action="store_true")
     mode.add_argument("--rescore-source", type=Path)
     parser.add_argument("--rescore-output", type=Path)
+    parser.add_argument(
+        "--require-pairs",
+        action="store_true",
+        help="For rescoring, also require the preference-export gate for exit 0",
+    )
     parser.add_argument("--preflight-report", type=Path)
     parser.add_argument("--expected-groups", type=int, default=2)
     parser.add_argument("--min-pairs", type=int, default=1)
     args = parser.parse_args()
+    if args.require_pairs and not args.rescore_source:
+        parser.error(
+            "--require-pairs is only valid with --rescore-source; audits already require their pair gate"
+        )
     if args.rescore_source:
         logging.basicConfig(
             level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
@@ -44,17 +53,30 @@ def main() -> int:
                 {
                     key: result[key]
                     for key in (
+                        "status",
                         "gate_passed",
                         "execution_integrity_passed",
                         "preference_gate_passed",
                         "candidate_count",
+                        "candidate_verdict_counts",
                         "eligible_pair_count",
                     )
                 },
                 indent=2,
             )
         )
-        return 0 if result["gate_passed"] else 2
+        if result["execution_integrity_passed"] and not result["gate_passed"]:
+            print(
+                "Rescoring completed; the preference dataset is not ready. "
+                "Inspect pair_audit.json and dpo/rejected_pair_diagnostics.jsonl; "
+                "do not rerun identical candidates just to obtain a passing gate."
+            )
+        success = (
+            result["gate_passed"]
+            if args.require_pairs
+            else result["execution_integrity_passed"]
+        )
+        return 0 if success else 2
     if args.min_pairs < 0 or not 1 <= args.expected_groups <= 4:
         parser.error("expected groups must be 1..4 and min pairs must be nonnegative")
     if args.preflight:
@@ -107,10 +129,12 @@ def main() -> int:
             {
                 key: result[key]
                 for key in (
+                    "status",
                     "gate_passed",
                     "execution_integrity_passed",
                     "preference_gate_passed",
                     "candidate_count",
+                    "candidate_verdict_counts",
                     "eligible_pair_count",
                     "errors",
                 )

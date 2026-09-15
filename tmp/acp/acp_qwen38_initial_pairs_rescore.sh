@@ -4,6 +4,13 @@ set -euo pipefail
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}"
 RUN_ID="${RUN_ID:-qwen38_initial_pairs_008_rescore_010}"
 SOURCE_RUN_ID="${SOURCE_RUN_ID:-qwen38_initial_pairs_008}"
+REQUIRE_PAIRS="${REQUIRE_PAIRS:-false}"
+extra_args=()
+case "$REQUIRE_PAIRS" in
+  false) ;;
+  true) extra_args+=(--require-pairs) ;;
+  *) echo 'REQUIRE_PAIRS must be true or false' >&2; exit 2 ;;
+esac
 [[ "$RUN_ID" =~ ^[a-zA-Z0-9_-]+$ && "$SOURCE_RUN_ID" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo 'Invalid run ID' >&2; exit 2; }
 [[ "$RUN_ID" != "$SOURCE_RUN_ID" ]] || { echo 'Use a new output RUN_ID' >&2; exit 2; }
 COLLECTION_ROOT="$PROJECT_ROOT/outputs/slow_memory/$RUN_ID"
@@ -25,8 +32,10 @@ export ACP_ENTRYPOINT="${BASH_SOURCE[0]}"
 export SCENEEXPERT_CODE_PROVENANCE_GIT_ENABLED=false
 cp "${BASH_SOURCE[0]}" "$LOG_DIR/entrypoint_script.sh"
 printf '%s\n' "run_id=$RUN_ID" "source_pair_root=$SOURCE_PAIR_ROOT" \
-  'mode=raw_candidate_rescore' 'model_calls=0' > "$LOG_DIR/run_metadata.env"
+  'mode=raw_candidate_rescore' 'model_calls=0' "require_pairs=$REQUIRE_PAIRS" \
+  > "$LOG_DIR/run_metadata.env"
 "$PYTHON_BIN" "$PROJECT_ROOT/scripts/collect_sceneexpert_initial_pairs.py" \
   --rescore-source "$SOURCE_PAIR_ROOT" \
   --rescore-output "$COLLECTION_ROOT/runs/paired_initial" \
+  "${extra_args[@]}" \
   2>&1 | tee "$LOG_DIR/rescore.log"

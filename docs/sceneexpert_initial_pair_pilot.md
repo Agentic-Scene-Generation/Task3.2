@@ -4,14 +4,13 @@ Implementation: 2026-09-14. Local contract tests pass; native Linux/Drake/GPU
 execution must be validated by the ACP pilot below. Smoke 005 need not be rerun.
 Run 007 completed canonical scenes but failed before A/B snapshots; see
 [the 007 review and 008 recovery plan](sceneexpert_initial_pairs_007_review.md).
-Run 008 completed A/B execution but revealed stale cached physics labels. The
-**current next step is offline rescoring of retained 008 candidates**, not another
-generation run; use the commands and matching packaging script in
-[the 008 review and 009 rescoring plan](sceneexpert_initial_pairs_008_review.md).
-Run 009 exposed native quaternion roundoff in the restoration gate. The current
-retry is [010 with verified native restoration](sceneexpert_initial_pairs_009_recovery.md),
-which supersedes the 009 commands. The generation commands below remain the
-historical pilot reference.
+Run 008 exposed stale cached physics labels; 009 exposed native quaternion roundoff.
+Run 010 has now completed native restoration and fresh scoring successfully, with
+two accepted candidates and zero eligible preference pairs. The **current next
+step is fresh four-group collection 011** using
+[the 010 review and 011 commands](sceneexpert_initial_pairs_010_review.md).
+Do not repeat 008 rescoring. Generation commands below remain the historical pilot
+reference; the linked 011 plan includes the matching lightweight packaging command.
 
 ## What this entrypoint executes
 
@@ -223,10 +222,10 @@ candidate or a passing experiment.
 
 ## Next experiment decisions
 
-1. Rescore retained 008 raw states using the current 009 plan linked above; verify
-   fresh physical evidence and execution integrity before interpreting pair yield.
-   Package the stopped run with the matching RUN_ID, even if it exits 2. Two
-   accepted candidates without supported relative ranking remain zero pairs.
+1. 010 has verified fresh physics and restoration. Run the four-group 011 collection
+   linked above, then review execution integrity and actual pair yield. Package the
+   stopped run with the matching RUN_ID, even if the strict collection gate exits 2.
+   Two accepted candidates without supported relative ranking remain zero pairs.
 2. If isolation and pairing pass, run two to four fresh furniture initial groups with a
    new RUN_ID and explicit legacy task names. Measure valid-group rate,
    eligible-pair yield, failure causes and cost per valid pair. These are development
