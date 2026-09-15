@@ -323,11 +323,16 @@ def _mock_rescore_physics(
 ) -> None:
     from scenesmith.scene_expert.slow_memory import paired_rescore
 
-    monkeypatch.setattr(
-        paired_rescore,
-        "restore_raw_scene",
-        lambda directory, snapshot: read_json(directory / "raw_state.json"),
-    )
+    def restore(directory: Path, snapshot: dict, *, source_candidate: Path) -> dict:
+        from scenesmith.scene_expert.slow_memory.paired_restoration import (
+            save_restoration_proof,
+        )
+
+        state = read_json(directory / "raw_state.json")
+        save_restoration_proof(directory, state, state, state, [])
+        return state
+
+    monkeypatch.setattr(paired_rescore, "restore_raw_scene", restore)
 
     def fresh(state: dict, cfg: object) -> tuple[dict, dict]:
         state_hash = "wrong-state" if corrupt_state else digest(state)
