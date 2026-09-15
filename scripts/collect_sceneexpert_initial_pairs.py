@@ -32,6 +32,9 @@ def main() -> int:
     mode.add_argument("--rescore-source", type=Path)
     parser.add_argument("--rescore-output", type=Path)
     parser.add_argument(
+        "--rescore-groups", nargs="+", help="Explicitly select intact source groups"
+    )
+    parser.add_argument(
         "--require-pairs",
         action="store_true",
         help="For rescoring, also require the preference-export gate for exit 0",
@@ -42,6 +45,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.audit_output and not args.audit_root:
         parser.error("--audit-output requires --audit-root")
+    if args.rescore_groups and not args.rescore_source:
+        parser.error("--rescore-groups requires --rescore-source")
     if args.require_pairs and not args.rescore_source:
         parser.error(
             "--require-pairs is only valid with --rescore-source; audits already require their pair gate"
@@ -54,7 +59,8 @@ def main() -> int:
             parser.error("--rescore-source requires a new --rescore-output")
         from scenesmith.scene_expert.slow_memory.paired_rescore import rescore_pairs
 
-        result = rescore_pairs(args.rescore_source, args.rescore_output)
+        selection = {"group_names": args.rescore_groups} if args.rescore_groups else {}
+        result = rescore_pairs(args.rescore_source, args.rescore_output, **selection)
         print(
             json.dumps(
                 {

@@ -77,7 +77,28 @@ def restore_raw_scene(
     return scene
 
 
-def rescore_pairs(source: Path, output: Path) -> dict[str, Any]:
+def _select_valid_groups(
+    groups: list[dict[str, Any]], group_names: list[str] | None
+) -> list[dict[str, Any]]:
+    available = {row["group"] for row in groups}
+    requested = available if group_names is None else set(group_names)
+    if (
+        not requested
+        or not requested <= available
+        or (group_names is not None and len(requested) != len(group_names))
+    ):
+        raise ValueError("rescore groups must be unique existing source groups")
+    selected = [row for row in groups if row["group"] in requested]
+    if not 1 <= len(selected) <= 4 or any(not row["valid"] for row in selected):
+        raise ValueError(
+            f"source execution integrity failed for selected groups: {selected}"
+        )
+    return selected
+
+
+def rescore_pairs(
+    source: Path, output: Path, *, group_names: list[str] | None = None
+) -> dict[str, Any]:
     """Verify original executions, refresh labels in a copy and run the full gate."""
     from omegaconf import OmegaConf
 
@@ -90,11 +111,8 @@ def rescore_pairs(source: Path, output: Path) -> dict[str, Any]:
         raise ValueError("rescoring requires a fresh output outside the source tree")
     # This does not authorize any old labels for export. It checks the original
     # execution, frozen context, raw assets and continuation before new scoring.
-    _, groups, errors = validate_pair_inputs(source, require_fresh_physics=False)
-    if errors or not 1 <= len(groups) <= 4:
-        raise ValueError(
-            f"source execution integrity failed: {errors or 'invalid group count'}"
-        )
+    _, source_groups, errors = validate_pair_inputs(source, require_fresh_physics=False)
+    groups = _select_valid_groups(source_groups, group_names)
     output.mkdir(parents=True)
     origin = {
         "schema_version": "sceneexpert.initial_pairs_rescore.v1",
@@ -102,6 +120,9 @@ def rescore_pairs(source: Path, output: Path) -> dict[str, Any]:
         "scoring_protocol": SCORING_PROTOCOL,
         "scoring_code_provenance": collect_pair_code_provenance(),
         "model_calls": 0,
+        "selected_groups": [row["group"] for row in groups],
+        "excluded_groups": [row for row in source_groups if row not in groups],
+        "source_audit_errors": errors,
         "candidates": [],
     }
     phase, active_candidate = "prepare", ""
@@ -241,9 +262,8 @@ def rescore_pairs(source: Path, output: Path) -> dict[str, Any]:
                     }
                 )
         phase = "final_audit"
-        _, _, after_errors = validate_pair_inputs(source, require_fresh_physics=False)
-        if after_errors:
-            raise ValueError(f"source changed during rescoring: {after_errors}")
+        _, after_groups, _ = validate_pair_inputs(source, require_fresh_physics=False)
+        _select_valid_groups(after_groups, [row["group"] for row in groups])
         if collect_pair_code_provenance() != origin["scoring_code_provenance"]:
             raise ValueError("scoring source changed during offline evaluation")
         audit = audit_pairs(output, expected_groups=len(groups))

@@ -17,6 +17,7 @@ _REQUIRED_SOURCES = (
     "scenesmith/agent_utils/base_stateful_agent.py",
     "scenesmith/scene_expert/slow_memory/paired_runtime.py",
     "scenesmith/scene_expert/slow_memory/paired_scoring.py",
+    "scenesmith/scene_expert/slow_memory/paired_contract.py",
     "scenesmith/scene_expert/slow_memory/paired_restoration.py",
     "scenesmith/scene_expert/slow_memory/paired_provenance.py",
     "scenesmith/scene_expert/slow_memory/paired_wire.py",
