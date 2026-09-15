@@ -1,5 +1,10 @@
 # Qwen3.8 initial pairs 008: stale physics labels and recovery
 
+Update: run 009 hit a native serialization equality failure. Use the
+[010 recovery plan](sceneexpert_initial_pairs_009_recovery.md) instead of the
+historical 009 command below. Scoring protocol v3 adds explicit verified
+restoration to the original v2 raw-evidence contract described here.
+
 Reviewed on 2026-09-15 from
 `tmp/results/slow_memory/qwen38_initial_pairs_008_review_20260914_150046/qwen38_initial_pairs_008_review/`.
 Paths below are relative to the extracted review root unless stated otherwise.
