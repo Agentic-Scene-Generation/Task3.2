@@ -11,11 +11,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
-import hashlib
+
+from dataclasses import asdict, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Mapping
 
 from scenesmith.agent_utils.furniture_safety import furniture_category_matches
 from scenesmith.agent_utils.scoring import compute_total_score, scores_to_dict
@@ -25,6 +27,223 @@ from scenesmith.scene_expert.context_bundle import (
 )
 
 console_logger = logging.getLogger(__name__)
+
+_SECRET_PATTERNS = (
+    re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b"),
+    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/-]{12,}"),
+    re.compile(r"(?i)((?:api[_-]?key|hf_token|token)\s*[=:]\s*)[^\s,;]+"),
+)
+
+
+def _jsonable(value: Any, *, depth: int = 0) -> Any:
+    """Convert SDK/Pydantic/dataclass values into bounded JSON-safe evidence."""
+
+    if depth > 12:
+        return "[MAX_DEPTH]"
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {
+            str(key): _jsonable(item, depth=depth + 1) for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(item, depth=depth + 1) for item in value]
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _jsonable(model_dump(mode="json"), depth=depth + 1)
+        except TypeError:
+            try:
+                return _jsonable(model_dump(), depth=depth + 1)
+            except Exception:
+                pass
+        except Exception:
+            pass
+    if is_dataclass(value):
+        try:
+            return _jsonable(asdict(value), depth=depth + 1)
+        except Exception:
+            pass
+    if hasattr(value, "__dict__"):
+        try:
+            return _jsonable(vars(value), depth=depth + 1)
+        except Exception:
+            pass
+    return str(value)
+
+
+def _redact_secrets(value: Any) -> Any:
+    if isinstance(value, str):
+        redacted = value
+        for pattern in _SECRET_PATTERNS:
+            if pattern.groups:
+                redacted = pattern.sub(
+                    lambda match: match.group(1) + "[REDACTED]", redacted
+                )
+            else:
+                redacted = pattern.sub("[REDACTED]", redacted)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_secrets(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _redact_secrets(item) for key, item in value.items()}
+    return value
+
+
+def _parse_tool_arguments(value: Any) -> Any:
+    if not isinstance(value, str):
+        return _jsonable(value)
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return value
+    return _jsonable(parsed)
+
+
+def _find_tool_calls(value: Any) -> list[dict[str, Any]]:
+    """Find OpenAI Agents SDK function-call payloads without importing the SDK."""
+
+    calls: list[dict[str, Any]] = []
+
+    def visit(item: Any) -> None:
+        if isinstance(item, list):
+            for child in item:
+                visit(child)
+            return
+        if not isinstance(item, dict):
+            return
+        item_type = str(item.get("type") or "").lower()
+        function = (
+            item.get("function") if isinstance(item.get("function"), dict) else {}
+        )
+        name = item.get("name") or function.get("name")
+        arguments = item.get("arguments", function.get("arguments"))
+        if name and (
+            "function" in item_type or "tool_call" in item_type or arguments is not None
+        ):
+            calls.append(
+                {
+                    "type": "function",
+                    "id": str(item.get("call_id") or item.get("id") or ""),
+                    "function": {
+                        "name": str(name),
+                        "arguments": _parse_tool_arguments(arguments or {}),
+                    },
+                }
+            )
+        for key, child in item.items():
+            if key not in {"arguments", "function"}:
+                visit(child)
+
+    visit(_jsonable(value))
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for call in calls:
+        signature = json.dumps(call, ensure_ascii=False, sort_keys=True, default=str)
+        if signature not in seen:
+            seen.add(signature)
+            unique.append(call)
+    return unique
+
+
+def _extract_agent_result_trace(result: Any, output: Any) -> dict[str, Any]:
+    """Persist observable assistant/tool events needed for preference training."""
+
+    if result is None:
+        return {
+            "assistant_messages": [{"role": "assistant", "content": _jsonable(output)}],
+            "tool_calls": [],
+            "tool_results": [],
+            "new_items": [],
+            "raw_responses": [],
+            "run_input": [],
+            "replay_items": [],
+        }
+    new_items = _jsonable(getattr(result, "new_items", []) or [])
+    raw_responses = _jsonable(getattr(result, "raw_responses", []) or [])
+    tool_calls = _find_tool_calls(new_items)
+    if not tool_calls:
+        tool_calls = _find_tool_calls(raw_responses)
+    tool_results: list[dict[str, Any]] = []
+    for item in new_items if isinstance(new_items, list) else []:
+        item_type = str(item.get("type") or item.get("__class__") or "").lower()
+        raw_item = item.get("raw_item") if isinstance(item, dict) else None
+        if "toolcalloutput" in item_type or (
+            isinstance(item, dict) and "output" in item and raw_item is not None
+        ):
+            tool_results.append(
+                {
+                    "tool_call_id": str(
+                        item.get("tool_call_id")
+                        or item.get("call_id")
+                        or (raw_item or {}).get("call_id", "")
+                    ),
+                    "output": _jsonable(item.get("output")),
+                }
+            )
+    assistant_message: dict[str, Any] = {
+        "role": "assistant",
+        "content": _jsonable(output),
+    }
+    if tool_calls:
+        assistant_message["tool_calls"] = tool_calls
+    replay_items: Any = []
+    to_input_list = getattr(result, "to_input_list", None)
+    if callable(to_input_list):
+        try:
+            replay_items = _jsonable(to_input_list())
+        except Exception:
+            replay_items = []
+    return {
+        "assistant_messages": [assistant_message],
+        "tool_calls": tool_calls,
+        "tool_results": tool_results,
+        "new_items": new_items,
+        "raw_responses": raw_responses,
+        "run_input": _jsonable(getattr(result, "input", [])),
+        "replay_items": replay_items,
+    }
+
+
+def _serialize_tool(tool: Any) -> dict[str, Any]:
+    payload = _jsonable(tool)
+    if (
+        isinstance(payload, dict)
+        and payload.get("type") == "function"
+        and isinstance(payload.get("function"), dict)
+    ):
+        return payload
+    if not isinstance(payload, dict):
+        return {"type": "function", "function": {"name": str(payload)}}
+    name = payload.get("name") or payload.get("tool_name") or type(tool).__name__
+    parameters = (
+        payload.get("params_json_schema")
+        or payload.get("parameters")
+        or payload.get("input_schema")
+        or {}
+    )
+    return {
+        "type": "function",
+        "function": {
+            "name": str(name),
+            "description": str(payload.get("description") or ""),
+            "parameters": _jsonable(parameters),
+        },
+    }
+
+
+def _contains_image_input(value: Any) -> bool:
+    payload = _jsonable(value)
+    if isinstance(payload, list):
+        return any(_contains_image_input(item) for item in payload)
+    if not isinstance(payload, dict):
+        return False
+    item_type = str(payload.get("type") or "").lower()
+    if item_type in {"input_image", "image", "image_url"}:
+        return True
+    return any(_contains_image_input(item) for item in payload.values())
 
 
 def _now() -> str:
@@ -226,9 +445,14 @@ class StageWorkingMemory:
             self.scene_root_dir / "scene_expert" / "context_bundles" / stage
         )
         public_dir = os.environ.get("SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR", "")
+        public_bank_read_only = os.environ.get(
+            "SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY", ""
+        ).strip().casefold() in {"1", "true", "yes", "on"}
         self.public_memory_dir = Path(public_dir) if public_dir else None
         self.public_events_path = (
-            self.public_memory_dir / "events.jsonl" if self.public_memory_dir else None
+            self.public_memory_dir / "events.jsonl"
+            if self.public_memory_dir and not public_bank_read_only
+            else None
         )
         self.required_counts: dict[str, int] = {}
         if enabled:
@@ -346,8 +570,18 @@ class StageWorkingMemory:
         result: Any = None,
         raw_response: Any = None,
         error: str = "",
+        event_kind: Literal["llm", "system"] = "llm",
+        tools: list[Any] | None = None,
+        system_instructions: Any = "",
+        context_snapshot: dict[str, Any] | None = None,
+        image_refs: list[str] | None = None,
+        capture_replay: bool = False,
+        requested_max_tokens: int | None = None,
+        stage_execution_attempt: int | None = None,
+        client_cancelled: bool | None = None,
+        elapsed_sec: float | None = None,
     ) -> None:
-        """Persist prompt/response metadata for one LLM call."""
+        """Persist legacy debug output or gated replay-ready Slow Memory evidence."""
         if not self.enabled:
             return
         record = build_llm_call_debug_record(
@@ -359,6 +593,11 @@ class StageWorkingMemory:
             result=result,
             raw_response=raw_response,
             error=error,
+            event_kind=event_kind,
+            requested_max_tokens=requested_max_tokens,
+            stage_execution_attempt=stage_execution_attempt,
+            client_cancelled=client_cancelled,
+            elapsed_sec=elapsed_sec,
         )
         payload = record.model_dump()
         safe_name = "".join(
@@ -369,9 +608,40 @@ class StageWorkingMemory:
             f"{int(time.time() * 1000)}_{safe_name}.json"
         )
         try:
-            _write_json(
-                payload_path,
-                {
+            if capture_replay:
+                result_trace = _extract_agent_result_trace(result, output)
+                tool_names = {
+                    str((call.get("function") or {}).get("name") or "")
+                    for call in result_trace.get("tool_calls", [])
+                    if isinstance(call, dict)
+                }
+                visual_context_used = (
+                    agent_role == "critic"
+                    or _contains_image_input(prompt)
+                    or "observe_scene" in tool_names
+                )
+                full_payload = {
+                    "schema_version": "2.0",
+                    "created_at": _now(),
+                    "stage": self.stage,
+                    "agent_role": agent_role,
+                    "event": event,
+                    "prompt": _jsonable(prompt),
+                    "output": _jsonable(output),
+                    "raw_response": _jsonable(raw_response),
+                    "error": error,
+                    "system_instructions": _jsonable(system_instructions),
+                    "tools": [_serialize_tool(tool) for tool in (tools or [])],
+                    "image_refs": (
+                        [str(path) for path in (image_refs or [])]
+                        if visual_context_used
+                        else []
+                    ),
+                    "context_snapshot": _jsonable(context_snapshot or {}),
+                    "agent_trace": result_trace,
+                }
+            else:
+                full_payload = {
                     "schema_version": "1.0",
                     "created_at": _now(),
                     "stage": self.stage,
@@ -381,7 +651,10 @@ class StageWorkingMemory:
                     "output": output,
                     "raw_response": raw_response,
                     "error": error,
-                },
+                }
+            _write_json(
+                payload_path,
+                _redact_secrets(full_payload) if capture_replay else full_payload,
             )
             payload["payload_ref"] = str(payload_path.relative_to(self.scene_root_dir))
         except Exception as exc:
@@ -441,6 +714,7 @@ class StageWorkingMemory:
         source: str,
         strategy: str,
         status: str,
+        repair_owner: str = "scenesmith_core",
         attempt: int | None = None,
         trigger_reasons: list[str] | None = None,
         actions: list[str] | None = None,
@@ -457,6 +731,7 @@ class StageWorkingMemory:
             "room": (
                 self.root_dir.name if self.root_dir.name.startswith("room_") else ""
             ),
+            "repair_owner": repair_owner,
             "source": source,
             "strategy": strategy,
             "status": status,
@@ -599,7 +874,12 @@ class StageWorkingMemory:
         )
 
     def _commit_public_stage_event(self, record: dict[str, Any]) -> None:
-        """Append a durable stage event and optional memory case to the shared bank."""
+        """Append critic evidence without bypassing final memory promotion.
+
+        StageWorkingMemory is an execution journal. Long-term success/failure
+        records are promoted only after full-scene verification by the strict
+        SceneExpert MemoryWriter.
+        """
         if self.public_events_path is None or self.public_memory_dir is None:
             return
         event_payload = {
@@ -611,147 +891,10 @@ class StageWorkingMemory:
             "event": record.get("event", ""),
             "render_dir": record.get("render_dir", ""),
             "scene_hash": record.get("scene_hash", ""),
+            "promotion_status": "evidence_only",
             "payload": record,
         }
         _append_jsonl(self.public_events_path, event_payload)
-
-        if record.get("role") != "critic":
-            return
-        try:
-            quality = record.get("deterministic_quality") or {}
-            scores = record.get("scores") or {}
-            hard_valid = bool(quality.get("hard_valid", True))
-            if hard_valid and scores:
-                self._commit_public_success_case(record)
-            elif not hard_valid or record.get("event") == "deterministic_hard_fail":
-                self._commit_public_failure_case(record)
-        except Exception as e:
-            console_logger.warning("Failed to commit public stage memory event: %s", e)
-
-    def _memory_id(self, prefix: str, record: dict[str, Any]) -> str:
-        payload = "|".join(
-            [
-                self.stage,
-                str(record.get("role", "")),
-                str(record.get("event", "")),
-                str(record.get("scene_hash", "")),
-                str(record.get("render_dir", "")),
-                str(record.get("critique", ""))[:300],
-            ]
-        )
-        digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
-        return f"{prefix}_{self.stage}_{digest}"
-
-    def _room_type_from_record(self, record: dict[str, Any]) -> str:
-        text = " ".join(
-            [
-                self.stage,
-                str(record.get("text", "")),
-                str(record.get("critique", "")),
-                " ".join(str(x) for x in record.get("object_names", [])),
-            ]
-        ).lower()
-        if "bedroom" in text or "bed" in text or "nightstand" in text:
-            return "bedroom"
-        return "room"
-
-    def _normalized_quality(self, record: dict[str, Any]) -> float:
-        total = record.get("score_total")
-        scores = record.get("scores") or {}
-        if not isinstance(total, (int, float)) or not scores:
-            return 0.0
-        max_total = 10.0 * max(1, len(scores))
-        return max(0.0, min(1.0, float(total) / max_total))
-
-    def _commit_public_success_case(self, record: dict[str, Any]) -> None:
-        quality_score = self._normalized_quality(record)
-        if quality_score < 0.75:
-            return
-        from scenesmith.scene_expert.memory.schemas import SuccessCase
-        from scenesmith.scene_expert.memory.store import FastMemoryStore
-        from scenesmith.scene_expert.memory.text_builder import build_embedding_text
-
-        case = SuccessCase(
-            case_id=self._memory_id("success", record),
-            room_type=self._room_type_from_record(record),
-            style="",
-            stage=self.stage,
-            task_signature=list(record.get("object_names", []))[:12],
-            required_objects=list(
-                (record.get("deterministic_quality") or {})
-                .get("required_counts", {})
-                .keys()
-            ),
-            scene_summary=f"Stage {self.stage} critic accepted render {record.get('render_dir', '')}.",
-            successful_pattern=[
-                _compact(record.get("critique", ""), 500)
-                or f"{self.stage} produced a hard-valid scored candidate."
-            ],
-            scores={
-                k: float(v.get("grade", v))
-                for k, v in (record.get("scores") or {}).items()
-                if isinstance(v, (int, float, dict))
-                and (
-                    not isinstance(v, dict) or isinstance(v.get("grade"), (int, float))
-                )
-            },
-            trace_ref=str(record.get("render_dir", "")),
-            quality_score=quality_score,
-            confidence=0.45,
-            created_at=_now(),
-        )
-        if not case.embedding_text:
-            case = case.model_copy(
-                update={"embedding_text": build_embedding_text(case)}
-            )
-        FastMemoryStore(str(self.public_memory_dir)).add_success_case(case)
-
-    def _commit_public_failure_case(self, record: dict[str, Any]) -> None:
-        from scenesmith.scene_expert.memory.schemas import FailureCase
-        from scenesmith.scene_expert.memory.store import FastMemoryStore
-        from scenesmith.scene_expert.memory.text_builder import build_embedding_text
-
-        quality = record.get("deterministic_quality") or {}
-        note = (
-            quality.get("deterministic_note")
-            or record.get("critique")
-            or record.get("text")
-            or ""
-        )
-        failure_type = "deterministic_hard_fail"
-        lowered = str(note).lower()
-        if "missing required" in lowered:
-            failure_type = "missing_required_object"
-        elif "door" in lowered or "open-connection" in lowered or "opening" in lowered:
-            failure_type = "door_or_opening_clearance"
-        elif "collision" in lowered or "overlap" in lowered:
-            failure_type = "collision_or_overlap"
-        case = FailureCase(
-            failure_id=self._memory_id("failure", record),
-            room_type=self._room_type_from_record(record),
-            stage=self.stage,
-            object="",
-            failure_type=failure_type,
-            bad_pattern=_compact(note, 900),
-            failure_reason=_compact(note, 900),
-            repair_action="Run stage repair loop and re-score before accepting this candidate.",
-            repair_verified=False,
-            required_objects=list((quality.get("required_counts") or {}).keys()),
-            scene_summary=f"Stage {self.stage} hard-failed at render {record.get('render_dir', '')}.",
-            quality_score=max(0.0, self._normalized_quality(record)),
-            confidence=0.6,
-            created_at=_now(),
-            scope="stage",
-            is_deterministic=True,
-            negative_constraint=_compact(note, 700),
-            critic_check="Verify deterministic hard constraints before invoking VLM scoring.",
-            trace_ref=str(record.get("render_dir", "")),
-        )
-        if not case.embedding_text:
-            case = case.model_copy(
-                update={"embedding_text": build_embedding_text(case)}
-            )
-        FastMemoryStore(str(self.public_memory_dir)).add_failure_case(case)
 
 
 def save_generic_render_memory(

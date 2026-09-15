@@ -12,7 +12,10 @@ import re
 
 from typing import Any
 
-from scenesmith.agent_utils.thinking import chat_template_kwargs_from_effort
+from scenesmith.agent_utils.thinking import (
+    chat_template_kwargs_from_effort,
+    openrouter_extra_body,
+)
 from scenesmith.scene_expert.behavior.schemas import (
     ActionStep,
     AssetNeed,
@@ -575,7 +578,9 @@ class TemplateBehaviorPlanner:
                 ],
                 temperature=0.1,
                 max_tokens=128,
-                extra_body=chat_template_kwargs_from_effort("none"),
+                extra_body=openrouter_extra_body(
+                    chat_template_kwargs_from_effort("none")
+                ),
             )
             message = response.choices[0].message
             raw = message.content or getattr(message, "reasoning_content", None)
@@ -624,7 +629,9 @@ class TemplateBehaviorPlanner:
                 ],
                 temperature=0.1,
                 max_tokens=512,
-                extra_body=chat_template_kwargs_from_effort("none"),
+                extra_body=openrouter_extra_body(
+                    chat_template_kwargs_from_effort("none")
+                ),
             )
             message = response.choices[0].message
             raw = message.content or getattr(message, "reasoning_content", None)

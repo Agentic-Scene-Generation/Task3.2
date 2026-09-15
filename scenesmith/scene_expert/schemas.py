@@ -6,9 +6,14 @@ type safety and easy JSON serialization across the pipeline.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+REQUIRED_FIRST_DIRECTIVE = (
+    "Execution order: place and stabilize prompt-required assets first; then use "
+    "native designer judgment for useful same-stage optional additions."
+)
 
 # ---------------------------------------------------------------------------
 # TaskCompiler output
@@ -66,6 +71,15 @@ class SceneTaskSpec(BaseModel):
         default_factory=list,
         description="Manipuland-scale objects required (books, cups, etc.)",
     )
+    required_architectural_features: list[str] = Field(
+        default_factory=list,
+        description="Explicit structural features such as windows and exposed beams",
+    )
+    suggested_large_objects: list[str] = Field(default_factory=list)
+    suggested_wall_objects: list[str] = Field(default_factory=list)
+    suggested_ceiling_objects: list[str] = Field(default_factory=list)
+    suggested_small_objects: list[str] = Field(default_factory=list)
+    requirement_sources: dict[str, list[str]] = Field(default_factory=dict)
     functional_zones: list[str] = Field(
         default_factory=list,
         description="Spatial zones within the room, e.g. ['sleeping_zone', 'working_zone']",
@@ -80,12 +94,60 @@ class SceneTaskSpec(BaseModel):
     )
     compiler_status: Literal["ok", "degraded"] = "ok"
     compiler_failure_reason: str = ""
-    compiler_spec_version: str = "scenesmith.task_compiler.v3"
+    compiler_spec_version: str = "scenesmith.task_compiler.v6"
 
 
 # ---------------------------------------------------------------------------
 # Memory pack returned by retriever
 # ---------------------------------------------------------------------------
+
+
+class RetrievedMemorySelection(BaseModel):
+    """Auditable rank/provenance row for one retrieved memory record."""
+
+    memory_id: str
+    memory_type: Literal["success", "failure", "skill"]
+    rank: int = Field(ge=1)
+    score: float | None = None
+    score_components: dict[str, float] = Field(default_factory=dict)
+    source_path: str = ""
+    source_task_ids: list[str] = Field(default_factory=list)
+    source_run_ids: list[str] = Field(default_factory=list)
+    bank_id: str = ""
+    bank_revision: int = Field(default=0, ge=0)
+    injected_text: str = ""
+    placement_text: str = ""
+    content_hash: str = ""
+    payload_version: str = ""
+    evidence_warnings: list[str] = Field(default_factory=list)
+    spatial_relations: list[dict[str, Any]] = Field(default_factory=list)
+    applicability: dict[str, Any] = Field(default_factory=dict)
+    placement_experience: dict[str, Any] = Field(default_factory=dict)
+
+
+class MemorySelectionDecision(BaseModel):
+    """One auditable admission or rejection made by the injection policy."""
+
+    memory_id: str
+    memory_type: Literal["success", "failure", "skill"]
+    decision: Literal["selected", "rejected"]
+    reasons: list[str] = Field(default_factory=list)
+    retrieval_rank: int = Field(default=0, ge=0)
+    retrieval_score: float | None = None
+
+
+class SkillSelectionDecision(BaseModel):
+    """Auditable deterministic gate applied before skill ranking/injection."""
+
+    skill_name: str
+    decision: Literal["eligible", "selected", "not_selected", "rejected"]
+    reasons: list[str] = Field(default_factory=list)
+    canonical_task_room: str = ""
+    canonical_skill_rooms: list[str] = Field(default_factory=list)
+    required_object_roles: list[str] = Field(default_factory=list)
+    required_relation_types: list[str] = Field(default_factory=list)
+    matched_constraint_ids: list[str] = Field(default_factory=list)
+    conflicting_constraint_ids: list[str] = Field(default_factory=list)
 
 
 class MemoryPack(BaseModel):
@@ -110,6 +172,202 @@ class MemoryPack(BaseModel):
             "Injected directly into the designer prompt, bypassing GlobalPlanner."
         ),
     )
+    placement_memory_ids: list[str] = Field(default_factory=list)
+    success_case_ids: list[str] = Field(default_factory=list)
+    failure_case_ids: list[str] = Field(default_factory=list)
+    skill_names: list[str] = Field(default_factory=list)
+    retrieved_source_task_ids: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Selected memory ID to source task IDs. This is audit metadata used "
+            "to prove that guidance came from another task rather than a replay."
+        ),
+    )
+    retrieved_source_run_ids: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="Selected memory ID to source run IDs for experiment provenance.",
+    )
+    memory_bank_id: str = ""
+    memory_bank_revision: int = 0
+    selections: list[RetrievedMemorySelection] = Field(default_factory=list)
+    selection_decisions: list[MemorySelectionDecision] = Field(default_factory=list)
+    selection_policy: dict[str, Any] = Field(default_factory=dict)
+    skill_filter_decisions: list[SkillSelectionDecision] = Field(default_factory=list)
+    current_scene_state: dict[str, Any] = Field(default_factory=dict)
+
+    def deduplicated(self) -> "MemoryPack":
+        """Deduplicate identities without detaching text from its source.
+
+        Equal text from distinct records must survive until admission: one of
+        those records may be ineligible. Legacy parallel lists are accepted
+        only when their alignment is unambiguous. Unbound layouts are dropped.
+        """
+
+        def unique_text(values: list[str]) -> list[str]:
+            seen: set[str] = set()
+            result: list[str] = []
+            for value in values:
+                text = str(value or "").strip()
+                key = " ".join(text.split()).casefold()
+                if text and key not in seen:
+                    result.append(text)
+                    seen.add(key)
+            return result
+
+        updates: dict[str, Any] = {}
+        canonical_rows: list[RetrievedMemorySelection] = []
+        for kind, id_field, text_field in (
+            ("success", "success_case_ids", "success_hints"),
+            ("failure", "failure_case_ids", "failure_hints"),
+            ("skill", "skill_names", "skill_texts"),
+        ):
+            ids = getattr(self, id_field)
+            texts = getattr(self, text_field)
+            by_id: dict[str, RetrievedMemorySelection] = {}
+            for row in self.selections:
+                if row.memory_type == kind:
+                    by_id.setdefault(row.memory_id, row)
+            if not ids and not by_id:
+                updates[text_field] = unique_text(texts)
+                updates[id_field] = []
+                continue
+            ordered_ids = list(dict.fromkeys(ids or by_id))
+            aligned: dict[str, str] = {}
+            ambiguous: set[str] = set()
+            if len(ids) == len(texts):
+                for memory_id, text in zip(ids, texts, strict=True):
+                    if memory_id in aligned and " ".join(
+                        aligned[memory_id].casefold().split()
+                    ) != " ".join(text.casefold().split()):
+                        ambiguous.add(memory_id)
+                    aligned.setdefault(memory_id, text.strip())
+                for memory_id in ambiguous:
+                    aligned[memory_id] = ""
+            rows = []
+            for memory_id in ordered_ids:
+                row = by_id.get(memory_id)
+                if row is None:
+                    row = RetrievedMemorySelection(
+                        memory_id=memory_id,
+                        memory_type=kind,
+                        rank=len(rows) + 1,
+                        injected_text=aligned.get(memory_id, ""),
+                        source_task_ids=self.retrieved_source_task_ids.get(
+                            memory_id, []
+                        ),
+                        source_run_ids=self.retrieved_source_run_ids.get(memory_id, []),
+                        bank_id=self.memory_bank_id,
+                        bank_revision=self.memory_bank_revision,
+                    )
+                rows.append(row)
+            canonical_rows.extend(rows)
+            updates[id_field] = [row.memory_id for row in rows]
+            updates[text_field] = [row.injected_text for row in rows]
+        layouts = [
+            row
+            for row in canonical_rows
+            if row.memory_type == "success" and row.placement_text
+        ]
+        updates["selections"] = canonical_rows
+        updates["placement_reference"] = "\n\n".join(
+            row.placement_text for row in layouts
+        )
+        updates["placement_memory_ids"] = [row.memory_id for row in layouts]
+        id_counts = {
+            row.memory_id: sum(
+                other.memory_id == row.memory_id for other in canonical_rows
+            )
+            for row in canonical_rows
+        }
+        updates["retrieved_source_task_ids"] = {
+            row.memory_id: row.source_task_ids
+            for row in canonical_rows
+            if id_counts[row.memory_id] == 1
+        }
+        updates["retrieved_source_run_ids"] = {
+            row.memory_id: row.source_run_ids
+            for row in canonical_rows
+            if id_counts[row.memory_id] == 1
+        }
+        return self.model_copy(update=updates)
+
+
+class MemoryRoleBinding(BaseModel):
+    """A source role bound to observed objects or a current task design role."""
+
+    model_config = ConfigDict(extra="forbid")
+    source_role: str
+    current_role: str
+    object_ids: list[str] = Field(default_factory=list)
+
+
+class MemoryAdviceCheck(BaseModel):
+    """Read-only advice observation. No model-invented pass thresholds."""
+
+    model_config = ConfigDict(extra="forbid")
+    source_episode_id: str
+    metric: Literal[
+        "anchor_local_offset_m",
+        "relative_yaw_deg",
+        "aabb_separation_m",
+        "bbox_center_distance_m",
+        "native_constraint",
+    ]
+    subject_role: str
+    anchor_role: str
+    constraint_id: str = ""
+
+
+class MemoryAdaptation(BaseModel):
+    """Planner-owned advice; identity/evidence are validated outside the LLM."""
+
+    model_config = ConfigDict(extra="forbid")
+    memory_type: Literal["success", "failure", "skill"]
+    memory_id: str
+    source_content_hash: str
+    decision: Literal["accepted", "adapted", "rejected"]
+    reason: str = ""
+    source_relation_indices: list[Annotated[int, Field(strict=True, ge=0)]] | None = (
+        None  # Zero-based immutable source rows; legacy None means the entire source.
+    )
+    source_method_step_indices: (
+        list[Annotated[int, Field(strict=True, ge=0)]] | None
+    ) = None  # Legacy None keeps all steps; a subset must retain its own sources.
+    bindings: list[MemoryRoleBinding] = Field(default_factory=list)
+    preconditions: list[str] = Field(default_factory=list)
+    actions: list[str] = Field(default_factory=list)
+    checks: list[str] = Field(default_factory=list)
+    advice_checks: list[MemoryAdviceCheck] = Field(default_factory=list, max_length=6)
+
+
+class AcceptedMemoryItem(BaseModel):
+    """Single, validated source/adaptation pair for design-time delivery."""
+
+    source: RetrievedMemorySelection
+    adaptation: MemoryAdaptation
+    text: str
+
+
+class MemoryInjectionBundle(BaseModel):
+    """Canonical, single-pass memory transformation and injection artifact."""
+
+    stage: str
+    planner_stage_brief: "StageBrief | None" = None
+    enriched_stage_brief: "StageBrief | None" = None
+    brief_text: str = ""
+    memory_text: str = ""
+    placement_text: str = ""
+    final_text: str = ""
+    selected_memory_ids: list[str] = Field(default_factory=list)
+    retrieved_skill_names: list[str] = Field(default_factory=list)
+    planner_selected_skill_names: list[str] = Field(default_factory=list)
+    prompt_delivered_skill_names: list[str] = Field(default_factory=list)
+    schema_version: str = "memory-context.v1"
+    accepted_items: list[AcceptedMemoryItem] = Field(default_factory=list)
+    adaptation_decisions: list[dict[str, Any]] = Field(default_factory=list)
+    current_scene_state: dict[str, Any] = Field(default_factory=dict)
+    task_spec: dict[str, Any] = Field(default_factory=dict)
+    relation_context: dict[str, Any] = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +388,12 @@ class FloorPlanReservation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reservation_id: str
-    kind: Literal["wall_anchor", "opposed_anchor_pair", "functional_zone"]
+    kind: Literal[
+        "wall_anchor",
+        "opposed_anchor_pair",
+        "functional_zone",
+        "opening_adjacency",
+    ]
     source_constraint_ids: list[str] = Field(default_factory=list)
     room_type: str = ""
     subject_categories: list[str] = Field(default_factory=list)
@@ -142,14 +405,37 @@ class FloorPlanReservation(BaseModel):
     hard: bool = True
 
 
+class ExplicitFloorGeometryPolicy(BaseModel):
+    """Prompt-specified geometry which takes precedence over inferred area needs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    detected: bool = False
+    source: Literal["", "explicit_prompt"] = ""
+    mode: Literal["", "room", "polygon"] = ""
+    expected_area_m2: float = Field(default=0.0, ge=0.0)
+    expected_width_m: float | None = Field(default=None, gt=0.0)
+    expected_length_m: float | None = Field(default=None, gt=0.0)
+    expected_vertices: list[tuple[float, float]] = Field(default_factory=list)
+    functional_zone_area_policy: Literal["hard", "advisory"] = "hard"
+    verify_geometry_match: bool = True
+    absolute_area_tolerance_m2: float = Field(default=0.10, ge=0.0)
+    relative_area_tolerance: float = Field(default=0.01, ge=0.0)
+    vertex_tolerance_m: float = Field(default=0.01, ge=0.0)
+    evidence: list[str] = Field(default_factory=list)
+
+
 class FloorPlanReservationManifest(BaseModel):
     """Serializable future-capacity contract shared by floor-plan validators."""
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "scenesmith.floor_plan_reservations.v1"
+    schema_version: str = "scenesmith.floor_plan_reservations.v3"
     enabled: bool = False
     reservations: list[FloorPlanReservation] = Field(default_factory=list)
+    explicit_geometry: ExplicitFloorGeometryPolicy = Field(
+        default_factory=ExplicitFloorGeometryPolicy
+    )
     explicit_window_count: int = Field(default=0, ge=0)
     explicit_window_required: bool = False
     preserve_entrance_route: bool = True
@@ -166,6 +452,7 @@ class StageRelationContext(BaseModel):
     hard_constraints: list[dict[str, Any]] = Field(default_factory=list)
     floor_plan_reservations: list[dict[str, Any]] = Field(default_factory=list)
     floor_plan_manifest: FloorPlanReservationManifest | None = None
+    resolved_opening_reservations: dict[str, Any] = Field(default_factory=dict)
     contract_constraint_count: int = 0
     projected_constraint_count: int = 0
     projection_coverage: float = Field(default=1.0, ge=0.0, le=1.0)
@@ -189,6 +476,7 @@ class HarnessContext(BaseModel):
     stage_brief: "StageBrief | None" = None
     stage_budget: StageBudget = Field(default_factory=StageBudget)
     allowed_scene_smith_stage: str = ""
+    stage_policy: Literal["auto", "required_only"] = "auto"
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -198,12 +486,36 @@ class HarnessContext(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class OptionalAssetRecommendation(BaseModel):
+    """One soft, capacity-aware same-stage asset proposal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    count: int = Field(default=1, ge=1)
+    priority: Literal["low", "medium", "high"] = "medium"
+    rationale: str = ""
+    placement_guidance: str = ""
+
+
 class StageBrief(BaseModel):
     """Expert planning hint generated by the Global Planner for one stage."""
 
     model_config = ConfigDict(extra="forbid")
 
+    memory_adaptations: list[MemoryAdaptation] = Field(default_factory=list)
+
     stage: str
+    stage_policy: Literal["auto", "required_only"] = "auto"
+    optional_assets_allowed: bool = True
+    required_objects: list[str] = Field(
+        default_factory=list,
+        description="Prompt-explicit hard minimum for this stage",
+    )
+    optional_asset_recommendations: list[OptionalAssetRecommendation] = Field(
+        default_factory=list,
+        description="Soft same-stage additions selected from room context and capacity",
+    )
     stage_objective: str = Field(
         ...,
         description="One-sentence goal for this stage",
@@ -229,6 +541,7 @@ class StageBrief(BaseModel):
         """Format StageBrief as a compact text block for prompt injection."""
         lines = [
             f"=== SceneExpert Stage Brief: {self.stage} ===",
+            f"Stage policy: {self.stage_policy}",
             f"Objective: {self.stage_objective}",
             (
                 "Priority: The original user task is authoritative. This brief is "
@@ -236,6 +549,36 @@ class StageBrief(BaseModel):
                 "relations from that task."
             ),
         ]
+        lines.append("HARD REQUIRED ASSETS (minimum contract):")
+        if self.required_objects:
+            lines.extend(f"  - {name}" for name in self.required_objects)
+        else:
+            lines.append(
+                "  - None explicitly named. This does NOT disable or skip the stage."
+            )
+        lines.append(f"REQUIRED-FIRST EXECUTION: {REQUIRED_FIRST_DIRECTIVE}")
+        if self.optional_assets_allowed:
+            lines.append("OPTIONAL ASSET RECOMMENDATIONS (soft, capacity-aware):")
+            if self.optional_asset_recommendations:
+                for item in self.optional_asset_recommendations:
+                    detail = f"{item.name} x{item.count} [{item.priority}]"
+                    if item.rationale:
+                        detail += f" — {item.rationale}"
+                    if item.placement_guidance:
+                        detail += f" Placement: {item.placement_guidance}"
+                    lines.append(f"  - {detail}")
+            else:
+                lines.append(
+                    "  - No fixed list. Use native designer judgment to add useful "
+                    "same-stage assets based on room type, style, usable capacity, and "
+                    "already placed objects."
+                )
+        else:
+            lines.append(
+                "OPTIONAL ASSET AUTONOMY: disabled by required_only ablation or an "
+                "explicit closed-inventory user constraint; still execute and verify "
+                "this stage."
+            )
         if self.constraints_for_designer:
             lines.append("Designer constraints:")
             lines.extend(f"  - {c}" for c in self.constraints_for_designer)
@@ -260,6 +603,14 @@ class VerifyIssue(BaseModel):
     issue_type: str  # e.g., "unreachable", "missing_object", "overcrowded"
     object_name: str = ""
     description: str = ""
+    constraint_id: str = ""
+    relation: str = ""
+    subject_ids: list[str] = Field(default_factory=list)
+    target_ids: list[str] = Field(default_factory=list)
+    metric: str = ""
+    scoring_tier: str = ""
+    repair_strategy: str = ""
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
 
 
 class StageVerifyReport(BaseModel):
@@ -269,14 +620,28 @@ class StageVerifyReport(BaseModel):
     pass_stage: bool
     scores: dict[str, float] = Field(
         default_factory=dict,
-        description="Scores 0-1 for semantic, aesthetic, physics, interaction",
+        description="Backward-compatible alias of visual_scores",
     )
+    visual_scores: dict[str, float] = Field(default_factory=dict)
+    rule_scores: dict[str, float] = Field(default_factory=dict)
     issues: list[VerifyIssue] = Field(default_factory=list)
+    informational_issues: list[VerifyIssue] = Field(default_factory=list)
     repair_suggestions: list[str] = Field(default_factory=list)
     critique_summary: str = Field(
         default="",
         description="Full critic summary text from SceneSmith scores.yaml — richest signal for memory",
     )
+    score_source: str = "unknown"
+    vlm_scoring_performed: bool = False
+    hard_check_report: dict = Field(default_factory=dict)
+    runtime_repair_events: list[str] = Field(default_factory=list)
+    required_objects: list[str] = Field(default_factory=list)
+    required_satisfied_objects: list[str] = Field(default_factory=list)
+    required_missing_objects: list[str] = Field(default_factory=list)
+    required_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
+    requirement_status: Literal[
+        "satisfied", "partial", "unsatisfied", "not_applicable", "unknown"
+    ] = "unknown"
 
 
 class FullVerifyReport(BaseModel):
@@ -294,6 +659,19 @@ class FullVerifyReport(BaseModel):
     overall_score: float = 0.0
     deterministic_pass: bool = False
     pass_scene: bool = False
+    non_degradable_blockers: list[str] = Field(default_factory=list)
+    expected_stages: list[str] = Field(default_factory=list)
+    completed_stages: list[str] = Field(default_factory=list)
+    missing_stages: list[str] = Field(default_factory=list)
+    outcome_status: str = "COMPLETE"
+    degraded_reasons: list[str] = Field(default_factory=list)
+    measured_metrics: dict[str, bool] = Field(default_factory=dict)
+    metric_sources: dict[str, str] = Field(default_factory=dict)
+    generation_status: Literal["complete", "partial", "failed", "unknown"] = "unknown"
+    requirement_status: Literal[
+        "satisfied", "partial", "unsatisfied", "not_applicable", "unknown"
+    ] = "unknown"
+    quality_status: Literal["passed", "degraded", "failed", "unknown"] = "unknown"
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +683,8 @@ class RepairResult(BaseModel):
     """Outcome of a repair attempt."""
 
     repair_type: str  # "local_repair", "stage_regeneration", "rollback", "skipped"
+    repair_owner: str = "scene_expert_repair_controller"
+    execution_status: str = "planned"
     failure_type: str = ""
     repair_action: str = ""
     repair_verified: bool = False
@@ -321,6 +701,46 @@ class StageCost(BaseModel):
     stage_time_sec: float = 0.0
 
 
+class StageExecutionEvidence(BaseModel):
+    """Auditable proof that optional guidance reached a stage agent."""
+
+    task_spec_source: str = "unknown"
+    stage_brief_source: str = "unknown"
+    stage_policy: Literal["auto", "required_only"] = "auto"
+    optional_assets_allowed: bool = True
+    required_objects: list[str] = Field(default_factory=list)
+    optional_asset_recommendations: list[dict[str, Any]] = Field(default_factory=list)
+    required_first_instruction_applicable: bool = False
+    required_first_instruction_delivered: bool = False
+    optional_autonomy_preserved: bool = False
+    required_satisfied_objects: list[str] = Field(default_factory=list)
+    required_missing_objects: list[str] = Field(default_factory=list)
+    required_coverage: float | None = Field(default=None, ge=0.0, le=1.0)
+    requirement_status: Literal[
+        "satisfied", "partial", "unsatisfied", "not_applicable", "unknown"
+    ] = "unknown"
+    stage_outcome: Literal[
+        "running", "passed", "quality_issue", "verification_error", "runtime_failed"
+    ] = "running"
+    stage_agent_invoked: bool = False
+    retrieved_memory_ids: list[str] = Field(default_factory=list)
+    retrieved_skill_names: list[str] = Field(default_factory=list)
+    planner_selected_skill_names: list[str] = Field(default_factory=list)
+    prompt_delivered_skill_names: list[str] = Field(default_factory=list)
+    context_bundle_hash: str = ""
+    injected_brief_hash: str = ""
+    injected_memory_hash: str = ""
+    designer_prompt_hash: str = ""
+    designer_prompt_contains_brief: bool = False
+    designer_prompt_contains_memory: bool = False
+    placement_reference_injected: bool = False
+    final_injection_hash: str = ""
+    experiment_signature: str = ""
+    degraded: bool = False
+    continuation_policy: str = ""
+    runtime_failure: dict[str, Any] = Field(default_factory=dict)
+
+
 class StageTraceEntry(BaseModel):
     stage: str
     memory_pack: MemoryPack
@@ -331,3 +751,6 @@ class StageTraceEntry(BaseModel):
     verify_report: StageVerifyReport | None = None
     repair_actions: list[RepairResult] = Field(default_factory=list)
     cost: StageCost = Field(default_factory=StageCost)
+    execution_evidence: StageExecutionEvidence = Field(
+        default_factory=StageExecutionEvidence
+    )

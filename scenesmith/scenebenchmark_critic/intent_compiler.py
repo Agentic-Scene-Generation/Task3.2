@@ -13,21 +13,31 @@ from typing import Any
 
 from scenesmith.agent_utils.thinking import (
     chat_template_kwargs_from_effort,
+    openrouter_extra_body,
     prepend_text_thinking_directive,
     thinking_directive_from_effort,
 )
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scenebenchmark_critic.intent_schema import (
     INTENT_COMPILER_SPEC_VERSION,
+    INTENT_COMPILER_SEMANTIC_IR_VERSION,
     INTENT_CONTRACT_SCHEMA_VERSION,
     canonical_selector_category,
     intent_compiler_wire_json_schema,
     selector_categories_overlap,
+    validate_compiler_semantic_ir,
     validate_intent_contract,
 )
 from scenesmith.scenebenchmark_critic.intent_contract import (
+    HARD_SOURCES,
     _apply_task_spec_contract_metadata,
+    _task_spec_inventory_constraints,
     build_intent_contract,
+    ensure_coverage_requirements,
+)
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    execution_owner,
+    is_known_object_category,
 )
 from scenesmith.scenebenchmark_critic.relation_registry import (
     RELATION_REGISTRY,
@@ -35,7 +45,7 @@ from scenesmith.scenebenchmark_critic.relation_registry import (
     relation_spec,
     relations_are_exclusive,
 )
-from scenesmith.utils.llm_json import parse_llm_json_object
+from scenesmith.utils.llm_json import json_response_format, parse_llm_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +76,460 @@ _LEGAL_ENVIRONMENT_ANCHORS = frozenset(
         "ceiling",
         "entrance",
         "entry",
+        "door",
+        "opening",
+        "window",
         *ROOM_RELATIVE_WALL_CATEGORIES,
     }
 )
+_ENDPOINT_REF_FIELDS = (
+    "subject_ref",
+    "target_ref",
+    "secondary_target_ref",
+)
+_NON_ENDPOINT_REQUIREMENT_KINDS = frozenset(
+    {"forbidden_inventory", "unsupported", "unresolved", "soft_scope"}
+)
+_NON_ENDPOINT_IGNORED_FIELDS = frozenset(
+    {
+        "relation",
+        *_ENDPOINT_REF_FIELDS,
+        "subject_count",
+        "target_count",
+        "subject_quantifier",
+        "target_quantifier",
+        "subject_role",
+        "target_role",
+        "subject_cohort",
+        "target_cohort",
+        "edge_frame",
+        "groups",
+        "orientation",
+    }
+)
+
+
+def _entity_catalog(task_spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Build the only endpoint namespace admitted by the live compiler."""
+
+    catalog: dict[str, dict[str, Any]] = {}
+    for row in _task_spec_inventory_constraints(task_spec):
+        subjects = row.get("subjects") or {}
+        category = canonical_selector_category(subjects.get("category"))
+        if not category:
+            continue
+        entity_ref = f"inventory:{category}"
+        catalog[entity_ref] = {
+            "entity_ref": entity_ref,
+            "canonical_category": category,
+            "required_count": int(subjects.get("count") or 1),
+            "generation_stage": execution_owner(category),
+            "source": str(row.get("inference_reason") or "SceneTaskSpec inventory"),
+        }
+    for category in sorted(_LEGAL_ENVIRONMENT_ANCHORS):
+        entity_ref = f"anchor:{category}"
+        catalog[entity_ref] = {
+            "entity_ref": entity_ref,
+            "canonical_category": category,
+            "required_count": 1,
+            "generation_stage": "floor_plan",
+            "source": "legal_environment_anchor",
+        }
+    return catalog
+
+
+def _render_entity_catalog(catalog: dict[str, dict[str, Any]]) -> str:
+    return json.dumps(
+        list(catalog.values()), ensure_ascii=False, indent=2, sort_keys=True
+    )
+
+
+def _rejected_entity_refs(
+    payload: Any, catalog: dict[str, dict[str, Any]]
+) -> list[dict[str, str]]:
+    """Project rejected candidate refs into the persisted attempt trace."""
+
+    if not isinstance(payload, dict):
+        return []
+    rows = payload.get("requirements")
+    if not isinstance(rows, list):
+        return []
+    rejected: list[dict[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("kind") or "") in _NON_ENDPOINT_REQUIREMENT_KINDS:
+            continue
+        for field in _ENDPOINT_REF_FIELDS:
+            value = row.get(field)
+            if value is None or not str(value).strip() or str(value) in catalog:
+                continue
+            rejected.append(
+                {
+                    "requirement_id": str(row.get("requirement_id") or ""),
+                    "grounding": str(row.get("grounding") or ""),
+                    "entity_ref": str(value),
+                    "reason": "unknown_or_unbound_entity_ref",
+                }
+            )
+    return rejected
+
+
+def _semantic_source(
+    grounding: str, grounding_catalog: dict[str, str]
+) -> dict[str, str]:
+    text = grounding_catalog[grounding]
+    if grounding.startswith("prompt:"):
+        return {
+            "source": "explicit_prompt",
+            "evidence_span": text,
+            "inference_reason": "",
+        }
+    return {
+        "source": "model_inferred",
+        "evidence_span": "",
+        "inference_reason": f"SceneTaskSpec {grounding}: {text}",
+    }
+
+
+def _catalog_selector(
+    entity_ref: Any,
+    catalog: dict[str, dict[str, Any]],
+    *,
+    count: Any = None,
+    quantifier: Any = None,
+    role: Any = None,
+    cohort: Any = None,
+) -> dict[str, Any]:
+    ref = str(entity_ref or "")
+    entry = catalog.get(ref)
+    if entry is None:
+        raise ValueError(f"unknown or unbound entity_ref {ref!r}")
+    selector: dict[str, Any] = {"category": entry["canonical_category"]}
+    if count is not None:
+        selector["count"] = int(count)
+    elif ref.startswith("inventory:"):
+        selector["count"] = int(entry["required_count"])
+    else:
+        selector["count"] = 1
+    if quantifier:
+        selector["quantifier"] = str(quantifier)
+    if role:
+        selector["role"] = str(role)
+    if cohort:
+        selector["cohort"] = str(cohort)
+    return selector
+
+
+def _coverage_row(
+    requirement: dict[str, Any],
+    *,
+    kind: str,
+    disposition: str,
+    normalized: str,
+    source: dict[str, str],
+    earliest_stage: str = "floor_plan",
+    relation: str = "",
+) -> dict[str, Any]:
+    return {
+        "requirement_id": str(requirement["requirement_id"]),
+        "kind": kind,
+        "disposition": disposition,
+        "normalized": normalized,
+        "earliest_stage": earliest_stage,
+        "final_stage": "final",
+        "source": source["source"],
+        "evidence_span": source["evidence_span"] or source["inference_reason"],
+        "relation": relation,
+    }
+
+
+def _admit_semantic_ir(
+    payload: dict[str, Any],
+    *,
+    prompt: str,
+    prompt_hash: str,
+    task_spec: dict[str, Any],
+    grounding_catalog: dict[str, str],
+    catalog: dict[str, dict[str, Any]],
+    retry_count: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, str]]]:
+    """Validate LLM semantics without interpreting prompt wording in code."""
+
+    # The provider receives this schema too, but local JSON grammars do not
+    # consistently enforce every field type. Admission is the final boundary
+    # before SemanticIR becomes hard runtime intent.
+    validate_compiler_semantic_ir(payload)
+    if payload.get("schema_version") != INTENT_COMPILER_SEMANTIC_IR_VERSION:
+        raise ValueError("semantic IR schema_version is missing or unsupported")
+    unexpected_top_level = set(payload) - {"schema_version", "requirements"}
+    if unexpected_top_level:
+        raise ValueError(
+            "semantic IR has unexpected fields: "
+            + ", ".join(sorted(unexpected_top_level))
+        )
+    requirements = payload.get("requirements")
+    if not isinstance(requirements, list):
+        raise ValueError("semantic IR requirements must be a list")
+    seen_ids: set[str] = set()
+    covered_groundings: set[str] = set()
+    constraints = _task_spec_inventory_constraints(task_spec)
+    coverage_requirements: list[dict[str, Any]] = []
+    ledger: list[dict[str, Any]] = []
+    rejected: list[dict[str, str]] = []
+
+    for raw in requirements:
+        if not isinstance(raw, dict):
+            raise ValueError("semantic IR requirement must be an object")
+        unexpected_fields = set(raw) - {
+            "requirement_id",
+            "kind",
+            "grounding",
+            "relation",
+            "subject_ref",
+            "target_ref",
+            "secondary_target_ref",
+            "subject_count",
+            "target_count",
+            "subject_quantifier",
+            "target_quantifier",
+            "subject_role",
+            "target_role",
+            "subject_cohort",
+            "target_cohort",
+            "edge_frame",
+            "groups",
+            "orientation",
+            "forbidden_category",
+            "reason",
+            "surface_mentions",
+        }
+        if unexpected_fields:
+            raise ValueError(
+                "semantic IR requirement has unexpected fields: "
+                + ", ".join(sorted(unexpected_fields))
+            )
+        # Local JSON grammar implementations do not consistently enforce a
+        # per-item required list. Keep the wire contract deterministic even
+        # when the provider accepts an omitted nullable field.
+        if "target_ref" not in raw:
+            raise ValueError("semantic IR requirement omitted target_ref")
+        requirement_id = str(raw.get("requirement_id") or "")
+        grounding = str(raw.get("grounding") or "")
+        kind = str(raw.get("kind") or "")
+        if not requirement_id or requirement_id in seen_ids:
+            raise ValueError("semantic IR requirement_id must be unique and non-empty")
+        if grounding not in grounding_catalog:
+            raise ValueError(f"unknown grounding id {grounding!r}")
+        if kind not in {
+            "inventory",
+            "forbidden_inventory",
+            "relation",
+            "unsupported",
+            "unresolved",
+            "soft_scope",
+        }:
+            raise ValueError(f"unsupported semantic IR requirement kind {kind!r}")
+        seen_ids.add(requirement_id)
+        covered_groundings.add(grounding)
+        source = _semantic_source(grounding, grounding_catalog)
+        raw_refs = [
+            str(raw.get(field) or "")
+            for field in _ENDPOINT_REF_FIELDS
+            if raw.get(field) is not None
+        ]
+        ignored_fields: list[str] = []
+        if kind in _NON_ENDPOINT_REQUIREMENT_KINDS:
+            ignored_candidates = set(_NON_ENDPOINT_IGNORED_FIELDS)
+            if kind != "forbidden_inventory":
+                ignored_candidates.add("forbidden_category")
+            ignored_fields = sorted(
+                field for field in ignored_candidates if raw.get(field) is not None
+            )
+            for entity_ref in raw_refs:
+                if entity_ref:
+                    rejected.append(
+                        {
+                            "requirement_id": requirement_id,
+                            "grounding": grounding,
+                            "entity_ref": entity_ref,
+                            "reason": "ignored_non_endpoint_entity_ref",
+                        }
+                    )
+        refs = [] if kind in _NON_ENDPOINT_REQUIREMENT_KINDS else raw_refs
+        ledger_row = {
+            "requirement_id": requirement_id,
+            "grounding": grounding,
+            "kind": kind,
+            "entity_refs": refs,
+            "surface_mentions": list(raw.get("surface_mentions") or []),
+            "reason": str(raw.get("reason") or ""),
+        }
+        if ignored_fields:
+            ledger_row["ignored_semantic_fields"] = ignored_fields
+        if kind == "relation":
+            relation = str(raw.get("relation") or "")
+            spec = relation_spec(relation)
+            if relation == "required_count":
+                raise ValueError("semantic IR may not create required_count")
+            subject_ref = raw.get("subject_ref")
+            if not subject_ref:
+                raise ValueError(f"relation {relation!r} omitted subject_ref")
+            subjects = _catalog_selector(
+                subject_ref,
+                catalog,
+                count=raw.get("subject_count"),
+                quantifier=raw.get("subject_quantifier"),
+                role=raw.get("subject_role"),
+                cohort=raw.get("subject_cohort"),
+            )
+            target_ref = raw.get("target_ref")
+            secondary_ref = raw.get("secondary_target_ref")
+            if spec.target_arity == 0:
+                if target_ref is not None or secondary_ref is not None:
+                    raise ValueError(
+                        f"relation {relation!r} must not have endpoint refs"
+                    )
+                targets = None
+            else:
+                if not target_ref:
+                    raise ValueError(f"relation {relation!r} omitted target_ref")
+                targets = _catalog_selector(
+                    target_ref,
+                    catalog,
+                    count=raw.get("target_count"),
+                    quantifier=raw.get("target_quantifier"),
+                    role=raw.get("target_role"),
+                    cohort=raw.get("target_cohort"),
+                )
+                if spec.target_arity == 2:
+                    if not secondary_ref:
+                        raise ValueError(
+                            f"relation {relation!r} omitted secondary_target_ref"
+                        )
+                    secondary = _catalog_selector(secondary_ref, catalog)
+                    targets["secondary_category"] = secondary["category"]
+                    targets["secondary_count"] = secondary["count"]
+                elif secondary_ref is not None:
+                    raise ValueError(
+                        f"relation {relation!r} has unexpected secondary_target_ref"
+                    )
+            row = {
+                "relation": relation,
+                "subjects": subjects,
+                "targets": targets,
+                **source,
+            }
+            if relation == "edge_distribution":
+                row.update(
+                    {
+                        "edge_frame": raw.get("edge_frame"),
+                        "groups": raw.get("groups") or [],
+                        "orientation": raw.get("orientation"),
+                    }
+                )
+            else:
+                ignored_edge_fields = [
+                    field
+                    for field in ("edge_frame", "groups", "orientation")
+                    if raw.get(field) not in (None, [])
+                ]
+                if ignored_edge_fields:
+                    ledger_row["ignored_semantic_fields"] = sorted(
+                        set(ledger_row.get("ignored_semantic_fields", []))
+                        | set(ignored_edge_fields)
+                    )
+            constraints.append(row)
+            ledger_row["disposition"] = "compiled"
+        elif kind == "inventory":
+            subject_ref = raw.get("subject_ref")
+            if not subject_ref or not str(subject_ref).startswith("inventory:"):
+                raise ValueError("inventory requires an inventory subject_ref")
+            _catalog_selector(subject_ref, catalog)
+            if (
+                raw.get("target_ref") is not None
+                or raw.get("secondary_target_ref") is not None
+            ):
+                raise ValueError("inventory must not have target entity refs")
+            ledger_row["disposition"] = "compiled"
+        elif kind in _NON_ENDPOINT_REQUIREMENT_KINDS:
+            if kind == "forbidden_inventory":
+                category = canonical_selector_category(raw.get("forbidden_category"))
+                if not category or not is_known_object_category(category):
+                    raise ValueError(
+                        "forbidden_inventory requires a known forbidden_category"
+                    )
+                coverage_requirements.append(
+                    _coverage_row(
+                        raw,
+                        kind="forbidden_inventory",
+                        disposition="compiled",
+                        normalized=category,
+                        source=source,
+                        earliest_stage=execution_owner(category),
+                    )
+                )
+                ledger_row["disposition"] = "compiled"
+            elif kind == "unsupported":
+                normalized = "_".join(
+                    str(raw.get("reason") or "unsupported").lower().split()
+                )
+                coverage_requirements.append(
+                    _coverage_row(
+                        raw,
+                        kind="unsupported_relation",
+                        disposition="unsupported",
+                        normalized=normalized,
+                        source=source,
+                    )
+                )
+                ledger_row["disposition"] = "unsupported"
+            elif kind == "unresolved":
+                normalized = "_".join(
+                    str(raw.get("reason") or "unresolved").lower().split()
+                )
+                coverage_requirements.append(
+                    _coverage_row(
+                        raw,
+                        kind="unresolved",
+                        disposition="unresolved",
+                        normalized=normalized,
+                        source=source,
+                    )
+                )
+                ledger_row["disposition"] = "unresolved"
+            else:
+                normalized = "_".join(
+                    str(raw.get("reason") or "soft_scope").lower().split()
+                )
+                coverage_requirements.append(
+                    _coverage_row(
+                        raw,
+                        kind="soft_scope",
+                        disposition="soft_scope",
+                        normalized=normalized,
+                        source=source,
+                    )
+                )
+                ledger_row["disposition"] = "soft_scope"
+        ledger.append(ledger_row)
+
+    missing = sorted(set(grounding_catalog) - covered_groundings)
+    if missing:
+        raise ValueError("semantic IR coverage gap for " + ", ".join(missing))
+    contract = {
+        "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+        "prompt": prompt,
+        "prompt_sha256": prompt_hash,
+        "intent_compiler_spec_version": INTENT_COMPILER_SPEC_VERSION,
+        "room_type": str(task_spec.get("room_type") or ""),
+        "constraints": constraints,
+        "coverage_requirements": coverage_requirements,
+        "coverage_ledger": ledger,
+        "retry_count": retry_count,
+        "warnings": [],
+    }
+    return contract, ledger, rejected
 
 
 def _merge_warnings(*groups: Any) -> list[str]:
@@ -99,7 +560,7 @@ def _validate_contract_completeness(
             if category and category not in _LEGAL_ENVIRONMENT_ANCHORS:
                 expected_counts[category] = expected_counts.get(category, 0) + 1
 
-    count_rows: dict[str, dict[str, Any]] = {}
+    count_rows: dict[str, list[dict[str, Any]]] = {}
     constraints = contract.get("constraints")
     if not isinstance(constraints, list):
         raise IncompleteIntentContractError("contract constraints must be a list")
@@ -113,25 +574,53 @@ def _validate_contract_completeness(
         category = canonical_selector_category(
             (row.get("subjects") or {}).get("category")
         )
-        count_rows[category] = row
+        count_rows.setdefault(category, []).append(row)
 
     for category, expected_count in expected_counts.items():
-        row = count_rows.get(category)
-        if row is None:
+        rows = count_rows.get(category, [])
+        if not rows:
             raise IncompleteIntentContractError(
                 f"missing authoritative required_count for {category!r}"
             )
-        actual_count = int((row.get("subjects") or {}).get("count") or 0)
-        if actual_count != expected_count:
+        # TaskSpec inventory is a minimum coverage obligation.  A validated
+        # explicit prompt row may intentionally win a conflicting inventory
+        # count (for example, ``exactly two bowls`` versus an inferred list of
+        # three).  Keep the exact prompt cardinality instead of rejecting the
+        # whole LLM attempt and consuming the retry response.
+        accepted = False
+        for row in rows:
+            subjects = row.get("subjects") or {}
+            actual_count = int(subjects.get("count") or 0)
+            source = str(row.get("source") or "")
+            if source == "explicit_prompt":
+                accepted = actual_count > 0
+                if accepted:
+                    break
+            elif actual_count == expected_count and source in HARD_SOURCES:
+                accepted = True
+                break
+        if not accepted:
             raise IncompleteIntentContractError(
-                f"required_count for {category!r} is {actual_count}, expected {expected_count}"
-            )
-        if row.get("source") != "task_compiler_inventory":
-            raise IncompleteIntentContractError(
-                f"required_count for {category!r} lacks task_compiler_inventory provenance"
+                f"required_count for {category!r} has no accepted count for expected {expected_count}"
             )
 
-    resolvable = set(count_rows) | set(_LEGAL_ENVIRONMENT_ANCHORS)
+    # Compound TaskSpec labels are retained as stable inventory identities
+    # (for example ``bowl_of_fruit``), while prompt relations may naturally
+    # refer to one of their concrete noun endpoints (``bowl``).  Admit only
+    # noun tokens that have an established taxonomy entry; this keeps the
+    # completeness gate strict for arbitrary hallucinated endpoints such as
+    # ``phantom_object``.
+    compound_nouns: set[str] = set()
+    for inventory_category in expected_counts:
+        tokens = inventory_category.split("_")
+        if len(tokens) < 2:
+            continue
+        for token in tokens:
+            noun = canonical_selector_category(token)
+            if noun and is_known_object_category(noun):
+                compound_nouns.add(noun)
+
+    resolvable = set(count_rows) | compound_nouns | set(_LEGAL_ENVIRONMENT_ANCHORS)
     for row in constraints:
         if not isinstance(row, dict) or row.get("relation") == "required_count":
             continue
@@ -417,6 +906,31 @@ _FLANKING_GROUNDING_PATTERNS = (
 )
 
 
+def _selector_phrase_pattern(selector: dict[str, Any] | None) -> str:
+    category = str((selector or {}).get("category") or "").strip().replace("_", " ")
+    if not category:
+        return ""
+    words = [re.escape(word) for word in category.split()]
+    return rf"(?<![a-z0-9]){'[ -]+'.join(words)}(?:s|es)?(?![a-z0-9])"
+
+
+def _on_top_relation_uses_containment_wording(
+    constraint: dict[str, Any], evidence: str
+) -> bool:
+    """Whether grounded endpoints are described as contained, not supported."""
+    subject = _selector_phrase_pattern(constraint.get("subjects"))
+    target = _selector_phrase_pattern(constraint.get("targets"))
+    if not subject or not target:
+        return False
+    bounded = r"[^.;!?]{0,100}"
+    patterns = (
+        rf"{target}{bounded}\b(?:holding|holds|containing|contains)\b{bounded}{subject}",
+        rf"{target}{bounded}\bwith\b{bounded}{subject}{bounded}\binside\b",
+        rf"{subject}{bounded}\b(?:inside|within|contained\s+(?:in|inside))\b{bounded}{target}",
+    )
+    return any(re.search(pattern, evidence, re.IGNORECASE) for pattern in patterns)
+
+
 def _validate_prompt_grounded_relations(
     payload: dict[str, Any], prompt: str
 ) -> dict[str, Any]:
@@ -444,6 +958,15 @@ def _validate_prompt_grounded_relations(
             raise ValueError(
                 "centered_on_wall hard intent requires explicit wall wording in "
                 "its grounded prompt or TaskCompiler constraint"
+            )
+        if (
+            relation == "on_top_of"
+            and source == "explicit_prompt"
+            and _on_top_relation_uses_containment_wording(constraint, evidence)
+        ):
+            raise ValueError(
+                "on_top_of hard intent cannot replace containment wording for "
+                "the same grounded endpoints"
             )
         if relation != "flanking":
             continue
@@ -964,10 +1487,10 @@ memory, StageBrief, current scene state, or knowledge not present in these input
 
 The normalized SceneTaskSpec required_* arrays are authoritative hard inventory,
 but the compiler adds their required_count rows deterministically. NEVER emit a
-required_count relation. Extract only spatial relations. The original prompt
-remains authoritative for spatial relations. SceneTaskSpec interaction_constraints
-and geometrically verifiable aesthetic_constraints are expert inferences with
-lower priority.
+required_count relation. The original prompt remains authoritative for spatial
+relations, negation, inventory mentions, and scope decisions. SceneTaskSpec
+interaction_constraints and geometrically verifiable aesthetic_constraints are
+expert inferences with lower priority.
 A supplemental constraint may become a hard
 relation only when it maps precisely to one of the registered relations and
 can be checked by that relation's existing geometry evaluator. Material palette, style,
@@ -978,12 +1501,23 @@ an explicit prompt relation, emit only the explicit prompt relation.
 SceneTaskSpec room_type, style, and functional_zones are context only and do
 not independently authorize hard relations.
 
-Every relation MUST contain exactly one short grounding ID from the supplied
-catalog. Use prompt:N for an original-prompt relation, interaction:N for an
-interaction constraint, or aesthetic:N for an aesthetic constraint. Return the
-ID only. NEVER copy source text and NEVER emit source, evidence_span,
-inference_reason, warnings, explanations, or other provenance text. The compiler
-expands the ID deterministically after generation.
+Return a CompilerSemanticIR requirement for every supplied grounding ID. Use
+prompt:N for an original-prompt requirement, interaction:N for an interaction
+constraint, or aesthetic:N for an aesthetic constraint. A spatial requirement
+uses kind="relation"; an inventory mention uses kind="inventory"; a prohibition
+such as "no TV" uses kind="forbidden_inventory" and forbidden_category; and a
+requirement the critic cannot safely enforce uses unsupported, unresolved, or
+soft_scope with a brief reason. Return the ID only. NEVER copy source text and
+NEVER emit source, evidence_span, inference_reason, warnings, explanations, or
+other provenance text. The compiler expands the ID deterministically after
+generation.
+
+Every relation endpoint MUST be one of the exact entity_ref values in the entity
+catalog. Use subject_ref, target_ref, and (only for a binary relation)
+secondary_target_ref; do not emit targets, subjects, category, or any free-form
+endpoint. An inventory row requires subject_ref="inventory:<category>" and no
+target ref. A forbidden_inventory row has no endpoint refs because the forbidden
+object is intentionally absent from the catalog.
 
 Map accessibility language according to what the geometry evaluator can
 actually measure. "X reachable/accessible from Y" may emit near(X, Y); it does
@@ -992,25 +1526,28 @@ area clear" may emit clear_access(X, room). General phrases such as "clear
 walking paths around the room" do not identify an exact registered endpoint
 relation and must remain context only.
 
+Preserve explicit adjacency wording: "next to", "beside", and "adjacent to"
+must emit next_to. Emit the looser near relation only for literal "near" wording
+or the accessibility mapping described above. Never downgrade next_to to near.
+
 Registered relations:
 {relation_lines}
 
-Target rule is mandatory.  Relations with target arity 1 ({unary_relations})
-MUST include a non-null ``targets`` selector with the target category from the
-prompt. Target arity is the number of selector endpoints, not the number of
-physical target objects: group relations such as paired_with and
-one_per_support may use targets.count greater than one. ``corner_of_room``,
-``corner_distribution``, and ``centered_in_room`` use
-``{{"category": "room", "count": 1}}`` as that selector.  For example:
-``{{"relation": "flanking", "subjects": {{"category": "nightstand", "count": 2}}, "targets": {{"category": "bed", "count": 1}}, "grounding": "prompt:0"}}``.
-Relations with target arity 2 ({binary_relations}) must use a target selector
-whose ``secondary_category`` identifies the second target.
+Target rule is mandatory. Relations with target arity 1 ({unary_relations})
+MUST include a non-null target_ref. Target arity is the number of entity
+endpoints, not the number of physical target objects: group relations such as
+paired_with and one_per_support may use target_count greater than one.
+``corner_of_room``, ``corner_distribution``, and ``centered_in_room`` use
+target_ref="anchor:room". For example:
+``{{"requirement_id": "nightstands_by_bed", "kind": "relation", "grounding": "prompt:0", "relation": "flanking", "subject_ref": "inventory:nightstand", "subject_count": 2, "target_ref": "inventory:bed", "target_count": 1}}``.
+Relations with target arity 2 ({binary_relations}) must also use
+secondary_target_ref for the second endpoint.
 
 For a rectangular target with edge-specific distribution, emit exactly one
-edge_distribution relation. It must contain subjects.count, a target selector
-with count 1, edge_frame target_local_rectangle, and groups. Each edge class
+edge_distribution relation. It must contain subject_count, target_ref,
+target_count=1, edge_frame target_local_rectangle, and groups. Each edge class
 has one counts_per_edge pair, sorted descending. The sum of all counts must
-equal subjects.count. Use [3, 3] for three objects on each long edge and [1, 0]
+equal subject_count. Use [3, 3] for three objects on each long edge and [1, 0]
 for one object on either short edge. Use toward_target only when the prompt
 requires all subjects to face inward; do not also emit a duplicate faces row.
 Do not emit one_per_side; that relation was removed.
@@ -1020,32 +1557,32 @@ edge_distribution. Reserve edge_distribution for explicit finite rectangular
 edge layouts or unambiguous long/short edge wording.
 
 Target shape is strict: a relation with registered target arity 1 must have
-exactly one targets selector and must leave
-secondary_category, secondary_count, and secondary_role empty. Only a relation
-whose registered target arity is 2 may use secondary_category and
-secondary_role. Never combine two target nouns into one unary relation; emit
-separate relation rows when the prompt states separate relations.
+exactly one target_ref and must omit secondary_target_ref. Only a relation
+whose registered target arity is 2 may use secondary_target_ref. Never combine
+two target nouns into one unary relation; emit separate relation rows when the
+prompt states separate relations.
 
 Use centered_on_wall only when the prompt says the subject is centered on the
 wall itself. For "X on the wall, centered directly above Y", emit
 centered_above(X, Y) plus on_wall(X, wall); the centerline belongs to Y, not to
 the full wall.
 
-Use one_per_support for explicit "one X on/at each Y" requirements. Give both
-selectors the same explicit count and quantifier="all". Use corner_distribution
+Use one_per_support for explicit "one X on/at each Y" requirements. Give
+subject_count and target_count the same explicit value and use
+subject_quantifier="all" and target_quantifier="all". Use corner_distribution
 only when the prompt explicitly assigns multiple subjects to distinct room
 corners or says one subject per corner; ordinary singular corner wording uses
 corner_of_room.
 
 For a unary relation that says an object is on/near one, another, or the other
-member of a target category that the prompt explicitly repeats, keep one target
-selector with count 1 but use targets.quantifier="at_least". This is an
-existential relation: any matching target may satisfy it, without selecting an
-arbitrary generated object ID. Use quantifier="exactly" only when the prompt
-identifies a unique target instance.
+member of a target category that the prompt explicitly repeats, keep one
+target_ref with target_count=1 but use target_quantifier="at_least". This is
+an existential relation: any matching target may satisfy it, without selecting
+an arbitrary generated object ID. Use target_quantifier="exactly" only when the
+prompt identifies a unique target instance.
 
 For collective subject wording such as a set, collection, assortment, or
-several objects, use subjects.quantifier="at_least". The selector count is a
+several objects, use subject_quantifier="at_least". The subject_count is a
 minimum; do not turn an unspecified collection into an exactly-one hard
 constraint just because the collection itself is singular.
 
@@ -1064,7 +1601,7 @@ deterministically after validation.
 
 
 class IntentCompiler:
-    """Compile a prompt into a validated v5 contract with one corrective retry."""
+    """Compile LLM semantic IR into an admitted, versioned intent contract."""
 
     SPEC_VERSION = INTENT_COMPILER_SPEC_VERSION
     SCHEMA_VERSION = INTENT_CONTRACT_SCHEMA_VERSION
@@ -1281,6 +1818,7 @@ class IntentCompiler:
         *,
         task_spec: dict[str, Any] | None = None,
         grounding_catalog: str = "",
+        entity_catalog: str = "",
         previous_output: str = "",
         validation_error: str = "",
     ) -> list[dict[str, str]]:
@@ -1294,9 +1832,29 @@ class IntentCompiler:
             )
         if grounding_catalog:
             user += (
-                "\n\nGrounding catalog. Every output relation must reference "
-                "exactly one ID from this list:\n" + grounding_catalog
+                "\n\nGrounding catalog. Every explicit input requirement must "
+                "appear in requirements[] with one ID from this list:\n"
+                + grounding_catalog
             )
+        if entity_catalog:
+            user += (
+                "\n\nEntity catalog. Every relation endpoint must use these exact "
+                "entity_ref values; never write a free-form category:\n"
+                + entity_catalog
+            )
+        user += (
+            "\n\nReturn CompilerSemanticIR, not an IntentContract. Each prompt or "
+            "TaskSpec grounding needs a requirement disposition: relation/inventory "
+            "for compiled semantics, forbidden_inventory, unsupported, unresolved, "
+            "or soft_scope. required_count is generated from SceneTaskSpec only; do "
+            "not emit it. Only kind=relation uses relation, subject_ref, target_ref, "
+            "counts, roles, cohorts, or geometry fields. forbidden_inventory, "
+            "unsupported, unresolved, and soft_scope are coverage-only rows: use "
+            "reason/surface_mentions (and forbidden_category only for "
+            "forbidden_inventory), with no endpoint or relation fields. Every "
+            "requirement must include target_ref: use null for inventory and all "
+            "coverage-only rows."
+        )
         if validation_error:
             user += (
                 "\n\nThe previous candidate was invalid. Correct it and return a "
@@ -1310,25 +1868,58 @@ class IntentCompiler:
                     "\nThe previous response was truncated. Return a concise but "
                     "complete contract; do not repeat explanations or context."
                 )
-            if "omitted required constraints field" in validation_error:
+            if "semantic IR requirement omitted target_ref" in validation_error:
                 user += (
-                    "\nThe top-level constraints field is mandatory, even when it "
-                    "is an empty list. Return all hard relations in that field; "
-                    "warnings alone are not a complete contract."
+                    "\nEvery SemanticIR requirement needs the target_ref field. Use "
+                    "null for inventory, forbidden_inventory, unsupported, unresolved, "
+                    "and soft_scope rows."
                 )
-            if "requires 1 target(s), got 2" in validation_error:
+            elif "omitted subject_ref" in validation_error:
                 user += (
-                    "\nFor every reported unary relation, remove its "
-                    "secondary_category, secondary_count, and secondary_role; "
-                    "keep exactly one primary target selector."
+                    "\nThe reported relation is missing subject_ref. Use the exact "
+                    "entity_ref from the entity catalog for its subject; a "
+                    "subject_role or subject_cohort is optional metadata, never an "
+                    "endpoint."
                 )
-            if "requires 1 target(s), got 0" in validation_error or (
-                "requires 2 target(s), got 0" in validation_error
-            ):
+            if "omitted target_ref" in validation_error:
                 user += (
-                    "\nEvery non-count relation must include its prompt-grounded "
-                    "targets object. Do not explain the target in inference_reason; "
-                    "put the endpoint category in targets."
+                    "\nThe reported relation is missing target_ref. Every relation "
+                    "with a target must use the exact entity_ref from the entity "
+                    "catalog for that target. target_role and target_cohort are "
+                    "optional metadata only; they never replace target_ref. For "
+                    "example, a relation targeting a window uses "
+                    'target_ref="anchor:window".'
+                )
+            if "semantic IR requirements" in validation_error:
+                user += (
+                    "\nThe top-level requirements field is mandatory, even when it "
+                    "is empty. Return every grounding disposition and hard relation "
+                    "inside that SemanticIR list."
+                )
+            if "unexpected secondary_target_ref" in validation_error:
+                user += (
+                    "\nFor every unary relation, remove secondary_target_ref; keep "
+                    "exactly one target_ref."
+                )
+            if "omitted secondary_target_ref" in validation_error:
+                user += (
+                    "\nThe reported binary relation needs secondary_target_ref from "
+                    "the entity catalog in addition to target_ref."
+                )
+            if "must not have endpoint refs" in validation_error:
+                user += (
+                    "\nThe reported zero-target relation must omit target_ref and "
+                    "secondary_target_ref."
+                )
+            if "semantic IR coverage gap" in validation_error:
+                user += (
+                    "\nReturn at least one requirement disposition for every "
+                    "grounding ID in the grounding catalog."
+                )
+            if "unknown or unbound entity_ref" in validation_error:
+                user += (
+                    "\nReplace unknown refs with exact catalog entity_ref values, or "
+                    "mark that grounding unresolved instead of emitting a hard relation."
                 )
             if "wall-relative directional relation" in validation_error:
                 user += (
@@ -1375,6 +1966,202 @@ class IntentCompiler:
         aesthetic_constraints: list[str] | tuple[str, ...] | None = None,
         task_spec: Any | None = None,
     ) -> dict[str, Any]:
+        """Compile live Prompt semantics only from a grounded LLM IR.
+
+        Structured TaskSpec inventory is projected deterministically. All prompt
+        relations, negation, unsupported requirements, and coverage
+        dispositions must be present in the model response; failures remain
+        runtime failures after the bounded corrective retry.
+        """
+
+        normalized_prompt, prompt_hash = self._prompt_metadata(prompt)
+        normalized_task_spec = self._normalize_task_spec(
+            task_spec,
+            interaction_constraints=interaction_constraints,
+            aesthetic_constraints=aesthetic_constraints,
+        )
+        grounding_catalog, rendered_grounding_catalog = _grounding_catalog(
+            normalized_prompt, normalized_task_spec
+        )
+        entity_catalog = _entity_catalog(normalized_task_spec)
+        rendered_entity_catalog = _render_entity_catalog(entity_catalog)
+        previous_output = ""
+        last_error = ""
+        attempts: list[dict[str, Any]] = []
+
+        for attempt in range(2):
+            messages = self._messages(
+                normalized_prompt,
+                task_spec=normalized_task_spec,
+                grounding_catalog=rendered_grounding_catalog,
+                entity_catalog=rendered_entity_catalog,
+                previous_output=previous_output,
+                validation_error=last_error,
+            )
+            started_at = time.perf_counter()
+            response = None
+            raw = ""
+            semantic_ir: Any = None
+            try:
+                response = self._client.chat.completions.create(
+                    model=self._model,
+                    messages=messages,
+                    temperature=self._temperature,
+                    max_tokens=self._max_tokens,
+                    response_format=json_response_format(
+                        model=self._model,
+                        name="compiler_semantic_ir",
+                        schema=intent_compiler_wire_json_schema(),
+                    ),
+                    extra_body=chat_template_kwargs_from_effort(
+                        "none", model=self._model
+                    ),
+                )
+                raw = self._raw_message(response)
+                finish_reason = self._finish_reason(response)
+                if finish_reason == "length":
+                    raise ValueError("finish_reason=length: semantic IR was truncated")
+                semantic_ir = parse_llm_json_object(raw)
+                contract, ledger, rejected = _admit_semantic_ir(
+                    semantic_ir,
+                    prompt=normalized_prompt,
+                    prompt_hash=prompt_hash,
+                    task_spec=normalized_task_spec,
+                    grounding_catalog=grounding_catalog,
+                    catalog=entity_catalog,
+                    retry_count=attempt,
+                )
+                result = validate_intent_contract(
+                    contract, validate_prompt_semantics=False
+                )
+                status = "retry_ok" if attempt else "ok"
+                attempt_record = {
+                    "attempt": attempt,
+                    "status": status,
+                    "finish_reason": finish_reason,
+                    "token_usage": self._token_usage(response),
+                    "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                    "accepted_entity_refs": sorted(
+                        {ref for row in ledger for ref in row.get("entity_refs") or []}
+                    ),
+                    "rejected_entity_refs": rejected,
+                }
+                attempts.append(attempt_record)
+                self.last_trace = {
+                    "status": status,
+                    "spec_version": self.SPEC_VERSION,
+                    "semantic_ir_version": INTENT_COMPILER_SEMANTIC_IR_VERSION,
+                    "prompt_sha256": prompt_hash,
+                    "normalized_task_spec": normalized_task_spec,
+                    "entity_catalog": list(entity_catalog.values()),
+                    "constraints": result.get("constraints", []),
+                    "coverage_ledger": result.get("coverage_ledger", []),
+                    "coverage_requirements": result.get("coverage_requirements", []),
+                    "retry_count": attempt,
+                    "failure_reason": "",
+                    "attempts": attempts,
+                    "rejected_entity_refs": [
+                        row
+                        for attempt_row in attempts
+                        for row in attempt_row.get("rejected_entity_refs") or []
+                    ],
+                }
+                _append_llm_debug(
+                    build_llm_call_debug_record(
+                        stage="intent_compiler",
+                        agent_role="intent_compiler",
+                        event="compile",
+                        prompt=messages,
+                        output=raw,
+                        raw_response=response,
+                    ).model_dump()
+                    | {
+                        "input": messages,
+                        "output": raw,
+                        "status": status,
+                        "attempt": attempt,
+                        "semantic_ir_version": INTENT_COMPILER_SEMANTIC_IR_VERSION,
+                        "entity_catalog": list(entity_catalog.values()),
+                        "coverage_ledger": result.get("coverage_ledger", []),
+                        "accepted_entity_refs": attempt_record["accepted_entity_refs"],
+                        "rejected_entity_refs": rejected,
+                    }
+                )
+                return result
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                previous_output = (
+                    "" if self._finish_reason(response) == "length" else raw
+                )
+                rejected_entity_refs = _rejected_entity_refs(
+                    semantic_ir, entity_catalog
+                )
+                attempts.append(
+                    {
+                        "attempt": attempt,
+                        "status": "error",
+                        "error": last_error,
+                        "finish_reason": self._finish_reason(response),
+                        "token_usage": self._token_usage(response),
+                        "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                        "rejected_entity_refs": rejected_entity_refs,
+                    }
+                )
+                _append_llm_debug(
+                    build_llm_call_debug_record(
+                        stage="intent_compiler",
+                        agent_role="intent_compiler",
+                        event="compile",
+                        prompt=messages,
+                        output=raw,
+                        raw_response=response,
+                        error=last_error,
+                    ).model_dump()
+                    | {
+                        "input": messages,
+                        "output": raw,
+                        "status": "error",
+                        "attempt": attempt,
+                        "semantic_ir_version": INTENT_COMPILER_SEMANTIC_IR_VERSION,
+                        "entity_catalog": list(entity_catalog.values()),
+                        "error": last_error,
+                        "rejected_entity_refs": rejected_entity_refs,
+                    }
+                )
+                logger.warning(
+                    "IntentCompiler attempt %d failed: %s", attempt + 1, last_error
+                )
+
+        self.last_trace = {
+            "status": "error",
+            "spec_version": self.SPEC_VERSION,
+            "semantic_ir_version": INTENT_COMPILER_SEMANTIC_IR_VERSION,
+            "prompt_sha256": prompt_hash,
+            "normalized_task_spec": normalized_task_spec,
+            "entity_catalog": list(entity_catalog.values()),
+            "constraints": [],
+            "coverage_ledger": [],
+            "retry_count": 1,
+            "failure_reason": last_error,
+            "attempts": attempts,
+            "rejected_entity_refs": [
+                row
+                for attempt in attempts
+                for row in attempt.get("rejected_entity_refs") or []
+            ],
+        }
+        raise IntentCompilationError(
+            f"IntentCompiler failed after two attempts: {last_error}",
+            trace=self.last_trace,
+        )
+
+    def _compile_legacy_semantics(
+        self,
+        prompt: str,
+        interaction_constraints: list[str] | tuple[str, ...] | None = None,
+        aesthetic_constraints: list[str] | tuple[str, ...] | None = None,
+        task_spec: Any | None = None,
+    ) -> dict[str, Any]:
         normalized_prompt, prompt_hash = self._prompt_metadata(prompt)
         normalized_task_spec = self._normalize_task_spec(
             task_spec,
@@ -1414,6 +2201,7 @@ class IntentCompiler:
             started_at = time.perf_counter()
             raw = ""
             response = None
+            response_elapsed_sec: float | None = None
             response_warnings: list[str] = []
             try:
                 response = self._client.chat.completions.create(
@@ -1423,18 +2211,16 @@ class IntentCompiler:
                     max_tokens=self._max_tokens,
                     # llama.cpp converts json_schema to a grammar and constrains
                     # every generated token to a schema-valid JSON value.
-                    response_format={
-                        "type": "json_schema",
-                        "json_schema": {
-                            "name": "intent_contract",
-                            "strict": True,
-                            "schema": intent_compiler_wire_json_schema(),
-                        },
-                    },
-                    extra_body=chat_template_kwargs_from_effort(
-                        "none", model=self._model
+                    response_format=json_response_format(
+                        model=self._model,
+                        name="intent_contract",
+                        schema=intent_compiler_wire_json_schema(),
+                    ),
+                    extra_body=openrouter_extra_body(
+                        chat_template_kwargs_from_effort("none", model=self._model)
                     ),
                 )
+                response_elapsed_sec = round(time.perf_counter() - started_at, 6)
                 raw = self._raw_message(response)
                 finish_reason = self._finish_reason(response)
                 if finish_reason == "length":
@@ -1514,6 +2300,9 @@ class IntentCompiler:
                 result["constraints"] = _apply_task_spec_contract_metadata(
                     list(result.get("constraints") or []), normalized_task_spec
                 )
+                result = ensure_coverage_requirements(
+                    result, task_spec=normalized_task_spec
+                )
                 result = validate_intent_contract(result)
                 result["warnings"] = _merge_warnings(
                     failed_llm_warnings, result.get("warnings")
@@ -1567,7 +2356,11 @@ class IntentCompiler:
                         "finish_reason": finish_reason,
                         "token_usage": token_usage,
                         "warnings": response_warnings,
-                        "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                        "elapsed_sec": (
+                            response_elapsed_sec
+                            if response_elapsed_sec is not None
+                            else round(time.perf_counter() - started_at, 6)
+                        ),
                     }
                 )
                 self.last_trace["attempts"] = attempts
@@ -1585,8 +2378,8 @@ class IntentCompiler:
                         "output": raw,
                         "status": status,
                         "attempt": attempt,
+                        "elapsed_sec": response_elapsed_sec,
                         "finish_reason": finish_reason,
-                        "token_usage": token_usage,
                         "enriched_constraints": enriched_constraints,
                         "normalized_centered_above": normalized_centered_above,
                         "restored_targets": restored_targets,
@@ -1626,8 +2419,8 @@ class IntentCompiler:
                         "output": raw,
                         "status": "error",
                         "attempt": attempt,
+                        "elapsed_sec": round(time.perf_counter() - started_at, 6),
                         "finish_reason": self._finish_reason(response),
-                        "token_usage": self._token_usage(response),
                     }
                 )
                 logger.warning(

@@ -2,6 +2,7 @@ import asyncio
 import math
 
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call, patch
 
@@ -105,6 +106,103 @@ def test_required_bbox_fallback_does_not_invent_sofa_surface() -> None:
         )
         == []
     )
+
+
+@pytest.mark.parametrize(
+    (
+        "subject_category",
+        "target_category",
+        "is_prompt_required",
+        "annotation_exists",
+        "relation",
+        "expected",
+    ),
+    [
+        ("cushion", "loveseat", True, True, "on_top_of", "upholstered_seat"),
+        ("cup", "sofa", True, True, "on_top_of", "general"),
+        ("throw_blanket", "armchair", False, True, "on_top_of", "general"),
+        ("pillow", "table", True, True, "on_top_of", "general"),
+        ("bolster", "sofa", True, False, "on_top_of", "general"),
+        ("blanket", "sofa", True, True, "one_per_support", "general"),
+    ],
+)
+def test_upholstered_seat_policy_requires_hard_prompt_owned_cohort(
+    subject_category: str,
+    target_category: str,
+    is_prompt_required: bool,
+    annotation_exists: bool,
+    relation: str,
+    expected: str,
+) -> None:
+    furniture_id = UniqueID(f"{target_category}_0")
+    furniture = SimpleNamespace(
+        object_id=furniture_id,
+        name=target_category,
+        description=target_category,
+        metadata={
+            "asset_source": "hssd",
+            "hssd_mesh_id": "annotated_mesh",
+            "semantic_name": target_category,
+        },
+    )
+    selection = FurnitureSelection(
+        furniture_id=furniture_id,
+        suggested_items=subject_category,
+        prompt_constraints="structured hard support requirement",
+        style_notes="",
+        is_prompt_required=is_prompt_required,
+    )
+    cohort = SimpleNamespace(
+        target_id=str(furniture_id),
+        relation=relation,
+        category=subject_category,
+    )
+    annotation_path = Mock()
+    annotation_path.exists.return_value = annotation_exists
+
+    with (
+        patch(
+            "scenesmith.manipuland_agents.stateful_manipuland_agent."
+            "contract_manipuland_support_cohorts",
+            return_value=[cohort],
+        ),
+        patch(
+            "scenesmith.manipuland_agents.stateful_manipuland_agent."
+            "hssd_support_surface_path",
+            return_value=annotation_path,
+        ),
+    ):
+        policy = StatefulManipulandAgent._required_target_support_surface_policy(
+            scene=Mock(),
+            furniture=furniture,
+            furniture_id=furniture_id,
+            selection=selection,
+            config=SimpleNamespace(
+                hssd_data_dir=Path("/unused"), recompute_hssd_surfaces=False
+            ),
+        )
+
+    assert policy == expected
+
+
+def test_upholstered_seat_policy_does_not_override_hssd_recompute() -> None:
+    selection = FurnitureSelection(
+        furniture_id=UniqueID("loveseat_0"),
+        suggested_items="cushion",
+        prompt_constraints="hard support requirement",
+        style_notes="",
+        is_prompt_required=True,
+    )
+
+    policy = StatefulManipulandAgent._required_target_support_surface_policy(
+        scene=Mock(),
+        furniture=SimpleNamespace(metadata={}),
+        furniture_id=selection.furniture_id,
+        selection=selection,
+        config=SimpleNamespace(recompute_hssd_surfaces=True),
+    )
+
+    assert policy == "general"
 
 
 def test_dining_prompt_requires_table_and_sideboard_targets() -> None:
@@ -262,6 +360,7 @@ def test_planner_retries_when_first_turn_has_no_workflow_tool_call() -> None:
     agent.planner = SimpleNamespace(instructions="planner instructions")
     agent.planner_session = object()
     agent._planner_initial_design_tool_calls = 0
+    agent._planner_successful_designer_mutations = 0
     agent._planner_budget_exhausted = False
     agent._reasoning_persistence_context_for_session = lambda _session: nullcontext()
     agent._create_run_config = Mock(return_value=None)
@@ -274,8 +373,9 @@ def test_planner_retries_when_first_turn_has_no_workflow_tool_call() -> None:
         calls.append(input)
         if len(calls) == 2:
             # Simulate request_initial_design being executed by the recovered
-            # planner run.
+            # planner run and committing scene work.
             agent._planner_initial_design_tool_calls = 1
+            agent._planner_successful_designer_mutations = 1
         return SimpleNamespace(final_output="completed")
 
     with patch.object(Runner, "run", new=AsyncMock(side_effect=fake_run)):
@@ -289,6 +389,69 @@ def test_planner_retries_when_first_turn_has_no_workflow_tool_call() -> None:
     assert result.final_output == "completed"
     assert len(calls) == 2
     assert "request_initial_design()" in calls[1]
+
+
+def test_planner_recovers_when_initial_design_call_makes_no_scene_change() -> None:
+    agent = object.__new__(StatefulManipulandAgent)
+    agent.planner = SimpleNamespace(instructions="planner instructions")
+    agent.planner_session = object()
+    agent._planner_initial_design_tool_calls = 0
+    agent._planner_successful_designer_mutations = 0
+    agent._planner_budget_exhausted = False
+    agent._reasoning_persistence_context_for_session = lambda _session: nullcontext()
+    agent._create_run_config = Mock(return_value=None)
+    agent._record_module_timing = Mock()
+    agent._record_llm_call_debug = Mock()
+
+    calls = []
+
+    async def fake_run(*, input, **_kwargs):
+        calls.append(input)
+        if len(calls) == 1:
+            agent._planner_initial_design_tool_calls = 1
+        else:
+            agent._planner_successful_designer_mutations = 1
+        return SimpleNamespace(final_output="completed")
+
+    with patch.object(Runner, "run", new=AsyncMock(side_effect=fake_run)):
+        result = asyncio.run(
+            agent._run_planner_workflow(
+                runner_input="start workflow",
+                max_turns=3,
+            )
+        )
+
+    assert result.final_output == "completed"
+    assert len(calls) == 2
+    assert "MANDATORY WORKFLOW RECOVERY" in calls[1]
+
+
+def test_planner_accepts_successful_design_change_as_completed_design_work() -> None:
+    agent = object.__new__(StatefulManipulandAgent)
+    agent.planner = SimpleNamespace(instructions="planner instructions")
+    agent.planner_session = object()
+    agent._planner_initial_design_tool_calls = 0
+    agent._planner_successful_designer_mutations = 0
+    agent._planner_budget_exhausted = False
+    agent._reasoning_persistence_context_for_session = lambda _session: nullcontext()
+    agent._create_run_config = Mock(return_value=None)
+    agent._record_module_timing = Mock()
+    agent._record_llm_call_debug = Mock()
+
+    async def fake_run(**_kwargs):
+        agent._planner_successful_designer_mutations = 1
+        return SimpleNamespace(final_output="design changed and validated")
+
+    with patch.object(Runner, "run", new=AsyncMock(side_effect=fake_run)) as run:
+        result = asyncio.run(
+            agent._run_planner_workflow(
+                runner_input="repair existing stage candidate",
+                max_turns=3,
+            )
+        )
+
+    assert result.final_output == "design changed and validated"
+    assert run.await_count == 1
 
 
 def test_planner_recovery_fails_if_second_turn_still_has_no_tool_call() -> None:
@@ -308,7 +471,7 @@ def test_planner_recovery_fails_if_second_turn_still_has_no_tool_call() -> None:
             "run",
             new=AsyncMock(return_value=SimpleNamespace(final_output="acknowledged")),
         ),
-        pytest.raises(RuntimeError, match="request_initial_design"),
+        pytest.raises(RuntimeError, match="scene mutation"),
     ):
         asyncio.run(
             agent._run_planner_workflow(
@@ -1107,9 +1270,9 @@ def test_bilateral_bedside_prompt_recovers_both_nightstands() -> None:
     ]
 
 
-def test_tv_stand_prompt_recovers_television_target_but_not_wall_mounts() -> None:
+def test_tv_stand_prompt_requires_explicit_support_and_rejects_wall_mounts() -> None:
     obligations = infer_prompt_manipuland_obligations(
-        "A living room with a TV stand and television on the opposite wall."
+        "A living room with a television on top of the TV stand."
     )
 
     assert [(item.category, item.target_count) for item in obligations] == [
@@ -1122,12 +1285,18 @@ def test_tv_stand_prompt_recovers_television_target_but_not_wall_mounts() -> Non
 
     assert wall_mounted == []
 
+    cooccurring = infer_prompt_manipuland_obligations(
+        "A living room with a TV stand and television on the opposite wall."
+    )
+
+    assert cooccurring == []
+
 
 def test_recovery_adds_tv_stand_omitted_by_vlm() -> None:
     tv_stand = _object("tv_stand_0", "TV stand")
     scene = SimpleNamespace(
         scene_expert_original_description=(
-            "A living room with a TV stand and television on the opposite wall."
+            "A living room with a television on top of the TV stand."
         ),
         text_description="",
         objects={tv_stand.object_id: tv_stand},

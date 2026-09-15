@@ -214,10 +214,11 @@ class CoordinateGridMixin:
         return marks
 
     def _should_include_marker(self, world_coord: Vector) -> bool:
-        """Check if a coordinate marker should be included based on convex hull.
+        """Check whether a coordinate marker lies on a valid placement surface.
 
-        For multi-surface mode, filters markers to only show those inside the
-        surface's convex hull. For single-surface or furniture mode, includes all.
+        Room-scale markers are filtered by the exact room footprint, preserving
+        concave cutouts. Multi-surface markers continue to use the current support
+        surface's convex hull.
 
         Args:
             world_coord: World-space coordinate of the marker.
@@ -225,7 +226,29 @@ class CoordinateGridMixin:
         Returns:
             True if marker should be included, False otherwise.
         """
-        # If no convex hull filtering, include all markers.
+        # Room-scale mode: preserve the supplied vertex order so a concave room
+        # does not get expanded to its convex hull.
+        room_footprint = getattr(self, "_room_local_footprint_vertices", None)
+        if getattr(self, "_surface_corners", None) is None and room_footprint:
+            try:
+                from shapely.geometry import Point, Polygon
+
+                polygon = Polygon(room_footprint)
+                if not polygon.is_valid:
+                    console_logger.warning(
+                        "Invalid room footprint for coordinate marker filtering; "
+                        "including marker"
+                    )
+                    return True
+                return polygon.covers(Point(world_coord[0], world_coord[1]))
+            except Exception as e:
+                console_logger.warning(
+                    "Failed to check room-footprint marker inclusion with shapely: "
+                    f"{e}, including marker"
+                )
+                return True
+
+        # If no support-surface convex hull filtering, include all markers.
         if (
             not hasattr(self, "_current_convex_hull")
             or self._current_convex_hull is None

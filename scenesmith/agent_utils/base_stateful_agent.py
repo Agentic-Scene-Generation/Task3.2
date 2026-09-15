@@ -7,6 +7,7 @@ subclass-defined tools.
 """
 
 import copy
+import json
 import logging
 import os
 import shutil
@@ -14,11 +15,9 @@ import time
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Literal
 
 import yaml
-
-import os
 
 from agents import (
     Agent,
@@ -28,10 +27,12 @@ from agents import (
     Runner,
     RunResult,
     SQLiteSession,
+    ToolsToFinalOutputResult,
     function_tool,
 )
 from agents.memory.session import Session
 from agents.models.openai_provider import OpenAIProvider
+from agents.model_settings import Reasoning
 from omegaconf import DictConfig
 from openai import Timeout
 
@@ -61,7 +62,9 @@ from scenesmith.agent_utils.scoring import (
 from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
 from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
 from scenesmith.agent_utils.thinking import (
+    chat_api_reasoning_effort,
     chat_template_kwargs_from_effort,
+    openrouter_extra_body,
     prepend_text_thinking_directive,
     thinking_directive_from_effort,
 )
@@ -78,9 +81,82 @@ from scenesmith.utils.openai import (
     ReasoningPersistenceAsyncOpenAIClient,
     encode_image_to_base64,
     reasoning_persistence_context,
+    resolve_reasoning_provider,
 )
 
 console_logger = logging.getLogger(__name__)
+
+
+class PlannerStageFailure(RuntimeError):
+    """A bounded planner workflow reached a typed terminal state."""
+
+    VALID_REASONS = frozenset({"no_tool_call", "no_mutation", "child_failure"})
+
+    def __init__(
+        self,
+        *,
+        reason: str,
+        stage: str,
+        workflow_calls: int,
+        successful_mutations: int,
+        operation: str | None,
+        stage_execution_attempt: int = 1,
+        retryable: bool = False,
+        root_error_type: str | None = None,
+        root_error_message: str | None = None,
+        evidence: dict[str, Any] | None = None,
+    ) -> None:
+        if reason not in self.VALID_REASONS:
+            raise ValueError(f"Unknown planner terminal reason: {reason!r}")
+        if (
+            isinstance(stage_execution_attempt, bool)
+            or not isinstance(stage_execution_attempt, int)
+            or stage_execution_attempt < 1
+        ):
+            raise ValueError("stage_execution_attempt must be a positive integer")
+        self.reason = reason
+        self.stage = stage
+        self.workflow_calls = workflow_calls
+        self.successful_mutations = successful_mutations
+        self.operation = operation or "unknown"
+        self.stage_execution_attempt = stage_execution_attempt
+        self.retryable = retryable
+        self.root_error_type = root_error_type
+        self.root_error_message = root_error_message
+        self.evidence = dict(evidence or {})
+        root_detail = (
+            f"; root={root_error_type}: {root_error_message}" if root_error_type else ""
+        )
+        super().__init__(
+            f"Planner stage '{stage}' failed ({reason}) after {workflow_calls} "
+            f"designer call(s) with {successful_mutations} committed scene "
+            f"mutation(s); last operation={self.operation}{root_detail}"
+        )
+
+
+class PlannerWorkflowNoMutationError(PlannerStageFailure):
+    """Compatibility subtype for a bounded workflow without a mutation."""
+
+    def __init__(
+        self,
+        *,
+        stage: str,
+        workflow_calls: int,
+        successful_mutations: int,
+        operation: str,
+        evidence: dict[str, Any] | None = None,
+        stage_execution_attempt: int = 1,
+    ) -> None:
+        super().__init__(
+            reason="no_mutation",
+            stage=stage,
+            workflow_calls=workflow_calls,
+            successful_mutations=successful_mutations,
+            operation=operation,
+            stage_execution_attempt=stage_execution_attempt,
+            retryable=False,
+            evidence=evidence,
+        )
 
 
 def _cfg_get(cfg: Any, key: str, default: Any) -> Any:
@@ -209,10 +285,17 @@ class BaseStatefulAgent(ABC):
         safety_cfg = getattr(cfg, "furniture_safety_controller", None)
         self.furniture_safety_controller = FurnitureSafetyController(safety_cfg)
         self._planner_initial_design_tool_calls = 0
+        self._planner_designer_workflow_calls = 0
+        self._planner_last_designer_workflow_operation = ""
+        self._planner_last_designer_workflow_evidence: dict[str, Any] = {}
         self._planner_critique_tool_calls = 0
         self._planner_design_change_tool_calls = 0
         self._planner_budget_exhausted = False
+        self._planner_terminal_stop = False
         self._planner_orchestration_calls = 0
+        self._planner_terminal_failure: dict[str, Any] | None = None
+        self._planner_terminal_exception: Exception | None = None
+        self._stage_execution_attempt = self._configured_stage_execution_attempt()
         self._critic_failed = False
         working_memory_cfg = _cfg_get(cfg, "stage_working_memory", {})
         working_memory_enabled = bool(_cfg_get(working_memory_cfg, "enabled", True))
@@ -227,6 +310,7 @@ class BaseStatefulAgent(ABC):
         self._last_critique_render_profile = "final"
         self._pending_hard_repair_hint = ""
         self._hard_repair_design_change_calls = 0
+        self._slow_memory_decision_contexts: dict[tuple[str, str], dict[str, Any]] = {}
 
     def _record_module_timing(
         self,
@@ -237,12 +321,16 @@ class BaseStatefulAgent(ABC):
     ) -> None:
         """Record elapsed time for per-stage optimization analysis."""
         elapsed = time.time() - start_time
+        timing_extra = dict(extra or {})
+        timing_extra.setdefault(
+            "stage_execution_attempt", self._stage_execution_attempt
+        )
         try:
             self.stage_working_memory.record_timing(
                 module=module,
                 event=event,
                 elapsed_sec=elapsed,
-                extra=extra,
+                extra=timing_extra,
             )
         except Exception as e:
             console_logger.warning(
@@ -301,6 +389,18 @@ class BaseStatefulAgent(ABC):
         try:
             result = await action()
         except Exception as exc:
+            failure_detail = {
+                "operation": operation,
+                "child_agent": child_agent,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+                "recovered": False,
+                "stage_execution_attempt": self._stage_execution_attempt,
+            }
+            if getattr(self, "_planner_terminal_failure", None) is None:
+                self._planner_terminal_failure = failure_detail
+                self._planner_terminal_exception = exc
+                self._persist_runtime_failure_checkpoint(failure_detail)
             self._record_planner_orchestration(
                 call_id=call_id,
                 phase="resume",
@@ -394,6 +494,16 @@ class BaseStatefulAgent(ABC):
                 },
             )
             self.stage_working_memory.save_context_bundle(bundle)
+            if bool(
+                getattr(
+                    getattr(self, "scene", None),
+                    "scene_expert_slow_memory_capture_enabled",
+                    False,
+                )
+            ):
+                self._slow_memory_decision_contexts[(agent_role, event)] = (
+                    bundle.model_dump(mode="json")
+                )
             if not self._stage_context_injection_enabled():
                 return ""
             return bundle.to_llm_text(max_chars=self._stage_context_max_chars())
@@ -410,8 +520,49 @@ class BaseStatefulAgent(ABC):
         output: Any = "",
         result: Any = None,
         error: str = "",
+        exception: Exception | None = None,
+        elapsed_sec: float | None = None,
+        event_kind: Literal["llm", "system"] = "llm",
     ) -> None:
         try:
+            capture_replay = bool(
+                getattr(
+                    getattr(self, "scene", None),
+                    "scene_expert_slow_memory_capture_enabled",
+                    False,
+                )
+            )
+            tools: list[Any] = []
+            system_instructions: Any = ""
+            context_snapshot: dict[str, Any] = {}
+            image_refs: list[str] = []
+            if capture_replay:
+                agent = getattr(self, agent_role, None)
+                tools = (
+                    list(getattr(agent, "tools", []) or []) if agent is not None else []
+                )
+                system_instructions = (
+                    getattr(agent, "instructions", "") if agent is not None else ""
+                )
+                context_snapshot = self._slow_memory_decision_contexts.get(
+                    (agent_role, event),
+                    self._slow_memory_decision_contexts.get(
+                        (agent_role, "request_critique"), {}
+                    ),
+                )
+                render_dir = getattr(
+                    getattr(self, "rendering_manager", None),
+                    "last_render_dir",
+                    None,
+                )
+                if render_dir is not None:
+                    try:
+                        image_refs = [
+                            str(path.resolve())
+                            for path in sorted(Path(render_dir).glob("*.png"))
+                        ]
+                    except OSError:
+                        image_refs = []
             self.stage_working_memory.record_llm_call(
                 agent_role=agent_role,
                 event=event,
@@ -419,6 +570,21 @@ class BaseStatefulAgent(ABC):
                 output=output,
                 result=result,
                 error=error,
+                event_kind=event_kind,
+                tools=tools,
+                system_instructions=system_instructions,
+                context_snapshot=context_snapshot,
+                image_refs=image_refs,
+                capture_replay=capture_replay,
+                requested_max_tokens=self._role_max_output_tokens(agent_role),
+                stage_execution_attempt=self._stage_execution_attempt,
+                client_cancelled=(
+                    True
+                    if exception is not None
+                    and type(exception).__name__ == "APITimeoutError"
+                    else None
+                ),
+                elapsed_sec=elapsed_sec,
             )
         except Exception as e:
             console_logger.warning("Failed to record LLM call debug: %s", e)
@@ -1081,8 +1247,11 @@ class BaseStatefulAgent(ABC):
             "APITimeoutError",
             "APIConnectionError",
             "ReadTimeout",
+            "ReadError",
             "ConnectTimeout",
             "ConnectError",
+            "RemoteProtocolError",
+            "RateLimitError",
             "TimeoutError",
         }
         current: BaseException | None = error
@@ -1091,7 +1260,17 @@ class BaseStatefulAgent(ABC):
                 return True
             current = current.__cause__ or current.__context__
         text = str(error).lower()
-        return "timed out" in text or "timeout" in text
+        return any(
+            marker in text
+            for marker in (
+                "timed out",
+                "timeout",
+                "incomplete chunked read",
+                "peer closed connection",
+                "connection reset",
+                "rate limit",
+            )
+        )
 
     def _critic_render_profile_name(self, update_checkpoint: bool) -> str:
         if update_checkpoint and self._critic_fast_path_enabled(
@@ -1173,7 +1352,7 @@ class BaseStatefulAgent(ABC):
         pre_hard = self._evaluate_current_furniture_hard_state()
         pre_checkpoint_hard = self._checkpoint_eligible_furniture_hard_state(pre_hard)
         if pre_checkpoint_hard and pre_checkpoint_hard.hard_valid:
-            controller.remember_hard_valid_scene_state(
+            self._remember_furniture_hard_valid_scene_state(
                 scene_state=pre_state,
                 source=f"pre-{call_kind}",
             )
@@ -1189,6 +1368,309 @@ class BaseStatefulAgent(ABC):
     def _restore_furniture_scene_state(self, scene_state: dict[str, Any]) -> None:
         self.scene.restore_from_state_dict(scene_state)
         self.rendering_manager.clear_cache()
+
+    def _abort_furniture_design_transaction(
+        self, transaction: dict[str, Any] | None
+    ) -> None:
+        """Rollback a failed designer call without masking its root exception."""
+        if transaction is None:
+            return
+
+        try:
+            self._restore_furniture_scene_state(transaction["pre_state"])
+        except Exception:
+            console_logger.exception(
+                "Failed to restore the pre-call furniture state while aborting "
+                "the %s designer transaction",
+                transaction.get("call_kind", "unknown"),
+            )
+
+        controller = getattr(self, "furniture_safety_controller", None)
+        if controller is None:
+            console_logger.error(
+                "Furniture safety controller is unavailable while aborting the %s "
+                "designer transaction",
+                transaction.get("call_kind", "unknown"),
+            )
+            return
+        try:
+            controller.end_designer_call()
+        except Exception:
+            console_logger.exception(
+                "Failed to end the furniture safety controller call while aborting "
+                "the %s designer transaction",
+                transaction.get("call_kind", "unknown"),
+            )
+
+    def _furniture_disk_checkpoint_path(self) -> Path:
+        return (
+            Path(self.logger.output_dir)
+            / "scene_states"
+            / "furniture_best_hard_valid.json"
+        )
+
+    def _furniture_checkpoint_report_path(self) -> Path:
+        return (
+            Path(self.logger.output_dir)
+            / "scene_states"
+            / "furniture_best_hard_valid_report.json"
+        )
+
+    def _record_furniture_checkpoint_event(
+        self,
+        *,
+        event: str,
+        source: str,
+        reason: str = "",
+        scene_hash: str = "",
+    ) -> None:
+        path = self._furniture_checkpoint_report_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload: dict[str, Any] = {"version": 1, "events": []}
+            if path.exists():
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    payload.update(loaded)
+            events = payload.setdefault("events", [])
+            if not isinstance(events, list):
+                events = []
+                payload["events"] = events
+            events.append(
+                {
+                    "event": event,
+                    "source": source,
+                    "reason": reason,
+                    "scene_hash": scene_hash,
+                    "timestamp": time.time(),
+                }
+            )
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            os.replace(temporary, path)
+        except Exception:
+            console_logger.warning(
+                "Could not record furniture checkpoint event", exc_info=True
+            )
+
+    def _persist_furniture_hard_valid_checkpoint(
+        self,
+        *,
+        scene_state: dict[str, Any],
+        source: str,
+    ) -> bool:
+        path = self._furniture_disk_checkpoint_path()
+        try:
+            hard_state = self._checkpoint_eligible_furniture_hard_state(
+                self._evaluate_current_hard_state()
+            )
+            if hard_state is not None and not hard_state.hard_valid:
+                reason = "; ".join(hard_state.hard_reasons or ["unknown hard failure"])
+                self._record_furniture_checkpoint_event(
+                    event="rejected",
+                    source=source,
+                    reason=reason,
+                    scene_hash=self.scene.content_hash(),
+                )
+                console_logger.info(
+                    "Rejected hard-invalid furniture disk checkpoint from %s: %s",
+                    source,
+                    reason,
+                )
+                return False
+            path.parent.mkdir(parents=True, exist_ok=True)
+            controller = self.furniture_safety_controller
+            scene_hash = self.scene.content_hash()
+            payload = {
+                "version": 1,
+                "source": source,
+                "scene_hash": scene_hash,
+                "scene_description": str(
+                    getattr(
+                        self.scene,
+                        "scene_expert_original_description",
+                        self.scene.text_description,
+                    )
+                    or ""
+                ),
+                "required_counts": dict(
+                    getattr(controller, "required_counts", {}) or {}
+                ),
+                "best_weighted_score": float(
+                    getattr(controller, "best_weighted_score", -1.0)
+                ),
+                "scene_state": copy.deepcopy(scene_state),
+                "timestamp": time.time(),
+            }
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            os.replace(temporary, path)
+            self._record_furniture_checkpoint_event(
+                event="saved",
+                source=source,
+                scene_hash=scene_hash,
+            )
+            return True
+        except Exception:
+            console_logger.warning(
+                "Could not persist hard-valid furniture checkpoint", exc_info=True
+            )
+            return False
+
+    def _remember_furniture_hard_valid_scene_state(
+        self,
+        *,
+        scene_state: dict[str, Any],
+        source: str,
+        weighted_score: float | None = None,
+        scores: CritiqueWithScores | None = None,
+        render_dir: Path | None = None,
+    ) -> bool:
+        controller = self.furniture_safety_controller
+        remembered = controller.remember_hard_valid_scene_state(
+            scene_state=scene_state,
+            source=source,
+            weighted_score=weighted_score,
+            scores=scores,
+            render_dir=render_dir,
+        )
+        if remembered:
+            self._persist_furniture_hard_valid_checkpoint(
+                scene_state=scene_state,
+                source=source,
+            )
+        return remembered
+
+    def _load_furniture_hard_valid_checkpoint(
+        self,
+        *,
+        restore_when_current_invalid: bool,
+    ) -> bool:
+        path = self._furniture_disk_checkpoint_path()
+        if not path.exists():
+            return False
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            scene_state = payload.get("scene_state")
+            if not isinstance(scene_state, dict):
+                raise ValueError("checkpoint scene_state is missing")
+            expected_description = str(
+                getattr(
+                    self.scene,
+                    "scene_expert_original_description",
+                    self.scene.text_description,
+                )
+                or ""
+            )
+            if str(payload.get("scene_description") or "") != expected_description:
+                self._record_furniture_checkpoint_event(
+                    event="rejected",
+                    source="disk_load",
+                    reason="scene description mismatch",
+                )
+                return False
+
+            current_state = copy.deepcopy(self.scene.to_state_dict())
+            current_hard = self._checkpoint_eligible_furniture_hard_state(
+                self._evaluate_current_hard_state()
+            )
+            self._restore_furniture_scene_state(scene_state)
+            checkpoint_hard = self._checkpoint_eligible_furniture_hard_state(
+                self._evaluate_current_hard_state()
+            )
+            if checkpoint_hard is None or not checkpoint_hard.hard_valid:
+                self._restore_furniture_scene_state(current_state)
+                reason = "; ".join(
+                    getattr(checkpoint_hard, "hard_reasons", None) or ["unknown"]
+                )
+                self._record_furniture_checkpoint_event(
+                    event="rejected",
+                    source="disk_load",
+                    reason=reason,
+                )
+                return False
+
+            controller = self.furniture_safety_controller
+            controller.best_scene_state = copy.deepcopy(scene_state)
+            controller.best_scores = None
+            controller.best_render_dir = None
+            controller.best_weighted_score = float(
+                payload.get("best_weighted_score") or 0.0
+            )
+            controller.best_reasons = ["fresh-verified disk hard-valid checkpoint"]
+            current_invalid = current_hard is not None and not current_hard.hard_valid
+            if not (restore_when_current_invalid and current_invalid):
+                self._restore_furniture_scene_state(current_state)
+                event = "loaded"
+            else:
+                event = "restored"
+            self._record_furniture_checkpoint_event(
+                event=event,
+                source="disk_load",
+                scene_hash=str(payload.get("scene_hash") or ""),
+            )
+            console_logger.info(
+                "%s fresh-verified disk hard-valid furniture checkpoint",
+                "Restored" if event == "restored" else "Loaded",
+            )
+            return True
+        except Exception as exc:
+            self._record_furniture_checkpoint_event(
+                event="rejected",
+                source="disk_load",
+                reason=str(exc),
+            )
+            console_logger.warning(
+                "Could not load hard-valid furniture checkpoint", exc_info=True
+            )
+            return False
+
+    def _ensure_furniture_checkpoint_integrity(self, *, source: str) -> None:
+        """Fresh-verify furniture state without bypassing the stage abort policy."""
+        hard_state = self._checkpoint_eligible_furniture_hard_state(
+            self._evaluate_current_hard_state()
+        )
+        if hard_state is None or hard_state.hard_valid:
+            return
+        controller = self.furniture_safety_controller
+        best_state = getattr(controller, "best_scene_state", None)
+        if best_state is not None:
+            self._restore_furniture_scene_state(best_state)
+            restored = self._checkpoint_eligible_furniture_hard_state(
+                self._evaluate_current_hard_state()
+            )
+            if restored is None or restored.hard_valid:
+                self._record_furniture_checkpoint_event(
+                    event="restored",
+                    source=source,
+                    scene_hash=self.scene.content_hash(),
+                )
+                return
+        if self._load_furniture_hard_valid_checkpoint(
+            restore_when_current_invalid=True
+        ):
+            restored = self._checkpoint_eligible_furniture_hard_state(
+                self._evaluate_current_hard_state()
+            )
+            if restored is None or restored.hard_valid:
+                return
+        reasons = "; ".join(hard_state.hard_reasons or ["unknown hard failure"])
+        self._record_furniture_checkpoint_event(
+            event="rejected",
+            source=source,
+            reason=reasons,
+        )
+        if not self._final_hard_validation_enabled():
+            console_logger.warning(
+                "Furniture checkpoint integrity remained hard-invalid after %s, "
+                "but the configured degraded-quality policy disables stage abort: %s",
+                source,
+                reasons,
+            )
+            return
+        raise RuntimeError(
+            "Furniture checkpoint integrity failed after " f"{source}: {reasons}"
+        )
 
     def _end_furniture_design_transaction(
         self, transaction: dict[str, Any] | None
@@ -1247,7 +1729,7 @@ class BaseStatefulAgent(ABC):
                     hard_eval
                 )
             if checkpoint_hard and checkpoint_hard.hard_valid:
-                controller.remember_hard_valid_scene_state(
+                self._remember_furniture_hard_valid_scene_state(
                     scene_state=copy.deepcopy(self.scene.to_state_dict()),
                     source=f"post-{call_kind}",
                 )
@@ -1326,6 +1808,10 @@ class BaseStatefulAgent(ABC):
         if decision.accepted:
             checkpoint_scores = scores
             checkpoint_render_dir = images_dir
+            self._persist_furniture_hard_valid_checkpoint(
+                scene_state=candidate_state,
+                source="accepted_critique",
+            )
         if decision.rollback_to_best and controller.best_scene_state is not None:
             self._restore_furniture_scene_state(controller.best_scene_state)
             if controller.best_scores is not None:
@@ -1396,8 +1882,32 @@ class BaseStatefulAgent(ABC):
         effort = None
         if settings_key and hasattr(self.cfg.openai, "reasoning_effort"):
             effort = getattr(self.cfg.openai.reasoning_effort, settings_key, None)
-        # Qwen3.6 uses enable_thinking; Qwen3.8 uses reasoning_effort.
-        kwargs["extra_body"] = chat_template_kwargs_from_effort(effort, model=model)
+        request_provider = self._reasoning_request_provider()
+        if request_provider == "qwen":
+            # Qwen3.6 uses enable_thinking; Qwen3.8 uses reasoning_effort.
+            kwargs["extra_body"] = chat_template_kwargs_from_effort(effort, model=model)
+        elif request_provider == "openrouter":
+            normalized_effort = chat_api_reasoning_effort(effort)
+            if normalized_effort is not None:
+                # The Agents SDK serializes this as the top-level
+                # ``reasoning_effort`` Chat Completions parameter.  OpenRouter
+                # additionally needs ``include_reasoning`` to return the
+                # reasoning field instead of only billing/counting its tokens.
+                kwargs["reasoning"] = Reasoning(effort=normalized_effort)
+                kwargs["extra_body"] = openrouter_extra_body(
+                    {"include_reasoning": True}
+                )
+        elif request_provider == "openai":
+            normalized_effort = chat_api_reasoning_effort(effort)
+            if normalized_effort is not None:
+                # The Agents SDK maps this to Chat Completions'
+                # reasoning_effort request field.
+                kwargs["reasoning"] = Reasoning(effort=normalized_effort)
+
+        if settings_key:
+            max_tokens = self._role_max_output_tokens(settings_key)
+            if max_tokens is not None:
+                kwargs["max_tokens"] = max_tokens
 
         # Add tool_choice to force specific tool call first.
         if tool_choice:
@@ -1408,6 +1918,14 @@ class BaseStatefulAgent(ABC):
             kwargs["parallel_tool_calls"] = parallel_tool_calls
 
         return ModelSettings(**kwargs) if kwargs else None
+
+    def _reasoning_request_provider(self) -> str:
+        """Resolve the configured reasoning request contract for this process."""
+        return resolve_reasoning_provider(
+            getattr(self.cfg.openai, "reasoning_provider", "qwen"),
+            model_id=getattr(self.cfg.openai, "model", None),
+            base_url=os.environ.get("OPENAI_BASE_URL"),
+        )
 
     def _get_agent_instructions(
         self, prompt_enum: Any, settings_key: str, **kwargs: Any
@@ -1420,7 +1938,11 @@ class BaseStatefulAgent(ABC):
         if hasattr(self.cfg, "openai") and hasattr(self.cfg.openai, "reasoning_effort"):
             effort = getattr(self.cfg.openai.reasoning_effort, settings_key, None)
         model = getattr(self.cfg.openai, "model", None)
-        directive = thinking_directive_from_effort(effort, model=model)
+        directive = (
+            thinking_directive_from_effort(effort, model=model)
+            if self._reasoning_request_provider() == "qwen"
+            else ""
+        )
         return prepend_text_thinking_directive(instructions, directive)
 
     def _create_designer_agent(
@@ -1518,9 +2040,82 @@ class BaseStatefulAgent(ABC):
             model_settings=self._get_model_settings(
                 settings_key="planner", parallel_tool_calls=False
             ),
+            tool_use_behavior=self._planner_tools_to_final_output,
         )
 
-    def _create_sessions(self, session_prefix: str = "") -> tuple[Session, Session]:
+    def _planner_tools_to_final_output(
+        self, _context: Any, tool_results: list[Any]
+    ) -> ToolsToFinalOutputResult:
+        """Stop Runner only after the workflow reaches a terminal tool result."""
+        if not getattr(self, "_planner_terminal_stop", False) or not tool_results:
+            return ToolsToFinalOutputResult(is_final_output=False, final_output=None)
+        return ToolsToFinalOutputResult(
+            is_final_output=True,
+            final_output=tool_results[-1].output,
+        )
+
+    def _configured_stage_execution_attempt(self) -> int:
+        raw_attempt = _cfg_get(self.cfg, "stage_execution_attempt", 1)
+        if isinstance(raw_attempt, bool) or (
+            isinstance(raw_attempt, float) and not raw_attempt.is_integer()
+        ):
+            raise ValueError("stage_execution_attempt must be a positive integer")
+        try:
+            attempt = int(raw_attempt)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "stage_execution_attempt must be a positive integer"
+            ) from exc
+        if attempt < 1:
+            raise ValueError("stage_execution_attempt must be a positive integer")
+        return attempt
+
+    def _role_max_output_tokens(self, settings_key: str) -> int | None:
+        budgets = _cfg_get(getattr(self.cfg, "openai", None), "max_output_tokens", None)
+        if budgets is None:
+            return None
+        value = _cfg_get(budgets, settings_key, None)
+        if value is None:
+            raise ValueError(f"openai.max_output_tokens.{settings_key} is required")
+        if isinstance(value, bool) or (
+            isinstance(value, float) and not value.is_integer()
+        ):
+            raise ValueError(
+                f"openai.max_output_tokens.{settings_key} must be a positive integer"
+            )
+        try:
+            budget = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"openai.max_output_tokens.{settings_key} must be a positive integer"
+            ) from exc
+        if budget < 1:
+            raise ValueError(
+                f"openai.max_output_tokens.{settings_key} must be a positive integer"
+            )
+        return budget
+
+    def _provider_max_retries(self) -> int:
+        """Return transport retries hidden inside one typed workflow attempt."""
+        timeout_cfg = _cfg_get(self.cfg, "api_timeout", None)
+        value = _cfg_get(timeout_cfg, "max_retries", 2)
+        if isinstance(value, bool) or (
+            isinstance(value, float) and not value.is_integer()
+        ):
+            raise ValueError("api_timeout.max_retries must be a non-negative integer")
+        try:
+            retries = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "api_timeout.max_retries must be a non-negative integer"
+            ) from exc
+        if retries < 0:
+            raise ValueError("api_timeout.max_retries must be a non-negative integer")
+        return retries
+
+    def _create_sessions(
+        self, session_prefix: str = "", *, stage_execution_attempt: int | None = None
+    ) -> tuple[Session, Session]:
         """Create planner, designer, and critic persistent conversation history.
 
         Sessions are optionally wrapped with TurnTrimmingSession for memory
@@ -1534,21 +2129,33 @@ class BaseStatefulAgent(ABC):
             assigned to ``self.planner_session`` because existing subclasses
             already unpack this method's two-value return.
         """
-        designer_id = f"{session_prefix}designer" if session_prefix else "designer"
-        critic_id = f"{session_prefix}critic" if session_prefix else "critic"
-        planner_id = f"{session_prefix}planner" if session_prefix else "planner"
+        attempt = (
+            self._stage_execution_attempt
+            if stage_execution_attempt is None
+            else stage_execution_attempt
+        )
+        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+            raise ValueError("stage_execution_attempt must be a positive integer")
+        self._stage_execution_attempt = attempt
+        designer_base = f"{session_prefix}designer" if session_prefix else "designer"
+        critic_base = f"{session_prefix}critic" if session_prefix else "critic"
+        planner_base = f"{session_prefix}planner" if session_prefix else "planner"
+        suffix = f"_attempt_{attempt:02d}"
+        designer_id = f"{designer_base}{suffix}"
+        critic_id = f"{critic_base}{suffix}"
+        planner_id = f"{planner_base}{suffix}"
 
         designer_sqlite = SQLiteSession(
             session_id=designer_id,
-            db_path=self.logger.output_dir / f"{designer_id}.db",
+            db_path=self.logger.output_dir / f"{designer_base}.db",
         )
         critic_sqlite = SQLiteSession(
             session_id=critic_id,
-            db_path=self.logger.output_dir / f"{critic_id}.db",
+            db_path=self.logger.output_dir / f"{critic_base}.db",
         )
         planner_sqlite = SQLiteSession(
             session_id=planner_id,
-            db_path=self.logger.output_dir / f"{planner_id}.db",
+            db_path=self.logger.output_dir / f"{planner_base}.db",
         )
 
         # Wrap with memory management if configured.
@@ -1589,6 +2196,7 @@ class BaseStatefulAgent(ABC):
         async def run_once(input_value: Any, *, event: str) -> RunResult:
             """Run one planner turn while keeping each attempt auditable."""
             attempt_start = time.time()
+            request_start = time.perf_counter()
             attempt_prompt = {
                 "instructions": getattr(self.planner, "instructions", ""),
                 "runner_input": input_value,
@@ -1616,6 +2224,8 @@ class BaseStatefulAgent(ABC):
                     event=event,
                     prompt=attempt_prompt,
                     error=f"{type(exc).__name__}: {exc}",
+                    exception=exc,
+                    elapsed_sec=time.perf_counter() - request_start,
                 )
                 raise
             self._record_module_timing(
@@ -1630,31 +2240,67 @@ class BaseStatefulAgent(ABC):
                 prompt=attempt_prompt,
                 output=result.final_output or "",
                 result=result,
+                elapsed_sec=time.perf_counter() - request_start,
             )
             return result
 
         result = await run_once(runner_input, event="coordinate_stage")
 
-        # A planner can return a natural-language acknowledgement without ever
-        # invoking a workflow tool.  Letting that response pass makes the stage
-        # look successful while leaving required surfaces empty.  A fresh stage
-        # must create its initial design; a replay from an existing candidate
-        # intentionally starts with critique and repair instead.
-        if require_initial_design and self._planner_initial_design_tool_calls == 0:
-            recovery_input = (
-                "MANDATORY WORKFLOW RECOVERY: your previous turn returned without "
-                "calling a workflow tool, so no design work has been completed. "
-                "Do not return a summary, ask a question, or describe what you "
-                "would do. Immediately execute the workflow now. For placement "
-                "stages, call select_placement_style() first if it has not already "
-                "been called; then call request_initial_design(). For non-placement "
-                "stages, call request_initial_design() immediately. Continue using "
-                "the workflow tools only after the initial design tool has returned."
-            )
-            console_logger.warning(
-                "Planner returned without request_initial_design; running one "
-                "mandatory workflow recovery turn."
-            )
+        # A planner can return a natural-language acknowledgement, or a designer
+        # workflow can finish without committing a scene mutation. Both require
+        # one bounded recovery turn, but they are different failure modes and
+        # must remain distinguishable in the terminal status.
+        if (
+            require_initial_design
+            and getattr(self, "_planner_successful_designer_mutations", 0) == 0
+        ):
+            terminal_failure = getattr(self, "_planner_terminal_failure", None)
+            if isinstance(terminal_failure, dict) and not terminal_failure.get(
+                "recovered", False
+            ):
+                failure_text = self._planner_terminal_failure_text()
+                self._persist_planner_failure_diagnostics(
+                    error_type=str(
+                        terminal_failure.get("error_type") or "RuntimeError"
+                    ),
+                    error=failure_text,
+                    finish_reason="child_delegation_failure",
+                    final_output=getattr(result, "final_output", "") or "",
+                    recovery_attempted=False,
+                )
+                planner_failure = self._planner_child_failure(terminal_failure)
+                raise planner_failure from getattr(
+                    self, "_planner_terminal_exception", None
+                )
+            workflow_calls = getattr(self, "_planner_designer_workflow_calls", 0)
+            if workflow_calls:
+                recovery_input = (
+                    "MANDATORY NO-MUTATION RECOVERY: a designer workflow was called "
+                    "but produced no committed scene mutation. Do not repeat a "
+                    "one-shot request_initial_design() call. Inspect the returned "
+                    "failure evidence and immediately call request_design_change() "
+                    "once with a concrete alternative that respects the open circuit "
+                    "breaker and remaining workflow budget."
+                )
+                console_logger.warning(
+                    "Planner designer workflow produced no committed mutation; "
+                    "running one bounded no-mutation recovery turn."
+                )
+            else:
+                recovery_input = (
+                    "MANDATORY WORKFLOW RECOVERY: your previous turn returned without "
+                    "calling a workflow tool, so no design work has been completed. "
+                    "Do not return a summary, ask a question, or describe what you "
+                    "would do. Immediately execute the workflow now. For placement "
+                    "stages, call select_placement_style() first if it has not already "
+                    "been called; then call request_initial_design(). For non-placement "
+                    "stages, call request_initial_design() immediately. Continue using "
+                    "the workflow tools only after the initial design tool has returned."
+                )
+                console_logger.warning(
+                    "Planner returned without request_initial_design; running one "
+                    "mandatory workflow recovery turn."
+                )
             # ``finish_stage`` marks the planner budget exhausted.  That marker
             # is valid only after initial design and must not block this recovery.
             self._planner_budget_exhausted = False
@@ -1662,11 +2308,107 @@ class BaseStatefulAgent(ABC):
                 recovery_input,
                 event="coordinate_stage_recovery",
             )
-            if self._planner_initial_design_tool_calls == 0:
-                raise RuntimeError(
-                    "Planner exited without calling request_initial_design after "
-                    "the mandatory workflow recovery turn"
+            terminal_failure = getattr(self, "_planner_terminal_failure", None)
+            if isinstance(terminal_failure, dict) and not terminal_failure.get(
+                "recovered", False
+            ):
+                planner_failure = self._planner_child_failure(terminal_failure)
+                raise planner_failure from getattr(
+                    self, "_planner_terminal_exception", None
                 )
+            if getattr(self, "_planner_successful_designer_mutations", 0) == 0:
+                workflow_calls = getattr(self, "_planner_designer_workflow_calls", 0)
+                if workflow_calls:
+                    evidence = {
+                        "last_workflow": dict(
+                            getattr(
+                                self,
+                                "_planner_last_designer_workflow_evidence",
+                                {},
+                            )
+                        )
+                    }
+                    if isinstance(terminal_failure, dict):
+                        evidence["terminal_failure"] = dict(terminal_failure)
+                    planner_failure = PlannerWorkflowNoMutationError(
+                        stage=self.agent_type.value,
+                        workflow_calls=workflow_calls,
+                        successful_mutations=0,
+                        operation=(
+                            getattr(
+                                self,
+                                "_planner_last_designer_workflow_operation",
+                                "",
+                            )
+                            or "unknown"
+                        ),
+                        evidence=evidence,
+                        stage_execution_attempt=getattr(
+                            self, "_stage_execution_attempt", 1
+                        ),
+                    )
+                else:
+                    planner_failure = PlannerStageFailure(
+                        reason="no_tool_call",
+                        stage=self.agent_type.value,
+                        workflow_calls=0,
+                        successful_mutations=0,
+                        operation="request_initial_design",
+                        stage_execution_attempt=getattr(
+                            self, "_stage_execution_attempt", 1
+                        ),
+                        retryable=False,
+                        evidence={"recovery_turn": "mandatory_workflow"},
+                    )
+                self._persist_planner_failure_diagnostics(
+                    error_type=type(planner_failure).__name__,
+                    error=str(planner_failure),
+                    finish_reason="no_scene_mutation_after_recovery",
+                    final_output=getattr(result, "final_output", "") or "",
+                    recovery_attempted=True,
+                )
+                raise planner_failure
+        elif (
+            getattr(self, "_planner_review_existing", False)
+            and self._planner_review_existing_workflow_calls == 0
+        ):
+            recovery_input = (
+                "MANDATORY EXISTING-CANDIDATE RECOVERY: this stage starts from a "
+                "restored furniture candidate. Do not create an initial design and "
+                "do not finish yet. Immediately call request_critique() to inspect "
+                "the candidate, then call request_design_change() only when the "
+                "critique identifies a concrete repair."
+            )
+            console_logger.warning(
+                "Planner returned without reviewing the existing candidate; "
+                "running one mandatory workflow recovery turn."
+            )
+            self._planner_budget_exhausted = False
+            result = await run_once(
+                recovery_input,
+                event="coordinate_existing_candidate_recovery",
+            )
+            if self._planner_review_existing_workflow_calls == 0:
+                planner_failure = PlannerStageFailure(
+                    reason="no_tool_call",
+                    stage=self.agent_type.value,
+                    workflow_calls=0,
+                    successful_mutations=0,
+                    operation="request_critique",
+                    stage_execution_attempt=getattr(
+                        self, "_stage_execution_attempt", 1
+                    ),
+                    retryable=False,
+                    evidence={"recovery_turn": "existing_candidate"},
+                )
+                self._persist_planner_failure_diagnostics(
+                    error_type=type(planner_failure).__name__,
+                    error=str(planner_failure),
+                    finish_reason="no_existing_candidate_workflow_after_recovery",
+                    final_output=getattr(result, "final_output", "") or "",
+                    recovery_attempted=True,
+                )
+                raise planner_failure
 
         self._record_module_timing(
             "planner",
@@ -1707,6 +2449,7 @@ class BaseStatefulAgent(ABC):
         openai_client = ReasoningPersistenceAsyncOpenAIClient(
             base_url=os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
             api_key=os.environ.get("OPENAI_API_KEY", "dummy"),
+            max_retries=self._provider_max_retries(),
         )
         provider = OpenAIProvider(
             openai_client=openai_client,
@@ -1819,7 +2562,9 @@ class BaseStatefulAgent(ABC):
         ):
             should_restore_best = controller.best_scores is not None
             if not should_restore_best:
-                current_hard_state = self._evaluate_current_hard_state()
+                current_hard_state = self._checkpoint_eligible_furniture_hard_state(
+                    self._evaluate_current_hard_state()
+                )
                 should_restore_best = (
                     current_hard_state is None or not current_hard_state.hard_valid
                 )
@@ -1886,7 +2631,9 @@ class BaseStatefulAgent(ABC):
                 self.final_render_dir = self.checkpoint_render_dir
 
         if self._final_hard_validation_enabled():
-            final_hard_state = self._evaluate_current_hard_state()
+            final_hard_state = self._checkpoint_eligible_furniture_hard_state(
+                self._evaluate_current_hard_state()
+            )
             final_hard_state, _, final_repair_actions = (
                 self._try_deterministic_repair_for_hard_state(
                     final_hard_state,
@@ -1898,6 +2645,9 @@ class BaseStatefulAgent(ABC):
                     "Deterministic repair attempted during finalization: %s",
                     "; ".join(final_repair_actions),
                 )
+            final_hard_state = self._checkpoint_eligible_furniture_hard_state(
+                self._evaluate_current_hard_state()
+            )
             if final_hard_state is not None and not final_hard_state.hard_valid:
                 if getattr(controller, "best_scene_state", None) is not None:
                     self._restore_furniture_scene_state(controller.best_scene_state)
@@ -1911,7 +2661,9 @@ class BaseStatefulAgent(ABC):
                         "Final hard-check failed after repair; restored best "
                         "hard-valid checkpoint instead of failing the stage."
                     )
-                    final_hard_state = self._evaluate_current_hard_state()
+                    final_hard_state = self._checkpoint_eligible_furniture_hard_state(
+                        self._evaluate_current_hard_state()
+                    )
                     if final_hard_state is None or final_hard_state.hard_valid:
                         reasons = ""
                     else:
@@ -1921,15 +2673,23 @@ class BaseStatefulAgent(ABC):
             if final_hard_state is not None and not final_hard_state.hard_valid:
                 reasons = "; ".join(final_hard_state.hard_reasons)
                 stage_name = self.agent_type.value.replace("_", " ").capitalize()
+                delegation_failure = self._planner_terminal_failure_text()
+                failure_context = (
+                    f" after {delegation_failure}" if delegation_failure else ""
+                )
                 console_logger.error(
-                    "%s stage failed with unresolved deterministic hard constraints: %s",
+                    "%s stage failed%s with unresolved deterministic hard constraints: %s",
                     stage_name,
+                    failure_context,
                     reasons,
                 )
                 raise RuntimeError(
-                    f"{stage_name} stage failed with unresolved hard constraints: "
+                    f"{stage_name} stage failed{failure_context} with unresolved "
+                    "hard constraints: "
                     f"{reasons}"
                 )
+            if final_hard_state is None or final_hard_state.hard_valid:
+                self._mark_planner_terminal_failure_recovered()
 
         # Copy final scores and renders to per-stage directory.
         # Use final_render_dir (tracks actual last render) instead of checkpoint_render_dir
@@ -2090,22 +2850,243 @@ class BaseStatefulAgent(ABC):
 
     def _reset_planner_budget_tracking(self) -> None:
         self._planner_initial_design_tool_calls = 0
+        self._planner_designer_workflow_calls = 0
+        self._planner_last_designer_workflow_operation = ""
+        self._planner_last_designer_workflow_evidence = {}
+        self._planner_successful_designer_mutations = 0
         self._planner_critique_tool_calls = 0
         self._planner_design_change_tool_calls = 0
         self._planner_budget_exhausted = False
+        self._planner_terminal_stop = False
+        self._planner_terminal_failure = None
+        self._planner_terminal_exception = None
         self._critic_failed = False
         self._pending_hard_repair_hint = ""
         self._hard_repair_design_change_calls = 0
+        self._planner_review_existing_workflow_calls = 0
+
+    def _planner_scene_hash(self) -> str:
+        """Return the committed state hash used to audit designer mutations."""
+        for attribute in ("scene", "layout"):
+            state = getattr(self, attribute, None)
+            content_hash = getattr(state, "content_hash", None)
+            if callable(content_hash):
+                return str(content_hash())
+        raise RuntimeError(
+            f"{type(self).__name__} has no hashable scene or layout state for "
+            "planner mutation accounting"
+        )
+
+    def _record_successful_designer_mutation(self, before_hash: str) -> None:
+        """Count only designer calls whose final committed scene state changed."""
+        if self._planner_scene_hash() != before_hash:
+            self._planner_successful_designer_mutations += 1
+
+    def _record_designer_workflow_attempt(self, operation: str) -> None:
+        """Audit a designer call independently from its committed mutation."""
+        self._planner_designer_workflow_calls += 1
+        self._planner_last_designer_workflow_operation = operation
+
+    def _record_designer_workflow_evidence(self, operation: str, result: Any) -> None:
+        """Keep a bounded terminal summary for cross-process failure diagnosis."""
+        self._planner_last_designer_workflow_evidence = {
+            "operation": operation,
+            "result_type": type(result).__name__,
+            "result": str(result)[-2000:],
+        }
+
+    def _persist_runtime_failure_checkpoint(self, failure: dict[str, Any]) -> None:
+        """Persist only a previously mutated scene for bounded runtime salvage.
+
+        A child failure before any committed designer mutation has no usable
+        stage output and must continue through the normal failure path.  The
+        snapshot is additive evidence; policy selection happens at the stage
+        orchestration boundary where strict mode remains authoritative.
+        """
+        if getattr(self, "_planner_successful_designer_mutations", 0) <= 0:
+            return
+        logger = getattr(self, "logger", None)
+        if logger is None or not hasattr(logger, "log_scene"):
+            return
+        scene_hash = self._planner_scene_hash()
+        checkpoint_name = f"runtime_failure_{self.agent_type.value}"
+        try:
+            checkpoint_dir = logger.log_scene(self.scene, name=checkpoint_name)
+            state_path = Path(checkpoint_dir) / "scene_state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            objects = state.get("objects") if isinstance(state, dict) else None
+            valid = isinstance(objects, (dict, list)) and bool(objects)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            failure["checkpoint"] = {
+                "validation": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            return
+        checkpoint = {
+            "path": str(state_path),
+            "scene_hash": scene_hash,
+            "validation": "passed" if valid else "failed",
+            "persisted": True,
+        }
+        failure["checkpoint"] = checkpoint
+        metadata = getattr(self.scene, "metadata", None)
+        if not isinstance(metadata, dict):
+            metadata = {}
+            self.scene.metadata = metadata
+        metadata["scenesmith_runtime_failure"] = dict(failure)
+
+    def _persist_planner_failure_diagnostics(
+        self,
+        *,
+        error_type: str,
+        error: str,
+        finish_reason: str,
+        final_output: str,
+        recovery_attempted: bool,
+    ) -> dict[str, Any]:
+        """Attach read-only planner counters to the scene before re-raising.
+
+        This evidence is intentionally policy-free: it neither suppresses the
+        native exception nor asks SceneExpert to repair it.  The hook layer can
+        mirror the payload into a partial trace when enabled.
+        """
+        terminal_failure = dict(getattr(self, "_planner_terminal_failure", None) or {})
+        checkpoint_state = {
+            "runtime_failure_checkpoint": dict(
+                terminal_failure.get("checkpoint") or {}
+            ),
+            "has_current_checkpoint": (
+                getattr(self, "scene_checkpoint", None) is not None
+            ),
+            "has_previous_checkpoint": (
+                getattr(self, "previous_scene_checkpoint", None) is not None
+            ),
+            "checkpoint_scene_hash": str(
+                getattr(self, "checkpoint_scene_hash", None) or ""
+            ),
+            "checkpoint_render_dir": str(
+                getattr(self, "checkpoint_render_dir", None) or ""
+            ),
+            "final_render_dir": str(getattr(self, "final_render_dir", None) or ""),
+        }
+        payload = {
+            "schema_version": "scenesmith.planner_failure.v1",
+            "stage": self.agent_type.value,
+            "error_type": str(error_type or "RuntimeError"),
+            "error": str(error),
+            "finish_reason": str(finish_reason),
+            "recovery_attempted": bool(recovery_attempted),
+            "planner_final_output": str(final_output or "")[:4000],
+            "initial_design_tool_calls": int(
+                getattr(self, "_planner_initial_design_tool_calls", 0)
+            ),
+            "critique_tool_calls": int(
+                getattr(self, "_planner_critique_tool_calls", 0)
+            ),
+            "design_change_tool_calls": int(
+                getattr(self, "_planner_design_change_tool_calls", 0)
+            ),
+            "orchestration_calls": int(
+                getattr(self, "_planner_orchestration_calls", 0)
+            ),
+            "successful_designer_mutations": int(
+                getattr(self, "_planner_successful_designer_mutations", 0)
+            ),
+            "review_existing_workflow_calls": int(
+                getattr(self, "_planner_review_existing_workflow_calls", 0)
+            ),
+            "budget_exhausted": bool(getattr(self, "_planner_budget_exhausted", False)),
+            "terminal_stop": bool(getattr(self, "_planner_terminal_stop", False)),
+            "terminal_failure": terminal_failure,
+            "checkpoint_state": checkpoint_state,
+        }
+        state = getattr(self, "scene", None)
+        if state is None:
+            state = getattr(self, "layout", None)
+        if state is None:
+            return payload
+        metadata = getattr(state, "metadata", None)
+        if not isinstance(metadata, dict):
+            metadata = {}
+            try:
+                state.metadata = metadata
+            except (AttributeError, TypeError):
+                return payload
+        metadata["scenesmith_planner_failure"] = payload
+        return payload
 
     def _stop_planner_after_failure(self, reason: str) -> str:
         """Convert a nested agent failure into a deterministic planner stop."""
         self._planner_budget_exhausted = True
+        self._planner_terminal_stop = True
         controller = getattr(self, "furniture_safety_controller", None)
         if controller and getattr(controller, "enabled", False):
             controller.should_finish = True
         return (
             f"STOP: {reason} Do not restart the initial design or call more "
             "planner tools. Return the final concise workflow summary now."
+        )
+
+    def _planner_terminal_failure_text(self) -> str:
+        failure = getattr(self, "_planner_terminal_failure", None)
+        if not isinstance(failure, dict):
+            return ""
+        return (
+            f"{failure.get('child_agent', 'child')} delegation "
+            f"{failure.get('operation', 'unknown')} failed with "
+            f"{failure.get('error_type', 'Exception')}: "
+            f"{failure.get('error', '')}"
+        ).strip()
+
+    def _planner_child_failure(self, failure: dict[str, Any]) -> PlannerStageFailure:
+        """Translate a child exception into a bounded, chainable planner failure."""
+        root_error_type = str(failure.get("error_type") or "Exception")
+        root_error_message = str(failure.get("error") or "")
+        retryable = root_error_type in {
+            "APITimeoutError",
+            "APIConnectionError",
+            "ConnectionError",
+            "MaxTurnsExceeded",
+            "Timeout",
+            "TimeoutError",
+        }
+        evidence = {
+            "child_agent": str(failure.get("child_agent") or "child"),
+            "recovered": bool(failure.get("recovered", False)),
+        }
+        checkpoint = failure.get("checkpoint")
+        if isinstance(checkpoint, dict):
+            evidence["checkpoint"] = dict(checkpoint)
+        return PlannerStageFailure(
+            reason="child_failure",
+            stage=self.agent_type.value,
+            workflow_calls=getattr(self, "_planner_designer_workflow_calls", 0),
+            successful_mutations=getattr(
+                self, "_planner_successful_designer_mutations", 0
+            ),
+            operation=str(failure.get("operation") or "unknown"),
+            stage_execution_attempt=getattr(self, "_stage_execution_attempt", 1),
+            retryable=retryable,
+            root_error_type=root_error_type,
+            root_error_message=root_error_message,
+            evidence=evidence,
+        )
+
+    def _mark_planner_terminal_failure_recovered(self) -> None:
+        failure = getattr(self, "_planner_terminal_failure", None)
+        if not isinstance(failure, dict) or failure.get("recovered"):
+            return
+        failure["recovered"] = True
+        self._record_planner_orchestration(
+            call_id=f"{self.agent_type.value}:deterministic_recovery",
+            phase="resume",
+            operation=str(failure.get("operation") or "unknown"),
+            child_agent=str(failure.get("child_agent") or "child"),
+            status="recovered",
+            detail={
+                "error_type": failure.get("error_type"),
+                "error": failure.get("error"),
+            },
         )
 
     def _planner_context_limit(self, key: str, default: int) -> int:
@@ -2141,16 +3122,16 @@ class BaseStatefulAgent(ABC):
 
     def _planner_budget_stop_message(self, tool_name: str) -> str:
         self._planner_budget_exhausted = True
-        controller = getattr(self, "furniture_safety_controller", None)
-        if controller and getattr(controller, "enabled", False):
-            controller.should_finish = True
+        next_action = (
+            "Use the pending deterministic hard-check repair before finishing."
+            if self._hard_repair_allowance_available()
+            else "Call finish_stage() now."
+        )
         return (
-            f"STOP: {tool_name} is blocked because the configured "
+            f"{tool_name} is blocked because the configured "
             f"max_critique_rounds={self.cfg.max_critique_rounds} budget has "
-            "been reached. Do not call request_critique(), "
-            "request_design_change(), or reset_scene_to_checkpoint() again. "
-            "Return your final concise workflow summary now. The framework will "
-            "run the final critique automatically after the planner exits."
+            "been reached. Do not request another scored critique cycle. "
+            f"{next_action}"
         )
 
     def _planner_budget_hint_after_critique(self) -> str:
@@ -2190,10 +3171,18 @@ class BaseStatefulAgent(ABC):
             return ""
         if self.cfg.max_critique_rounds <= 0:
             return ""
-        if self._planner_critique_tool_calls >= int(self.cfg.max_critique_rounds):
+        if self._planner_budget_exhausted or self._planner_critique_tool_calls >= int(
+            self.cfg.max_critique_rounds
+        ):
             self._planner_budget_exhausted = True
-            return "\n\n" + self._planner_budget_stop_message(
-                f"auto_score_after_{attempt_label.replace(' ', '_')}"
+            return (
+                "\n\n[Auto scoring] The scored-candidate budget is already "
+                "complete, so this design attempt was not scored again. "
+                + (
+                    "The pending deterministic hard repair must now be finalized."
+                    if self._hard_repair_allowance_available()
+                    else "Finish the stage and let final validation evaluate it."
+                )
             )
 
         current_hash = self.scene.content_hash()
@@ -2236,8 +3225,13 @@ class BaseStatefulAgent(ABC):
             self._planner_budget_exhausted = True
             budget_hint = (
                 "\n\n[Planner budget] The configured scored-candidate budget "
-                "is complete. Do not call more planner tools. Return the final "
-                "concise workflow summary now."
+                "is complete. Do not request another critique cycle. "
+                + (
+                    "A pending deterministic hard repair remains and may be "
+                    "executed once before final validation."
+                    if self._hard_repair_allowance_available()
+                    else "Call finish_stage() now."
+                )
             )
         return (
             f"\n\n## Auto Critique After {attempt_label.title()}\n"
@@ -2260,6 +3254,49 @@ class BaseStatefulAgent(ABC):
         """
         self._reset_planner_budget_tracking()
 
+        async def consume_pending_hard_repair(instruction: str, *, source: str) -> str:
+            """Consume the single pending hard-repair handoff and stop Runner."""
+            if not self._hard_repair_allowance_available():
+                return (
+                    "FINISH_STAGE_BLOCKED: no bounded hard-repair allowance is "
+                    "currently available."
+                )
+            repair_hint = self._pending_hard_repair_hint
+            repair_instruction = (
+                f"{instruction}\n\nMANDATORY HARD-CHECK REPAIR: {repair_hint}"
+            )
+            # Consume before delegation so a failed child call cannot be retried in
+            # a planner loop and obscure its original failure.
+            self._hard_repair_design_change_calls += 1
+            self._record_designer_workflow_attempt("request_design_change")
+            scene_hash_before = self._planner_scene_hash()
+            try:
+                result = await self._run_planner_delegation(
+                    operation="request_design_change",
+                    child_agent="designer",
+                    action=lambda: self._request_design_change_impl(repair_instruction),
+                    detail={"instruction": repair_instruction, "source": source},
+                )
+                self._record_successful_designer_mutation(scene_hash_before)
+                self._record_designer_workflow_evidence("request_design_change", result)
+            except Exception as exc:
+                console_logger.exception("Planner hard-repair design change failed")
+                return self._stop_planner_after_failure(
+                    "Designer hard repair failed with " f"{type(exc).__name__}: {exc}."
+                )
+            result += await self._score_design_attempt_if_configured("hard repair")
+            self._planner_budget_exhausted = True
+            self._planner_terminal_stop = True
+            controller = getattr(self, "furniture_safety_controller", None)
+            if controller and getattr(controller, "enabled", False):
+                controller.should_finish = True
+            return self._truncate_planner_tool_output(
+                "HARD_REPAIR_CONSUMED: final validation will now decide the stage.\n"
+                + result,
+                label="hard repair",
+                max_chars=self._planner_context_limit("design_change_max_chars", 5000),
+            )
+
         @function_tool
         async def request_initial_design() -> str:
             """Request the designer to create the initial design.
@@ -2270,7 +3307,7 @@ class BaseStatefulAgent(ABC):
             Returns:
                 Designer's report of what was created and why.
             """
-            if self._planner_budget_exhausted:
+            if getattr(self, "_planner_terminal_stop", False):
                 return self._stop_planner_after_failure(
                     "The current design stage has already been marked complete or failed."
                 )
@@ -2280,11 +3317,23 @@ class BaseStatefulAgent(ABC):
                     "completed."
                 )
             self._planner_initial_design_tool_calls += 1
-            result = await self._run_planner_delegation(
-                operation="request_initial_design",
-                child_agent="designer",
-                action=self._request_initial_design_impl,
-            )
+            self._record_designer_workflow_attempt("request_initial_design")
+            scene_hash_before = self._planner_scene_hash()
+            try:
+                result = await self._run_planner_delegation(
+                    operation="request_initial_design",
+                    child_agent="designer",
+                    action=self._request_initial_design_impl,
+                )
+                self._record_successful_designer_mutation(scene_hash_before)
+                self._record_designer_workflow_evidence(
+                    "request_initial_design", result
+                )
+            except Exception as exc:
+                console_logger.exception("Planner-requested initial design failed")
+                return self._stop_planner_after_failure(
+                    "Initial designer failed with " f"{type(exc).__name__}: {exc}."
+                )
             result += await self._score_design_attempt_if_configured("initial design")
             return self._truncate_planner_tool_output(
                 result,
@@ -2302,7 +3351,7 @@ class BaseStatefulAgent(ABC):
             Returns:
                 Critic's detailed evaluation with specific improvement suggestions.
             """
-            if self._planner_budget_exhausted:
+            if getattr(self, "_planner_terminal_stop", False):
                 return self._stop_planner_after_failure(
                     "The current design stage has already been marked complete or failed."
                 )
@@ -2321,6 +3370,8 @@ class BaseStatefulAgent(ABC):
                 return self._planner_budget_stop_message("request_critique")
 
             self._planner_critique_tool_calls += 1
+            if getattr(self, "_planner_review_existing", False):
+                self._planner_review_existing_workflow_calls += 1
             try:
                 result = await self._run_planner_delegation(
                     operation="request_critique",
@@ -2354,10 +3405,12 @@ class BaseStatefulAgent(ABC):
             Returns:
                 Designer's report of what was changed.
             """
-            if self._planner_budget_exhausted:
+            if getattr(self, "_planner_terminal_stop", False):
                 return self._stop_planner_after_failure(
                     "The current design stage has already been marked complete or failed."
                 )
+            if getattr(self, "_planner_review_existing", False):
+                self._planner_review_existing_workflow_calls += 1
             counts_as_critique_cycle = (
                 self._planner_critique_tool_calls
                 > self._planner_design_change_tool_calls
@@ -2384,19 +3437,27 @@ class BaseStatefulAgent(ABC):
 
             hard_repair_allowance = self._hard_repair_allowance_available()
             if hard_repair_allowance:
-                instruction = (
-                    f"{instruction}\n\nMANDATORY HARD-CHECK REPAIR: "
-                    f"{self._pending_hard_repair_hint}"
+                return await consume_pending_hard_repair(
+                    instruction,
+                    source="request_design_change",
                 )
 
-            result = await self._run_planner_delegation(
-                operation="request_design_change",
-                child_agent="designer",
-                action=lambda: self._request_design_change_impl(instruction),
-                detail={"instruction": instruction},
-            )
-            if hard_repair_allowance:
-                self._hard_repair_design_change_calls += 1
+            self._record_designer_workflow_attempt("request_design_change")
+            scene_hash_before = self._planner_scene_hash()
+            try:
+                result = await self._run_planner_delegation(
+                    operation="request_design_change",
+                    child_agent="designer",
+                    action=lambda: self._request_design_change_impl(instruction),
+                    detail={"instruction": instruction},
+                )
+                self._record_successful_designer_mutation(scene_hash_before)
+                self._record_designer_workflow_evidence("request_design_change", result)
+            except Exception as exc:
+                console_logger.exception("Planner-requested design change failed")
+                return self._stop_planner_after_failure(
+                    "Designer change failed with " f"{type(exc).__name__}: {exc}."
+                )
             result += await self._score_design_attempt_if_configured("design change")
             result = self._truncate_planner_tool_output(
                 result,
@@ -2423,13 +3484,23 @@ class BaseStatefulAgent(ABC):
                 Confirmation that the planner should return its final answer.
             """
             console_logger.info("Tool called: finish_stage")
-            if self._hard_repair_allowance_available():
+            if (
+                getattr(self, "_planner_review_existing", False)
+                and self._planner_review_existing_workflow_calls == 0
+            ):
                 return (
-                    "FINISH_STAGE_BLOCKED: a deterministic hard-check failure is "
-                    "still pending repair. You must call request_design_change() "
-                    f"first with this repair requirement: {self._pending_hard_repair_hint}"
+                    "FINISH_STAGE_BLOCKED: the restored candidate has not been "
+                    "reviewed. Call request_critique() or request_design_change() "
+                    "before finishing this stage."
+                )
+            if self._hard_repair_allowance_available():
+                return await consume_pending_hard_repair(
+                    "Repair the remaining deterministic hard-check failure while "
+                    "preserving all currently satisfied hard constraints.",
+                    source="finish_stage",
                 )
             self._planner_budget_exhausted = True
+            self._planner_terminal_stop = True
             controller = getattr(self, "furniture_safety_controller", None)
             if controller and getattr(controller, "enabled", False):
                 controller.should_finish = True
@@ -2587,6 +3658,7 @@ class BaseStatefulAgent(ABC):
                     "soft_reasons": hard_state.soft_reasons,
                 },
                 output=response.critique,
+                event_kind="system",
             )
             log_agent_response(response=response.critique, agent_name="CRITIC")
             log_critique_scores(response, title="DETERMINISTIC CRITIQUE SCORES")
@@ -2725,6 +3797,7 @@ class BaseStatefulAgent(ABC):
         # Step 1: force observe_scene; stop_on_first_tool returns immediately.
         console_logger.info("[CRITIC harness] Step 1: observe_scene")
         observe_start = time.time()
+        observe_request_start = time.perf_counter()
         async with self._reasoning_persistence_context_for_session(self.critic_session):
             with self.rendering_manager.use_render_profile(render_profile):
                 result_observe = await Runner.run(
@@ -2741,6 +3814,7 @@ class BaseStatefulAgent(ABC):
             prompt=critique_instruction,
             output=result_observe.final_output or "",
             result=result_observe,
+            elapsed_sec=time.perf_counter() - observe_request_start,
         )
 
         # Step 2: force get_current_scene_state; session carries Step 1 history.
@@ -2765,6 +3839,7 @@ class BaseStatefulAgent(ABC):
         else:
             console_logger.info("[CRITIC harness] Step 2: get_current_scene_state")
             scene_state_start = time.time()
+            scene_state_request_start = time.perf_counter()
             async with self._reasoning_persistence_context_for_session(
                 self.critic_session
             ):
@@ -2784,6 +3859,7 @@ class BaseStatefulAgent(ABC):
                 prompt="Now retrieve exact object data with get_current_scene_state.",
                 output=result_scene.final_output or "",
                 result=result_scene,
+                elapsed_sec=time.perf_counter() - scene_state_request_start,
             )
         if direct_scene_state:
             self._record_llm_call_debug(
@@ -2798,6 +3874,7 @@ class BaseStatefulAgent(ABC):
         # history and can run STEPS 3-6 of the YAML workflow.
         console_logger.info("[CRITIC harness] Step 3: evaluate and score")
         score_start = time.time()
+        score_request_start = time.perf_counter()
         score_prompt = (
             "Steps 1 and 2 of the MANDATORY EVALUATION WORKFLOW are "
             "complete (scene observed, object data retrieved). Now perform "
@@ -2825,6 +3902,7 @@ class BaseStatefulAgent(ABC):
                 prompt=score_prompt,
                 output=result.final_output or "",
                 result=result,
+                elapsed_sec=time.perf_counter() - score_request_start,
             )
             response = result.final_output
         except Exception as exc:
@@ -2849,6 +3927,8 @@ class BaseStatefulAgent(ABC):
                 prompt=score_prompt,
                 output=response.critique,
                 error=f"{type(exc).__name__}: {exc}",
+                exception=exc,
+                elapsed_sec=time.perf_counter() - score_request_start,
             )
 
         # Parse structured output or the conservative transport fallback.
@@ -3022,6 +4102,7 @@ class BaseStatefulAgent(ABC):
 
         # Designer run with critique-based instruction.
         designer_start = time.time()
+        request_start = time.perf_counter()
         render_dir_before = self.rendering_manager.last_render_dir
         try:
             async with self._reasoning_persistence_context_for_session(
@@ -3040,8 +4121,10 @@ class BaseStatefulAgent(ABC):
                 event="request_design_change",
                 prompt=full_instruction,
                 error=f"{type(exc).__name__}: {exc}",
+                exception=exc,
+                elapsed_sec=time.perf_counter() - request_start,
             )
-            self._end_furniture_design_transaction(transaction)
+            self._abort_furniture_design_transaction(transaction)
             raise
         self._record_module_timing("designer", "request_design_change", designer_start)
         log_agent_usage(result=result, agent_name="DESIGNER (CHANGE)")
@@ -3051,6 +4134,7 @@ class BaseStatefulAgent(ABC):
             prompt=full_instruction,
             output=result.final_output or "",
             result=result,
+            elapsed_sec=time.perf_counter() - request_start,
         )
 
         if result.final_output:
@@ -3158,6 +4242,7 @@ class BaseStatefulAgent(ABC):
 
         # Designer runs with initial design instruction.
         designer_start = time.time()
+        request_start = time.perf_counter()
         render_dir_before = self.rendering_manager.last_render_dir
         try:
             async with self._reasoning_persistence_context_for_session(
@@ -3176,8 +4261,10 @@ class BaseStatefulAgent(ABC):
                 event="request_initial_design",
                 prompt=input_message,
                 error=f"{type(exc).__name__}: {exc}",
+                exception=exc,
+                elapsed_sec=time.perf_counter() - request_start,
             )
-            self._end_furniture_design_transaction(transaction)
+            self._abort_furniture_design_transaction(transaction)
             raise
         self._record_module_timing("designer", "request_initial_design", designer_start)
         log_agent_usage(result=result, agent_name="DESIGNER (INITIAL)")
@@ -3187,6 +4274,7 @@ class BaseStatefulAgent(ABC):
             prompt=input_message,
             output=result.final_output or "",
             result=result,
+            elapsed_sec=time.perf_counter() - request_start,
         )
 
         if result.final_output:

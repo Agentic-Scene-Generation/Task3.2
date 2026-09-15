@@ -6,7 +6,9 @@ import time
 
 from dataclasses import dataclass
 
+from scenesmith.scene_expert.memory.placement import object_role
 from scenesmith.scene_expert.memory.retriever import _tokenize
+from scenesmith.scene_expert.memory.room_taxonomy import room_types_compatible
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
 from scenesmith.scene_expert.schemas import SceneTaskSpec
 
@@ -62,27 +64,34 @@ def object_overlap(record_objects: list[str], task_objects: list[str]) -> float:
 
 
 def room_compatible(record_room: str, task_room: str) -> bool:
-    """Return true when room labels are empty or token-compatible."""
-    if not record_room or not task_room:
-        return True
-    record_norm = record_room.lower().replace("_", " ").strip()
-    task_norm = task_room.lower().replace("_", " ").strip()
-    if record_norm == task_norm:
-        return True
-    return bool(normalized_token_set([record_room]) & normalized_token_set([task_room]))
+    """Return true only for canonical or explicitly compatible room types."""
+    return room_types_compatible(record_room, task_room)
 
 
 def record_required_objects(record: MemoryRecord) -> list[str]:
+    if record.placement_experience is not None:
+        return list(
+            dict.fromkeys(
+                object_role(obj)
+                for e in record.placement_experience.episodes
+                for obj in (e.subject, e.anchor)
+            )
+        )
     if isinstance(record, SuccessCase):
         return record.required_objects or record.task_signature
     if isinstance(record, FailureCase):
         return record.required_objects or ([record.object] if record.object else [])
-    return record.required_objects
+    return record.required_objects or record.applicability.required_object_roles
 
 
 def record_room_compatible(record: MemoryRecord, task_spec: SceneTaskSpec) -> bool:
     if isinstance(record, Skill):
-        rooms = list(record.room_types)
+        excluded_rooms = record.applicability.excluded_room_types
+        if excluded_rooms and any(
+            room_compatible(room, task_spec.room_type) for room in excluded_rooms
+        ):
+            return False
+        rooms = [*record.room_types, *record.applicability.room_types]
         if record.room_type:
             rooms.append(record.room_type)
         if not rooms:
@@ -159,8 +168,9 @@ def hybrid_score(
     stage: str,
     memory_type: str,
     weights: HybridScoreWeights = HybridScoreWeights(),
+    available_objects: list[str] | None = None,
 ) -> float:
-    task_objects = task_required_objects(task_spec, stage)
+    task_objects = task_required_objects(task_spec, stage) + (available_objects or [])
     obj_score = object_overlap(record_required_objects(record), task_objects)
     stage_room_score = room_stage_match(record, task_spec, stage)
     quality = compute_memory_quality(record, memory_type)

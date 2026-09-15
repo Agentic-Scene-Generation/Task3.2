@@ -19,6 +19,7 @@ from agents.run import RunResult
 from agents.tracing import custom_span
 from omegaconf import DictConfig
 
+from scenesmith.agent_utils.asset_scaling_policy import agent_rescale_tools_enabled
 from scenesmith.agent_utils.base_stateful_agent import (
     BaseStatefulAgent,
     log_agent_usage,
@@ -178,6 +179,7 @@ class StatefulCeilingAgent(BaseStatefulAgent, BaseCeilingAgent):
             room_width=room_width,
             room_depth=room_depth,
             ceiling_height=self.ceiling_height,
+            asset_rescaling_enabled=agent_rescale_tools_enabled(self.cfg),
         )
 
     def _create_critic_tools(self) -> list[FunctionTool]:
@@ -232,6 +234,7 @@ class StatefulCeilingAgent(BaseStatefulAgent, BaseCeilingAgent):
             room_width=room_width,
             room_depth=room_depth,
             ceiling_height=self.ceiling_height,
+            asset_rescaling_enabled=agent_rescale_tools_enabled(self.cfg),
         )
 
     def _create_planner_agent(

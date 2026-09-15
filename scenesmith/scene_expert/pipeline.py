@@ -30,17 +30,18 @@ import json
 import logging
 import os
 import time
+
 from pathlib import Path
 
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 
 from scenesmith.scene_expert.global_planner import GlobalPlanner
-from scenesmith.scene_expert.harness import STAGE_ORDER, Harness
+from scenesmith.scene_expert.harness import Harness
 from scenesmith.scene_expert.memory.retriever import MemoryRetriever
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.writer import MemoryWriter
-from scenesmith.scene_expert.repair_controller import RepairController
 from scenesmith.scene_expert.relation_context import StageRelationProjector
+from scenesmith.scene_expert.repair_controller import RepairController
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     MemoryPack,
@@ -256,8 +257,8 @@ class SceneExpertPipeline:
             (scene_path, trace_dict, full_report) tuple.
         """
         from scenesmith.experiments.indoor_scene_generation import (
-            _generate_single_scene,
             PIPELINE_STAGES,
+            _generate_single_scene,
         )
 
         scene_dir = output_dir / f"scene_{scene_id:03d}"
@@ -288,9 +289,7 @@ class SceneExpertPipeline:
 
         # Compile hard relations from the original prompt plus the normalized
         # SceneTaskSpec. The helper is a no-op when the embedded critic is disabled.
-        from scenesmith.scene_expert.hooks import (
-            _compile_intent_contract_if_enabled,
-        )
+        from scenesmith.scene_expert.hooks import _compile_intent_contract_if_enabled
 
         _intent_contract, intent_trace = _compile_intent_contract_if_enabled(
             prompt=prompt,
@@ -450,6 +449,8 @@ class SceneExpertPipeline:
                     task_spec=task_spec,
                 )
                 repair_actions.append(repair_result)
+                if decision.strategy in {"stage_regeneration", "local_repair"}:
+                    repair_result.execution_status = "executed"
 
                 if decision.strategy == "stage_regeneration":
                     # Re-run this stage with updated prompt incorporating repair action
@@ -569,8 +570,6 @@ class SceneExpertPipeline:
             exports=exports,
             model=self._cfg.furniture_agent.openai.model,
         )
-        trace_path = trace_logger.save(trace_dict)
-        console_logger.info(f"[SceneExpert] Trace saved to {trace_path}")
 
         # --- Step 6: Memory update ---
         console_logger.info("[SceneExpert] Updating fast memory")
@@ -578,11 +577,36 @@ class SceneExpertPipeline:
             memory_ops = self._memory_writer.write(
                 trace_summary=trace_summary,
                 full_report=full_report,
+                evidence_payload=trace_logger.build_memory_writer_evidence(),
             )
             qwen_call_count += 1
-            self._memory_store.apply_updates(memory_ops)
+            apply_summary = self._memory_store.apply_updates(memory_ops)
+            trace_logger.record_component_status(
+                "memory_writer",
+                {
+                    **dict(self._memory_writer.last_trace),
+                    "store_apply": apply_summary,
+                },
+            )
         except Exception as e:
             console_logger.warning(f"Memory update failed (non-fatal): {e}")
+            trace_logger.record_component_status(
+                "memory_writer",
+                {
+                    "success": False,
+                    "degraded": True,
+                    "source": "exception",
+                    "error": f"{type(e).__name__}: {e}",
+                },
+            )
+
+        trace_dict = trace_logger.finalize(
+            full_report=full_report,
+            exports=exports,
+            model=self._cfg.furniture_agent.openai.model,
+        )
+        trace_path = trace_logger.save(trace_dict)
+        console_logger.info(f"[SceneExpert] Trace saved to {trace_path}")
 
         console_logger.info(
             f"[SceneExpert] scene_{scene_id:03d} complete: "

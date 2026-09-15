@@ -1,10 +1,66 @@
 """Helpers for parsing LLM-produced JSON with compatibility fallbacks."""
 
 import json
+from copy import deepcopy
 
 from typing import Any
 
 import json_repair
+
+
+_LLAMACPP_MODEL_PREFIXES = ("qwen", "llama.cpp", "llama-cpp", "llama")
+
+
+def is_llamacpp_model(model: str) -> bool:
+    """Return whether ``model`` names a local llama.cpp-compatible model."""
+    normalized = str(model or "").strip().lower()
+    return normalized.startswith(_LLAMACPP_MODEL_PREFIXES)
+
+
+def _make_openai_strict_schema(schema: Any) -> Any:
+    """Normalize a JSON schema for OpenAI strict structured outputs.
+
+    OpenAI requires every property of every object to appear in ``required``.
+    Pydantic omits fields with defaults from that list, and llama.cpp accepts
+    that looser form, so the normalization is applied only to OpenAI calls.
+    """
+    if isinstance(schema, list):
+        return [_make_openai_strict_schema(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+
+    normalized = {
+        key: _make_openai_strict_schema(value) for key, value in schema.items()
+    }
+    # OpenAI strict structured outputs support a deliberately small JSON Schema
+    # subset. Conditional ``allOf`` branches are enforced later by Pydantic and
+    # the deterministic intent validator, so omit them from the wire schema.
+    normalized.pop("allOf", None)
+    properties = normalized.get("properties")
+    if normalized.get("type") == "object" and isinstance(properties, dict):
+        normalized["required"] = list(properties)
+        normalized["additionalProperties"] = False
+    return normalized
+
+
+def json_response_format(
+    *, model: str, name: str, schema: dict[str, Any]
+) -> dict[str, Any]:
+    """Build a structured-output request for OpenAI or llama.cpp endpoints."""
+    request_schema = (
+        schema
+        if is_llamacpp_model(model)
+        else _make_openai_strict_schema(deepcopy(schema))
+    )
+    payload: dict[str, Any] = {
+        "name": name,
+        "schema": request_schema,
+    }
+    # llama.cpp accepts the JSON Schema grammar but does not consistently
+    # implement OpenAI's strict-mode validation keyword.
+    if not is_llamacpp_model(model):
+        payload["strict"] = True
+    return {"type": "json_schema", "json_schema": payload}
 
 
 def extract_json_text(text: str) -> str:

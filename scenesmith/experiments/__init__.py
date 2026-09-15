@@ -15,6 +15,7 @@ exp_registry = dict(
     ablation_4b_qwen3_vector_memory=IndoorSceneGenerationExperiment,
     ablation_4c_qwen3_hybrid_memory=IndoorSceneGenerationExperiment,
     ablation_5_qwen3_full=IndoorSceneGenerationExperiment,
+    ablation_6_qwen3_full_scenebenchmark=IndoorSceneGenerationExperiment,
 )
 
 

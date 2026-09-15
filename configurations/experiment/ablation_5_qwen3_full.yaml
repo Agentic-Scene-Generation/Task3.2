@@ -1,47 +1,24 @@
-# Ablation 5: Qwen3 + Expert Harness + Fast Memory + Slow LoRA  (Full SceneExpert)
-# Complete system: online closed-loop + Qwen3 LoRA specialization (offline pre-trained).
-# LoRA checkpoint must be available at the path specified in agent configs.
+# Ablation 5: the validated 4c runtime plus observer-only Slow Memory capture.
 #
-# Component status:
-#   TaskCompiler:    ON
-#   Harness FSM:     ON
-#   Global Planner:  ON  (using LoRA-specialized Qwen3)
-#   Fast Memory:     ON
-#   Repair loop:     ON
-#   Trace logger:    ON
-#   Memory writer:   ON
-#   Slow LoRA:       ON  (set openai.model to the LoRA-merged/served model ID)
+# Scene generation intentionally inherits every 4c setting: Main critic and
+# deterministic repair ownership, degraded completion policy, structured LLM
+# transport, Hybrid Fast Memory, thresholds, and stage budgets. The sole mode
+# delta is replayable trajectory capture for later offline DPO curation.
 #
-# Prerequisites:
-#   1. Run offline SFT/DPO training on traces from ablation_4.
-#   2. Start a vLLM server with the LoRA-merged model.
-#   3. Set OPENAI_BASE_URL to the LoRA model endpoint.
-#   4. Override model ID: furniture_agent.openai.model="Qwen/Qwen3-SceneExpert-LoRA"
+# This experiment never starts training and never selects a model checkpoint.
+# Serve either the base or a trained candidate separately, then set
+# SCENEEXPERT_MODEL_ID to that server's exact alias.
 #
 # Usage:
-#   python main.py experiment=ablation_5_qwen3_full \
-#                  furniture_agent.openai.model="Qwen/Qwen3-SceneExpert-LoRA" \
-#                  [other agent model overrides]
+#   SCENEEXPERT_MODEL_ID="unsloth/Qwen3.8-27B-GGUF" \
+#     python main.py experiment=ablation_5_qwen3_full
 
 defaults:
-  - base_experiment
+  - ablation_4c_qwen3_hybrid_memory
+  - _self_
 
 scene_expert:
-  enabled: true
-  mode: "full"   # harness + memory + LoRA (same as harness_memory at runtime; model is the difference)
-  memory:
-    dir: "${paths.memory_dir}/ablation_5"
-    retrieval:
-      max_success_cases: 3
-      max_failure_cases: 3
-      max_skills: 2
-  stage_budget:
-    default:
-      max_designer_iterations: 2
-      max_repair_steps: 1
-    manipuland:
-      max_designer_iterations: 2
-      max_repair_steps: 2
-  verifier:
-    stage_pass_threshold: 0.6
-    full_pass_threshold: 0.7
+  mode: "full"
+  components:
+    slow_memory_capture:
+      enabled: true

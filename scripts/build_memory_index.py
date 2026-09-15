@@ -1,7 +1,7 @@
 """Build SceneExpert memory vector indexes from JSONL memory banks.
 
-This script is for PR-2 offline preparation only. The runtime hook still uses
-the lexical retriever until the hybrid retriever is introduced.
+The same builder is used for offline preparation and bounded runtime rebuilds
+when a hybrid retriever detects a missing or stale derived index.
 
 Example:
     python scripts/build_memory_index.py \
@@ -14,6 +14,8 @@ Example:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import sys
 
@@ -33,7 +35,10 @@ from scenesmith.scene_expert.memory.embedding import (
 from scenesmith.scene_expert.memory.index import NumpyMemoryIndex
 from scenesmith.scene_expert.memory.schemas import FailureCase, Skill, SuccessCase
 from scenesmith.scene_expert.memory.store import FastMemoryStore
-from scenesmith.scene_expert.memory.text_builder import build_embedding_text
+from scenesmith.scene_expert.memory.text_builder import (
+    EMBEDDING_TEXT_VERSION,
+    build_embedding_text,
+)
 
 STAGES = ("floor_plan", "furniture", "wall_mounted", "ceiling_mounted", "manipuland")
 MEMORY_TYPES = ("success", "failure", "skill")
@@ -74,6 +79,24 @@ def _record_id(record: SuccessCase | FailureCase | Skill) -> str:
     return record.skill_name
 
 
+def _records_fingerprint(
+    records: list[SuccessCase | FailureCase | Skill],
+) -> str:
+    payload = [
+        {
+            "memory_id": _record_id(record),
+            "status": record.status,
+            "embedding_text": build_embedding_text(record),
+            "quality_score": record.quality_score,
+            "confidence": record.confidence,
+        }
+        for record in records
+    ]
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
 def _record_required_objects(record: SuccessCase | FailureCase | Skill) -> list[str]:
     if isinstance(record, SuccessCase):
         return record.required_objects or record.task_signature
@@ -97,6 +120,14 @@ def _record_metadata(
         "quality_score": getattr(record, "quality_score", 0.5),
         "confidence": getattr(record, "confidence", 0.5),
         "trace_ref": getattr(record, "trace_ref", ""),
+        "status": getattr(record, "status", "active"),
+        "source": getattr(record, "source", "legacy"),
+        "source_task_id": getattr(record, "source_task_id", ""),
+        "source_run_id": getattr(record, "source_run_id", ""),
+        "source_task_ids": getattr(record, "source_task_ids", []),
+        "source_run_ids": getattr(record, "source_run_ids", []),
+        "prompt_fingerprint": getattr(record, "prompt_fingerprint", ""),
+        "bank_version": getattr(record, "bank_version", 0),
     }
 
 
@@ -104,9 +135,9 @@ def _records_by_type(
     store: FastMemoryStore,
 ) -> dict[str, list[SuccessCase | FailureCase | Skill]]:
     return {
-        "success": store.success_cases,
-        "failure": store.failure_cases,
-        "skill": store.skills,
+        "success": store.active_success_cases,
+        "failure": store.active_failure_cases,
+        "skill": store.active_skills,
     }
 
 
@@ -134,6 +165,7 @@ def build_memory_indexes(
     memory_types: tuple[str, ...] = MEMORY_TYPES,
     dry_run: bool = False,
     embedder: SceneMemoryEmbedder | None = None,
+    read_only_memory: bool = False,
 ) -> list[dict[str, Any]]:
     """Build per-bank/per-stage memory indexes.
 
@@ -147,11 +179,18 @@ def build_memory_indexes(
 
     memory_dir = Path(memory_dir)
     index_dir = Path(index_dir) if index_dir is not None else memory_dir / "indexes"
+    if read_only_memory and (
+        index_dir.resolve() == memory_dir.resolve()
+        or memory_dir.resolve() in index_dir.resolve().parents
+    ):
+        raise ValueError(
+            "Read-only memory requires an index directory outside the bank"
+        )
     model_dir = resolve_memory_embedding_model_dir(
         str(embedding_model_dir) if embedding_model_dir else None
     )
 
-    store = FastMemoryStore(str(memory_dir))
+    store = FastMemoryStore(str(memory_dir), read_only=read_only_memory)
     banks = _records_by_type(store)
     source_files = _source_files(memory_dir)
     needs_embedder = any(
@@ -178,16 +217,14 @@ def build_memory_indexes(
                 for idx, record in enumerate(records)
                 if record.stage == stage
             ]
-            texts = [
-                record.embedding_text or build_embedding_text(record)
-                for _, record in stage_records
-            ]
+            texts = [build_embedding_text(record) for _, record in stage_records]
             vectors = _encode_texts(texts, embedder)
             metadata = [
                 _record_metadata(record, memory_type, idx)
                 for idx, record in stage_records
             ]
             manifest = {
+                "embedding_text_version": EMBEDDING_TEXT_VERSION,
                 "built_at": datetime.now(timezone.utc).isoformat(),
                 "embedding_model_id": embedding_model_id,
                 "embedding_model_dir": str(model_dir),
@@ -195,6 +232,19 @@ def build_memory_indexes(
                 "stage": stage,
                 "normalize": True,
                 "source_files": source_files,
+                "memory_bank_id": store.bank_id,
+                "memory_bank_revision": store.revision,
+                "memory_type_revision": int(
+                    (store.manifest.get("bank_revisions", {}) or {}).get(
+                        memory_type, store.revision
+                    )
+                ),
+                "memory_record_schema_version": store.manifest.get(
+                    "record_schema_version", ""
+                ),
+                "records_fingerprint": _records_fingerprint(
+                    [record for _, record in stage_records]
+                ),
             }
             index = NumpyMemoryIndex.for_bank(index_dir, memory_type, stage)
             summary = {
@@ -279,6 +329,11 @@ def parse_args() -> argparse.Namespace:
         help="Memory banks to index.",
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--read-only-memory",
+        action="store_true",
+        help="Do not modify an existing bank; requires an external --index-dir.",
+    )
     return parser.parse_args()
 
 
@@ -301,6 +356,7 @@ def main() -> None:
         stages=tuple(args.stages),
         memory_types=tuple(args.memory_types),
         dry_run=args.dry_run,
+        read_only_memory=args.read_only_memory,
     )
 
     action = "Would build" if args.dry_run else "Built"

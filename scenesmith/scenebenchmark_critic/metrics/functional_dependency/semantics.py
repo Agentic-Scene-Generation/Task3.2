@@ -533,19 +533,18 @@ def _object_tokens(obj: dict[str, Any]) -> set[str]:
 
 def _scene_object_type(obj: dict[str, Any]) -> str:
     hints = obj.get("functional_hints") or {}
-    text = (
-        str(hints.get("scene_object_type") or "")
-        .strip()
-        .lower()
-        .replace("-", "_")
-        .replace(" ", "_")
-    )
-    return (
-        text
-        if text
-        in {"wall_mounted", "manipuland", "ceiling_mounted", "furniture", "unknown"}
-        else "unknown"
-    )
+    valid_types = {
+        "wall_mounted",
+        "manipuland",
+        "ceiling_mounted",
+        "furniture",
+        "unknown",
+    }
+    for value in (obj.get("object_type"), hints.get("scene_object_type")):
+        text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if text in valid_types:
+            return text
+    return "unknown"
 
 
 def _is_core_work_surface_target(target: dict[str, Any]) -> bool:

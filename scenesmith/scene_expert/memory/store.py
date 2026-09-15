@@ -1,109 +1,260 @@
-"""JSON-file-based persistent storage for the SceneExpert fast memory system.
+"""Versioned, process-safe JSONL storage for SceneExpert fast memory.
 
-Three banks stored as JSON Lines files:
-  {memory_dir}/success_cases.jsonl
-  {memory_dir}/failure_cases.jsonl
-  {memory_dir}/skills.jsonl
+JSONL remains the durable and inspectable MVP format. A small atomic manifest
+provides bank identity and monotonic revisioning so long-lived ACP workers can
+notice writes made by other processes and invalidate vector indexes safely.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import time
+import uuid
+
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel
 
 from scenesmith.scene_expert.memory.schemas import (
+    MEMORY_SCHEMA_VERSION,
     FailureCase,
     MemoryUpdateOp,
+    MemoryUtilityObservation,
     Skill,
     SuccessCase,
 )
+from scenesmith.scene_expert.memory.skill_identity import build_skill_semantic_signature
+from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 
 console_logger = logging.getLogger(__name__)
+MANIFEST_SCHEMA_VERSION = "sceneexpert.memory_manifest.v2"
 
 
 class FastMemoryStore:
-    """Append-only JSON Lines store for all three memory banks.
+    """Persistent memory banks with atomic batches and cross-process refresh."""
 
-    Loads everything into memory on init (files are small for MVP).
-    Writes are append-only for success/failure cases; skills are rewritten on update.
-    """
-
-    def __init__(self, memory_dir: str) -> None:
+    def __init__(self, memory_dir: str, *, read_only: bool = False) -> None:
         self._dir = Path(memory_dir)
-        self._dir.mkdir(parents=True, exist_ok=True)
-
+        self._read_only = bool(read_only)
+        if self._read_only:
+            if not self._dir.is_dir():
+                raise FileNotFoundError(
+                    f"Read-only memory bank does not exist: {self._dir}"
+                )
+        else:
+            self._dir.mkdir(parents=True, exist_ok=True)
         self._success_path = self._dir / "success_cases.jsonl"
         self._failure_path = self._dir / "failure_cases.jsonl"
         self._skills_path = self._dir / "skills.jsonl"
         self._events_path = self._dir / "events.jsonl"
-        for path in (
+        self._manifest_path = self._dir / "manifest.json"
+        record_paths = (
             self._success_path,
             self._failure_path,
             self._skills_path,
             self._events_path,
-        ):
-            path.touch(exist_ok=True)
+        )
+        if self._read_only:
+            missing = [str(path) for path in record_paths if not path.is_file()]
+            if missing:
+                raise FileNotFoundError(
+                    "Read-only memory bank is incomplete: " + ", ".join(missing)
+                )
+            if not self._manifest_path.is_file():
+                raise FileNotFoundError(
+                    f"Read-only memory manifest does not exist: {self._manifest_path}"
+                )
+        else:
+            for path in record_paths:
+                path.touch(exist_ok=True)
 
-        self.success_cases: list[SuccessCase] = self._load(
-            self._success_path, SuccessCase
-        )
-        self.failure_cases: list[FailureCase] = self._load(
-            self._failure_path, FailureCase
-        )
-        self.skills: list[Skill] = self._load(self._skills_path, Skill)
+        self.success_cases: list[SuccessCase] = []
+        self.failure_cases: list[FailureCase] = []
+        self.skills: list[Skill] = []
+        self._manifest: dict[str, Any] = {}
+        self._loaded_revision = -1
+        self._loaded_disk_signature: tuple[tuple[int, int], ...] = ()
+        self.last_apply_summary: dict[str, Any] = {}
+
+        with self._file_lock():
+            self._manifest = self._read_or_create_manifest_unlocked()
+            self._reload_from_disk_unlocked()
+            counts = self._record_counts()
+            if self._manifest.get("counts") != counts:
+                if self._read_only:
+                    raise ValueError(
+                        "Read-only memory manifest counts do not match record files"
+                    )
+                self._manifest["counts"] = counts
+                self._atomic_write_json(self._manifest_path, self._manifest)
+            self._loaded_revision = int(self._manifest.get("revision", 0))
+            self._loaded_disk_signature = self._disk_signature()
 
         console_logger.info(
-            f"FastMemoryStore loaded: {len(self.success_cases)} success cases, "
-            f"{len(self.failure_cases)} failure cases, {len(self.skills)} skills"
+            "FastMemoryStore loaded bank=%s revision=%d: %d success, %d failure, %d skills",
+            self.bank_id,
+            self.revision,
+            len(self.success_cases),
+            len(self.failure_cases),
+            len(self.skills),
         )
 
-    # ------------------------------------------------------------------
-    # Read helpers
-    # ------------------------------------------------------------------
+    @property
+    def memory_dir(self) -> Path:
+        return self._dir
 
-    def _load(self, path: Path, model_cls) -> list:
+    @property
+    def bank_id(self) -> str:
+        return str(self._manifest.get("bank_id", ""))
+
+    @property
+    def revision(self) -> int:
+        return int(self._manifest.get("revision", 0))
+
+    @property
+    def manifest(self) -> dict[str, Any]:
+        return dict(self._manifest)
+
+    @property
+    def read_only(self) -> bool:
+        return self._read_only
+
+    def snapshot_identity(self, *, refresh: bool = True) -> dict[str, Any]:
+        """Return a path-independent fingerprint of retrieval-affecting state."""
+        if refresh:
+            with self._file_lock():
+                self._manifest = self._read_or_create_manifest_unlocked()
+                self._reload_from_disk_unlocked()
+                self._loaded_revision = int(self._manifest.get("revision", 0))
+                self._loaded_disk_signature = self._disk_signature()
+        payload = {
+            "schema_version": "sceneexpert.memory_snapshot.v1",
+            "manifest_schema_version": str(self._manifest.get("schema_version") or ""),
+            "record_schema_version": str(
+                self._manifest.get("record_schema_version") or ""
+            ),
+            "bank_id": self.bank_id,
+            "revision": self.revision,
+            "bank_revisions": dict(self._manifest.get("bank_revisions") or {}),
+            "records": {
+                "success": sorted(
+                    (record.model_dump(mode="json") for record in self.success_cases),
+                    key=lambda record: str(record.get("case_id") or ""),
+                ),
+                "failure": sorted(
+                    (record.model_dump(mode="json") for record in self.failure_cases),
+                    key=lambda record: str(record.get("failure_id") or ""),
+                ),
+                "skill": sorted(
+                    (record.model_dump(mode="json") for record in self.skills),
+                    key=lambda record: (
+                        str(record.get("semantic_signature") or ""),
+                        str(record.get("skill_name") or ""),
+                    ),
+                ),
+            },
+        }
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return {
+            "schema_version": payload["schema_version"],
+            "bank_id": self.bank_id,
+            "revision": self.revision,
+            "bank_revisions": payload["bank_revisions"],
+            "record_counts": self._record_counts(),
+            "content_fingerprint": (
+                f"sceneexpert.memory_snapshot.v1:{fingerprint[:24]}"
+            ),
+            "memory_dir": str(self._dir.resolve()),
+            "read_only": self._read_only,
+        }
+
+    @property
+    def active_success_cases(self) -> list[SuccessCase]:
+        return [record for record in self.success_cases if record.status == "active"]
+
+    @property
+    def active_failure_cases(self) -> list[FailureCase]:
+        return [record for record in self.failure_cases if record.status == "active"]
+
+    @property
+    def active_skills(self) -> list[Skill]:
+        return [record for record in self.skills if record.status == "active"]
+
+    def refresh_if_changed(self, *, force: bool = False) -> bool:
+        """Reload records when another process changes the bank or manifest."""
+        disk_manifest = self._read_manifest()
+        disk_revision = int(disk_manifest.get("revision", -1)) if disk_manifest else -1
+        disk_signature = self._disk_signature()
+        if (
+            not force
+            and disk_revision == self._loaded_revision
+            and disk_signature == self._loaded_disk_signature
+        ):
+            return False
+
+        with self._file_lock():
+            self._manifest = self._read_or_create_manifest_unlocked()
+            self._reload_from_disk_unlocked()
+            self._loaded_revision = int(self._manifest.get("revision", 0))
+            self._loaded_disk_signature = self._disk_signature()
+        console_logger.info(
+            "FastMemoryStore refreshed bank=%s revision=%d", self.bank_id, self.revision
+        )
+        return True
+
+    def _load(self, path: Path, model_cls: type[BaseModel]) -> list[Any]:
+        records: list[Any] = []
         if not path.exists():
-            return []
-        records = []
-        with path.open() as f:
-            for line in f:
-                line = line.strip()
-                if not line:
+            return records
+        with path.open(encoding="utf-8") as file:
+            for line_number, line in enumerate(file, start=1):
+                text = line.strip()
+                if not text:
                     continue
                 try:
-                    records.append(model_cls.model_validate(json.loads(line)))
-                except Exception as e:
+                    records.append(model_cls.model_validate(json.loads(text)))
+                except Exception as exc:
                     console_logger.warning(
-                        f"Skipping malformed memory record in {path}: {e}"
+                        "Skipping malformed memory record in %s:%d: %s",
+                        path,
+                        line_number,
+                        exc,
                     )
         return records
 
-    def _reload_from_disk(self) -> None:
-        """Refresh in-memory records before a locked write batch."""
+    def _reload_from_disk_unlocked(self) -> None:
         self.success_cases = self._load(self._success_path, SuccessCase)
         self.failure_cases = self._load(self._failure_path, FailureCase)
         self.skills = self._load(self._skills_path, Skill)
 
     @contextmanager
     def _file_lock(self):
-        """Advisory memory-dir lock.
-
-        ACP runs on Linux, where fcntl gives us a process-safe lock. On platforms
-        without fcntl this degrades to a best-effort no-op for local editing.
-        """
+        """Advisory directory lock (process-safe on the Linux ACP runtime)."""
+        if self._read_only:
+            # A frozen evaluator never creates even a lock file in the bank.
+            # Start/end content fingerprints detect out-of-process drift.
+            yield
+            return
         lock_path = self._dir / ".memory.lock"
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
         with lock_path.open("a+") as lock_file:
             try:
                 import fcntl
 
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             except Exception:
+                # Local Windows development is sequential in tests. ACP runs on
+                # Linux where fcntl gives a real inter-process lock.
                 time.sleep(0.01)
             try:
                 yield
@@ -115,126 +266,919 @@ class FastMemoryStore:
                 except Exception:
                     pass
 
-    def _success_signature(self, case: SuccessCase) -> str:
+    def _new_manifest(self) -> dict[str, Any]:
+        now = self._now()
+        return {
+            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "record_schema_version": MEMORY_SCHEMA_VERSION,
+            "bank_id": str(uuid.uuid4()),
+            "revision": 0,
+            "bank_revisions": {"success": 0, "failure": 0, "skill": 0},
+            "created_at": now,
+            "updated_at": now,
+            "last_mutation": "initialized",
+            "counts": self._record_counts(),
+        }
+
+    def _read_manifest(self) -> dict[str, Any]:
+        if not self._manifest_path.exists():
+            return {}
+        try:
+            value = json.loads(self._manifest_path.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else {}
+        except Exception as exc:
+            console_logger.warning("Memory manifest is unreadable: %s", exc)
+            return {}
+
+    def _read_or_create_manifest_unlocked(self) -> dict[str, Any]:
+        manifest = self._read_manifest()
+        if manifest.get("bank_id") and isinstance(manifest.get("revision"), int):
+            changed = False
+            if not isinstance(manifest.get("bank_revisions"), dict):
+                manifest["bank_revisions"] = {
+                    "success": int(manifest.get("revision", 0)),
+                    "failure": int(manifest.get("revision", 0)),
+                    "skill": int(manifest.get("revision", 0)),
+                }
+                changed = True
+            if not manifest.get("record_schema_version"):
+                manifest["record_schema_version"] = MEMORY_SCHEMA_VERSION
+                changed = True
+            if changed:
+                if self._read_only:
+                    raise ValueError(
+                        "Read-only memory manifest requires an in-place migration"
+                    )
+                self._atomic_write_json(self._manifest_path, manifest)
+            return manifest
+        if self._read_only:
+            raise ValueError("Read-only memory bank has no valid manifest identity")
+        manifest = self._new_manifest()
+        self._atomic_write_json(self._manifest_path, manifest)
+        return manifest
+
+    def _record_counts(self) -> dict[str, Any]:
+        return {
+            "success": len(self.success_cases),
+            "failure": len(self.failure_cases),
+            "skill": len(self.skills),
+            "active_success": sum(x.status == "active" for x in self.success_cases),
+            "active_failure": sum(x.status == "active" for x in self.failure_cases),
+            "active_skill": sum(x.status == "active" for x in self.skills),
+            "candidate_skill": sum(x.status == "candidate" for x in self.skills),
+            "quarantined_skill": sum(x.status == "quarantined" for x in self.skills),
+        }
+
+    def _disk_signature(self) -> tuple[tuple[int, int], ...]:
+        signature: list[tuple[int, int]] = []
+        for path in (
+            self._success_path,
+            self._failure_path,
+            self._skills_path,
+            self._manifest_path,
+        ):
+            try:
+                stat = path.stat()
+                signature.append((stat.st_mtime_ns, stat.st_size))
+            except FileNotFoundError:
+                signature.append((0, 0))
+        return tuple(signature)
+
+    @staticmethod
+    def _success_signature(case: SuccessCase) -> str:
         return "|".join(
             [
-                case.room_type.lower(),
-                case.stage.lower(),
-                case.style.lower(),
-                " ".join(sorted(x.lower() for x in case.task_signature)),
-                " ".join(x.lower() for x in case.successful_pattern),
+                case.room_type.casefold(),
+                case.stage.casefold(),
+                case.style.casefold(),
+                " ".join(sorted(x.casefold() for x in case.task_signature)),
+                " ".join(x.casefold() for x in case.successful_pattern),
+                " ".join(x.casefold() for x in case.positive_guidance),
+                FastMemoryStore._spatial_signature(case),
             ]
         )
 
-    def _failure_signature(self, case: FailureCase) -> str:
+    @staticmethod
+    def _failure_signature(case: FailureCase) -> str:
         return "|".join(
             [
-                case.room_type.lower(),
-                case.stage.lower(),
-                case.object.lower(),
-                case.failure_type.lower(),
-                case.bad_pattern.lower(),
-                case.failure_reason.lower(),
+                case.room_type.casefold(),
+                case.stage.casefold(),
+                case.object.casefold(),
+                case.failure_type.casefold(),
+                case.bad_pattern.casefold(),
+                case.failure_reason.casefold(),
+                case.repair_action.casefold(),
+                FastMemoryStore._spatial_signature(case),
             ]
         )
 
-    def _skill_signature(self, skill: Skill) -> str:
-        return skill.skill_name.strip().lower()
+    @staticmethod
+    def _skill_signature(skill: Skill) -> str:
+        return skill.semantic_signature or build_skill_semantic_signature(skill)
 
-    # ------------------------------------------------------------------
-    # Write helpers
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _spatial_signature(record: Any) -> str:
+        """Do not merge evidence for different spatial claims as one lesson."""
+        claims = {
+            json.dumps(
+                relation.model_dump(
+                    mode="json",
+                    include={
+                        "relation_type",
+                        "subject_role",
+                        "target_role",
+                        "cardinality",
+                        "normalized_offset",
+                        "yaw_delta_deg",
+                        "clearance_m",
+                        "template_parameters",
+                    },
+                ),
+                sort_keys=True,
+                ensure_ascii=False,
+            )
+            for relation in record.spatial_relations
+        }
+        experience = getattr(record, "placement_experience", None)
+        if experience is not None:
+            # Same prose/role pair can describe different procedures or exact
+            # observations. Do not merge away the incoming immutable experience
+            # while retaining only the old geometry. Legacy signatures stay unchanged.
+            claims.add(
+                "placement_experience:"
+                + hashlib.sha256(
+                    json.dumps(
+                        experience.model_dump(mode="json"),
+                        sort_keys=True,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+            )
+        return json.dumps(sorted(claims), ensure_ascii=False)
 
-    def _append(self, path: Path, record: BaseModel) -> None:
-        with path.open("a") as f:
-            f.write(record.model_dump_json() + "\n")
+    def _rewrite(self, path: Path, records: list[BaseModel]) -> None:
+        temporary = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
+        with temporary.open("w", encoding="utf-8", newline="\n") as file:
+            for record in records:
+                file.write(record.model_dump_json() + "\n")
+            file.flush()
+            os.fsync(file.fileno())
+        temporary.replace(path)
 
-    def _rewrite(self, path: Path, records: list) -> None:
-        with path.open("w") as f:
-            for r in records:
-                f.write(r.model_dump_json() + "\n")
+    @staticmethod
+    def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+        temporary = path.with_suffix(path.suffix + f".{uuid.uuid4().hex}.tmp")
+        with temporary.open("w", encoding="utf-8", newline="\n") as file:
+            json.dump(payload, file, indent=2, ensure_ascii=False, default=str)
+            file.flush()
+            os.fsync(file.fileno())
+        temporary.replace(path)
 
-    def append_event(self, event: dict) -> None:
-        """Append a durable debug/event record to the shared memory bank."""
+    def append_event(self, event: dict[str, Any]) -> None:
+        """Append auditable evidence without promoting it into active memory."""
+        self._ensure_writable("append_event")
         with self._file_lock():
-            with self._events_path.open("a", encoding="utf-8", newline="\n") as f:
-                f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+            with self._events_path.open("a", encoding="utf-8", newline="\n") as file:
+                file.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+                file.flush()
 
-    # ------------------------------------------------------------------
-    # Public write methods
-    # ------------------------------------------------------------------
+    def add_success_case(self, case: SuccessCase) -> bool:
+        summary = self.apply_updates(
+            [
+                MemoryUpdateOp(
+                    op="ADD", memory_type="success_case", content=case.model_dump()
+                )
+            ]
+        )
+        return bool(summary["changed"])
 
-    def add_success_case(self, case: SuccessCase) -> None:
-        existing = {self._success_signature(c) for c in self.success_cases}
-        if self._success_signature(case) in existing or any(
-            c.case_id == case.case_id for c in self.success_cases
-        ):
-            console_logger.info(
-                f"Memory: skipped duplicate success case {case.case_id}"
-            )
-            return
-        self.success_cases.append(case)
-        self._append(self._success_path, case)
-        console_logger.debug(f"Memory: added success case {case.case_id}")
+    def add_failure_case(self, case: FailureCase) -> bool:
+        summary = self.apply_updates(
+            [
+                MemoryUpdateOp(
+                    op="ADD", memory_type="failure_case", content=case.model_dump()
+                )
+            ]
+        )
+        return bool(summary["changed"])
 
-    def add_failure_case(self, case: FailureCase) -> None:
-        existing = {self._failure_signature(c) for c in self.failure_cases}
-        if self._failure_signature(case) in existing or any(
-            c.failure_id == case.failure_id for c in self.failure_cases
-        ):
-            console_logger.info(
-                f"Memory: skipped duplicate failure case {case.failure_id}"
-            )
-            return
-        self.failure_cases.append(case)
-        self._append(self._failure_path, case)
-        console_logger.debug(f"Memory: added failure case {case.failure_id}")
+    def add_skill(self, skill: Skill) -> bool:
+        summary = self.apply_updates(
+            [MemoryUpdateOp(op="ADD", memory_type="skill", content=skill.model_dump())]
+        )
+        return bool(summary["changed"])
 
-    def add_skill(self, skill: Skill) -> None:
-        existing = {self._skill_signature(s) for s in self.skills}
-        if self._skill_signature(skill) in existing:
-            console_logger.info(f"Memory: skipped duplicate skill {skill.skill_name}")
-            return
-        self.skills.append(skill)
-        self._append(self._skills_path, skill)
-        console_logger.debug(f"Memory: added skill {skill.skill_name}")
+    def update_success_case(self, case_id: str, updates: dict[str, Any]) -> bool:
+        summary = self.apply_updates(
+            [
+                MemoryUpdateOp(
+                    op="UPDATE",
+                    memory_type="success_case",
+                    target_id=case_id,
+                    content=updates,
+                )
+            ]
+        )
+        return bool(summary["changed"])
 
-    def update_skill(self, skill_name: str, updates: dict) -> None:
-        for skill in self.skills:
-            if skill.skill_name == skill_name:
-                updated = skill.model_copy(update=updates)
-                self.skills[self.skills.index(skill)] = updated
+    def update_failure_case(self, failure_id: str, updates: dict[str, Any]) -> bool:
+        summary = self.apply_updates(
+            [
+                MemoryUpdateOp(
+                    op="UPDATE",
+                    memory_type="failure_case",
+                    target_id=failure_id,
+                    content=updates,
+                )
+            ]
+        )
+        return bool(summary["changed"])
+
+    def update_skill(self, skill_name: str, updates: dict[str, Any]) -> bool:
+        summary = self.apply_updates(
+            [
+                MemoryUpdateOp(
+                    op="UPDATE",
+                    memory_type="skill",
+                    target_id=skill_name,
+                    content=updates,
+                )
+            ]
+        )
+        return bool(summary["changed"])
+
+    def record_skill_outcomes(
+        self,
+        observations: list[MemoryUtilityObservation],
+        *,
+        harmful_quarantine_threshold: int = 2,
+    ) -> dict[str, Any]:
+        """Learn from independently verified downstream skill observations.
+
+        A repeated run of the same task is useful for experiment metrics but is
+        not independent evidence for mutating a reusable skill.  Therefore the
+        durable bank accepts at most one utility observation per task, retains
+        the run ID for provenance, and never treats the skill's source task as
+        transfer evidence. Different tasks within one ACP run remain independent.
+        """
+        self._ensure_writable("record_skill_outcomes")
+        updated = 0
+        quarantined: list[str] = []
+        skipped_non_skill = 0
+        skipped_unverified = 0
+        skipped_non_independent = 0
+        with self._file_lock():
+            self._manifest = self._read_or_create_manifest_unlocked()
+            self._reload_from_disk_unlocked()
+            next_revision = int(self._manifest.get("revision", 0)) + 1
+
+            for observation in observations:
+                if observation.memory_type != "skill":
+                    skipped_non_skill += 1
+                    continue
+                if (
+                    not observation.prompt_delivered
+                    or observation.outcome not in {"positive", "negative"}
+                    or not observation.task_id
+                    or not observation.run_id
+                ):
+                    skipped_unverified += 1
+                    continue
+                skill_index = next(
+                    (
+                        index
+                        for index, skill in enumerate(self.skills)
+                        if skill.skill_name.casefold()
+                        == observation.memory_id.casefold()
+                    ),
+                    None,
+                )
+                if skill_index is None:
+                    skipped_unverified += 1
+                    continue
+                skill = self.skills[skill_index]
+                source_tasks = {
+                    skill.source_task_id,
+                    *skill.source_task_ids,
+                } - {""}
+                observed_tasks = {
+                    item.task_id for item in skill.utility_observations if item.task_id
+                }
+                if (
+                    observation.task_id in source_tasks
+                    or observation.task_id in observed_tasks
+                ):
+                    skipped_non_independent += 1
+                    continue
+
+                positive = skill.positive_utility_count + int(
+                    observation.outcome == "positive"
+                )
+                negative = skill.negative_utility_count + int(
+                    observation.outcome == "negative"
+                )
+                status = skill.status
+                if (
+                    negative >= max(2, int(harmful_quarantine_threshold))
+                    and negative > positive
+                ):
+                    status = "quarantined"
+                    quarantined.append(skill.skill_name)
+                # Beta(1,1) posterior keeps one successful transfer from
+                # spuriously producing a perfect utility estimate.
+                success_rate = (positive + 1.0) / (positive + negative + 2.0)
+                retained_observations = [
+                    *skill.utility_observations[-63:],
+                    observation,
+                ]
+                changed = skill.model_copy(
+                    update={
+                        "status": status,
+                        "positive_utility_count": positive,
+                        "negative_utility_count": negative,
+                        "success_rate": success_rate,
+                        "utility_observations": retained_observations,
+                        "usage_count": skill.usage_count + 1,
+                        "last_used_at": self._now(),
+                        "updated_at": self._now(),
+                        "bank_version": next_revision,
+                    }
+                )
+                self.skills[skill_index] = changed.model_copy(
+                    update={"embedding_text": build_embedding_text(changed)}
+                )
+                updated += 1
+
+            if updated:
                 self._rewrite(self._skills_path, self.skills)
-                console_logger.debug(f"Memory: updated skill {skill_name}")
-                return
-        console_logger.warning(f"Memory: skill not found for update: {skill_name}")
+                now = self._now()
+                bank_revisions = dict(self._manifest.get("bank_revisions") or {})
+                bank_revisions["skill"] = int(bank_revisions.get("skill", 0)) + 1
+                self._manifest.update(
+                    {
+                        "schema_version": MANIFEST_SCHEMA_VERSION,
+                        "record_schema_version": MEMORY_SCHEMA_VERSION,
+                        "revision": next_revision,
+                        "bank_revisions": bank_revisions,
+                        "updated_at": now,
+                        "last_mutation": "record_skill_outcomes",
+                        "counts": self._record_counts(),
+                    }
+                )
+                self._atomic_write_json(self._manifest_path, self._manifest)
 
-    def apply_updates(self, ops: list[MemoryUpdateOp]) -> None:
-        """Apply a batch of memory update operations from the MemoryWriter."""
+            self._loaded_revision = int(self._manifest.get("revision", 0))
+            self._loaded_disk_signature = self._disk_signature()
+
+        summary = {
+            "changed": updated > 0,
+            "revision": self.revision,
+            "updated": updated,
+            "quarantined": sorted(set(quarantined)),
+            "skipped_non_skill": skipped_non_skill,
+            "skipped_unverified": skipped_unverified,
+            "skipped_non_independent": skipped_non_independent,
+        }
+        self.last_apply_summary = summary
+        return summary
+
+    def apply_updates(self, ops: list[MemoryUpdateOp]) -> dict[str, Any]:
+        """Apply one atomic, deduplicated mutation batch and increment revision once."""
+        self._ensure_writable("apply_updates")
+        changed_banks: set[str] = set()
+        added = 0
+        updated = 0
+        merged = 0
+        skill_candidate_added = 0
+        skill_candidate_merged = 0
+        skill_promoted_active = 0
+        active_records_changed = 0
+        changed_counts: dict[str, int] = {}
+        active_changed_counts: dict[str, int] = {}
         with self._file_lock():
-            self._reload_from_disk()
+            self._manifest = self._read_or_create_manifest_unlocked()
+            self._reload_from_disk_unlocked()
+            next_revision = int(self._manifest.get("revision", 0)) + 1
+
             for op in ops:
                 if op.op == "NOOP":
                     continue
                 if op.op == "ADD":
-                    if op.memory_type == "success_case":
-                        self.add_success_case(SuccessCase.model_validate(op.content))
-                    elif op.memory_type == "failure_case":
-                        self.add_failure_case(FailureCase.model_validate(op.content))
-                    elif op.memory_type == "skill":
-                        self.add_skill(Skill.model_validate(op.content))
-                    else:
-                        console_logger.warning(
-                            f"Unknown memory_type for ADD: {op.memory_type}"
-                        )
-                elif op.op == "UPDATE":
+                    skill_before: Skill | None = None
+                    incoming_skill: Skill | None = None
                     if op.memory_type == "skill":
-                        self.update_skill(
-                            op.target_id or op.content.get("skill_name", ""), op.content
+                        incoming_skill = self._normalized_skill(op.content)
+                        skill_before = self._find_skill_unlocked(incoming_skill)
+                    changed, was_merged = self._apply_add_unlocked(op, next_revision)
+                    if changed:
+                        changed_banks.add(op.memory_type)
+                        changed_counts[op.memory_type] = (
+                            changed_counts.get(op.memory_type, 0) + 1
                         )
-                    else:
-                        console_logger.warning(
-                            f"UPDATE not supported for memory_type: {op.memory_type}"
+                        if self._mutation_is_active(op):
+                            active_records_changed += 1
+                            active_changed_counts[op.memory_type] = (
+                                active_changed_counts.get(op.memory_type, 0) + 1
+                            )
+                        if was_merged:
+                            merged += 1
+                        else:
+                            added += 1
+                        if incoming_skill is not None:
+                            skill_after = self._find_skill_unlocked(incoming_skill)
+                            if skill_after is not None:
+                                if (
+                                    skill_before is None
+                                    and skill_after.status == "candidate"
+                                ):
+                                    skill_candidate_added += 1
+                                elif (
+                                    skill_before is not None
+                                    and skill_before.status == "candidate"
+                                    and skill_after.status == "candidate"
+                                ):
+                                    skill_candidate_merged += 1
+                                if skill_after.status == "active" and (
+                                    skill_before is None
+                                    or skill_before.status != "active"
+                                ):
+                                    skill_promoted_active += 1
+                elif op.op == "UPDATE":
+                    if self._apply_update_unlocked(op, next_revision):
+                        changed_banks.add(op.memory_type)
+                        updated += 1
+                        changed_counts[op.memory_type] = (
+                            changed_counts.get(op.memory_type, 0) + 1
                         )
-                else:
-                    console_logger.warning(f"Unknown memory op: {op.op}")
+                        if self._mutation_is_active(op):
+                            active_records_changed += 1
+                            active_changed_counts[op.memory_type] = (
+                                active_changed_counts.get(op.memory_type, 0) + 1
+                            )
+
+            if "success_case" in changed_banks:
+                self._rewrite(self._success_path, self.success_cases)
+            if "failure_case" in changed_banks:
+                self._rewrite(self._failure_path, self.failure_cases)
+            if "skill" in changed_banks:
+                self._rewrite(self._skills_path, self.skills)
+
+            if changed_banks:
+                now = self._now()
+                bank_revisions = dict(self._manifest.get("bank_revisions") or {})
+                for memory_type in changed_banks:
+                    bank_name = {
+                        "success_case": "success",
+                        "failure_case": "failure",
+                        "skill": "skill",
+                    }[memory_type]
+                    bank_revisions[bank_name] = (
+                        int(bank_revisions.get(bank_name, 0)) + 1
+                    )
+                self._manifest.update(
+                    {
+                        "schema_version": MANIFEST_SCHEMA_VERSION,
+                        "record_schema_version": MEMORY_SCHEMA_VERSION,
+                        "revision": next_revision,
+                        "bank_revisions": bank_revisions,
+                        "updated_at": now,
+                        "last_mutation": "apply_updates",
+                        "counts": self._record_counts(),
+                    }
+                )
+                self._atomic_write_json(self._manifest_path, self._manifest)
+
+            self._loaded_revision = int(self._manifest.get("revision", 0))
+            self._loaded_disk_signature = self._disk_signature()
+
+        summary = {
+            "changed": bool(changed_banks),
+            "revision": self.revision,
+            "added": added,
+            "updated": updated,
+            "merged": merged,
+            "changed_banks": sorted(changed_banks),
+            "skill_candidate_added": skill_candidate_added,
+            "skill_candidate_merged": skill_candidate_merged,
+            "skill_promoted_active": skill_promoted_active,
+            "active_records_changed": active_records_changed,
+            "changed_counts": changed_counts,
+            "active_changed_counts": active_changed_counts,
+        }
+        self.last_apply_summary = summary
+        return summary
+
+    def _mutation_is_active(self, op: MemoryUpdateOp) -> bool:
+        """Inspect the stored result, not a candidate's requested status."""
+        records, identity, signature, model = {
+            "success_case": (
+                self.success_cases,
+                "case_id",
+                self._success_signature,
+                SuccessCase,
+            ),
+            "failure_case": (
+                self.failure_cases,
+                "failure_id",
+                self._failure_signature,
+                FailureCase,
+            ),
+            "skill": (self.skills, "skill_name", self._skill_signature, Skill),
+        }[op.memory_type]
+        target = op.target_id or str(op.content.get(identity, ""))
+        incoming = model.model_validate(op.content) if op.op == "ADD" else None
+        return any(
+            record.status == "active"
+            and (
+                (incoming is not None and signature(record) == signature(incoming))
+                or (incoming is None and str(getattr(record, identity)) == target)
+            )
+            for record in records
+        )
+
+    @staticmethod
+    def _normalized_skill(content: dict[str, Any]) -> Skill:
+        record = Skill.model_validate(content)
+        signature = record.semantic_signature or build_skill_semantic_signature(record)
+        source_tasks = FastMemoryStore._unique(
+            [
+                *record.source_task_ids,
+                record.source_task_id,
+            ]
+        )
+        aliases = FastMemoryStore._unique([*record.skill_aliases, record.skill_name])
+        return record.model_copy(
+            update={
+                "semantic_signature": signature,
+                "skill_aliases": aliases,
+                "source_task_ids": source_tasks,
+                "independent_support_count": max(1, len(source_tasks)),
+                "activation_min_independent_support": max(
+                    2, int(record.activation_min_independent_support)
+                ),
+            }
+        )
+
+    def _find_skill_unlocked(self, incoming: Skill) -> Skill | None:
+        incoming_signature = self._skill_signature(incoming)
+        return next(
+            (
+                skill
+                for skill in self.skills
+                if self._skill_signature(skill) == incoming_signature
+            ),
+            None,
+        )
+
+    def _apply_add_unlocked(
+        self, op: MemoryUpdateOp, revision: int
+    ) -> tuple[bool, bool]:
+        if op.memory_type == "success_case":
+            record = SuccessCase.model_validate(op.content).model_copy(
+                update={"bank_version": revision}
+            )
+            return self._add_or_merge_unlocked(
+                self.success_cases,
+                record,
+                identity=lambda item: item.case_id,
+                signature=self._success_signature,
+            )
+        if op.memory_type == "failure_case":
+            record = FailureCase.model_validate(op.content).model_copy(
+                update={"bank_version": revision}
+            )
+            return self._add_or_merge_unlocked(
+                self.failure_cases,
+                record,
+                identity=lambda item: item.failure_id,
+                signature=self._failure_signature,
+            )
+        record = self._normalized_skill(op.content).model_copy(
+            update={"bank_version": revision}
+        )
+        record_tasks = {record.source_task_id, *record.source_task_ids} - {""}
+        if any(
+            skill.skill_name.casefold() == record.skill_name.casefold()
+            and bool(
+                record_tasks & ({skill.source_task_id, *skill.source_task_ids} - {""})
+            )
+            and self._skill_signature(skill) != self._skill_signature(record)
+            for skill in self.skills
+        ):
+            # A retry of the same task is not independent evidence and must not
+            # fork an existing named Skill merely because the LLM paraphrased
+            # its procedure. A genuinely different task may still contribute a
+            # distinct, identically named Skill with different semantics.
+            return False, True
+        return self._add_or_merge_unlocked(
+            self.skills,
+            record,
+            # LLM-generated names are descriptive aliases, not stable identity.
+            # Two identically named Skills may encode incompatible rooms,
+            # relations, or procedures; only the deterministic semantic
+            # signature is safe for cross-task evidence accumulation.
+            identity=self._skill_signature,
+            signature=self._skill_signature,
+        )
+
+    def _add_or_merge_unlocked(
+        self,
+        records: list[Any],
+        incoming: Any,
+        *,
+        identity,
+        signature,
+    ) -> tuple[bool, bool]:
+        incoming_id = identity(incoming)
+        incoming_signature = signature(incoming)
+        for index, current in enumerate(records):
+            id_matches = identity(current) == incoming_id
+            if not id_matches and signature(current) != incoming_signature:
+                continue
+            if signature(current) != incoming_signature or self._spatial_signature(
+                current
+            ) != self._spatial_signature(incoming):
+                # ADD may accumulate independent evidence for the same claim,
+                # not silently replace its meaning. Explicit UPDATE is separate.
+                console_logger.warning(
+                    "Refusing incompatible memory observation for %s", incoming_id
+                )
+                return False, True
+            if (
+                id_matches
+                and incoming.source_run_id == current.source_run_id
+                and incoming.source_task_id == current.source_task_id
+            ):
+                return False, True
+            if isinstance(current, Skill) and isinstance(incoming, Skill):
+                current_tasks = {
+                    current.source_task_id,
+                    *current.source_task_ids,
+                } - {""}
+                incoming_tasks = {
+                    incoming.source_task_id,
+                    *incoming.source_task_ids,
+                } - {""}
+                incoming_runs = {
+                    incoming.source_run_id,
+                    *incoming.source_run_ids,
+                } - {""}
+                if (
+                    not incoming_tasks
+                    or not incoming_runs
+                    or (
+                        not (incoming_tasks - current_tasks)
+                        and not (
+                            current.status == "candidate"
+                            and incoming.status == "active"
+                        )
+                    )
+                ):
+                    return False, True
+            merged = self._merge_observation(current, incoming)
+            if merged == current:
+                return False, True
+            records[index] = merged
+            return True, True
+        records.append(incoming)
+        return True, False
+
+    def _merge_observation(self, current: Any, incoming: Any) -> Any:
+        same_run = bool(incoming.source_run_id) and (
+            incoming.source_run_id == current.source_run_id
+            and incoming.source_task_id == current.source_task_id
+        )
+        evidence_refs = self._unique(current.evidence_refs + incoming.evidence_refs)
+        critic_evidence = self._unique(
+            current.critic_evidence + incoming.critic_evidence
+        )
+        source_task_ids = self._unique(
+            current.source_task_ids
+            + ([current.source_task_id] if current.source_task_id else [])
+            + incoming.source_task_ids
+            + ([incoming.source_task_id] if incoming.source_task_id else [])
+        )
+        source_run_ids = self._unique(
+            current.source_run_ids
+            + ([current.source_run_id] if current.source_run_id else [])
+            + incoming.source_run_ids
+            + ([incoming.source_run_id] if incoming.source_run_id else [])
+        )
+        spatial_by_key = {
+            json.dumps(
+                relation.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+            ): relation
+            for relation in [*current.spatial_relations, *incoming.spatial_relations]
+        }
+        updates: dict[str, Any] = {
+            "schema_version": MEMORY_SCHEMA_VERSION,
+            "evidence_refs": evidence_refs,
+            "critic_evidence": critic_evidence,
+            "source_task_ids": source_task_ids,
+            "source_run_ids": source_run_ids,
+            "bank_version": incoming.bank_version,
+            "updated_at": incoming.updated_at or self._now(),
+            "quality_score": max(current.quality_score, incoming.quality_score),
+            "confidence": max(current.confidence, incoming.confidence),
+            "spatial_relations": list(spatial_by_key.values()),
+            "provenance": (
+                current.provenance
+                if current.provenance.trace_id
+                else incoming.provenance
+            ),
+        }
+        if not same_run:
+            updates["observation_count"] = current.observation_count + 1
+        if isinstance(current, Skill) and isinstance(incoming, Skill):
+            incoming_is_stronger = (
+                incoming.quality_score,
+                incoming.confidence,
+            ) > (current.quality_score, current.confidence)
+            support_count = max(1, len(source_task_ids))
+            activation_threshold = max(
+                2,
+                int(current.activation_min_independent_support),
+                int(incoming.activation_min_independent_support),
+            )
+            if current.status == "quarantined":
+                lifecycle_status = "quarantined"
+                activation_reason = current.activation_reason or "harm_quarantined"
+            elif current.status == "active" or incoming.status == "active":
+                lifecycle_status = "active"
+                activation_reason = (
+                    incoming.activation_reason
+                    if incoming.status == "active"
+                    else current.activation_reason
+                ) or "scene_and_stage_verified"
+            elif support_count >= activation_threshold:
+                lifecycle_status = "active"
+                activation_reason = "independent_stage_support_threshold_met"
+            else:
+                lifecycle_status = "candidate"
+                activation_reason = "awaiting_independent_stage_support"
+            updates["applicability"] = current.applicability.model_copy(
+                update={
+                    "room_types": self._unique(
+                        current.applicability.room_types
+                        + incoming.applicability.room_types
+                    ),
+                    "excluded_room_types": self._unique(
+                        current.applicability.excluded_room_types
+                        + incoming.applicability.excluded_room_types
+                    ),
+                    "required_object_roles": self._unique(
+                        current.applicability.required_object_roles
+                        + incoming.applicability.required_object_roles
+                    ),
+                    "required_relation_types": self._unique(
+                        current.applicability.required_relation_types
+                        + incoming.applicability.required_relation_types
+                    ),
+                    "forbidden_conditions": self._unique(
+                        current.applicability.forbidden_conditions
+                        + incoming.applicability.forbidden_conditions
+                    ),
+                }
+            )
+            updates.update(
+                {
+                    "room_types": self._unique(
+                        current.room_types + incoming.room_types
+                    ),
+                    "required_objects": self._unique(
+                        current.required_objects + incoming.required_objects
+                    ),
+                    "functional_zones": self._unique(
+                        current.functional_zones + incoming.functional_zones
+                    ),
+                    "preconditions": self._unique(
+                        current.preconditions + incoming.preconditions
+                    ),
+                    "procedure": (
+                        list(incoming.procedure)
+                        if incoming_is_stronger and incoming.procedure
+                        else list(current.procedure)
+                    ),
+                    "failure_avoidance": self._unique(
+                        current.failure_avoidance + incoming.failure_avoidance
+                    ),
+                    "postconditions": self._unique(
+                        current.postconditions + incoming.postconditions
+                    ),
+                    "semantic_signature": (
+                        current.semantic_signature
+                        or incoming.semantic_signature
+                        or self._skill_signature(current)
+                    ),
+                    "skill_aliases": self._unique(
+                        [
+                            *current.skill_aliases,
+                            current.skill_name,
+                            *incoming.skill_aliases,
+                            incoming.skill_name,
+                        ]
+                    ),
+                    "source_scene_passed": (
+                        current.source_scene_passed or incoming.source_scene_passed
+                    ),
+                    "promotion_scope": (
+                        "scene"
+                        if current.promotion_scope == "scene"
+                        or incoming.promotion_scope == "scene"
+                        else "stage"
+                    ),
+                    "independent_support_count": support_count,
+                    "activation_min_independent_support": activation_threshold,
+                    "status": lifecycle_status,
+                    "activation_reason": activation_reason,
+                }
+            )
+        if same_run and all(
+            getattr(current, key) == value for key, value in updates.items()
+        ):
+            return current
+        merged = current.model_copy(update=updates)
+        return merged.model_copy(
+            update={"embedding_text": build_embedding_text(merged)}
+        )
+
+    def _apply_update_unlocked(self, op: MemoryUpdateOp, revision: int) -> bool:
+        if op.memory_type == "success_case":
+            return self._update_record_unlocked(
+                self.success_cases,
+                op.target_id or str(op.content.get("case_id", "")),
+                op.content,
+                identity_field="case_id",
+                model_cls=SuccessCase,
+                revision=revision,
+            )
+        if op.memory_type == "failure_case":
+            return self._update_record_unlocked(
+                self.failure_cases,
+                op.target_id or str(op.content.get("failure_id", "")),
+                op.content,
+                identity_field="failure_id",
+                model_cls=FailureCase,
+                revision=revision,
+            )
+        return self._update_record_unlocked(
+            self.skills,
+            op.target_id or str(op.content.get("skill_name", "")),
+            op.content,
+            identity_field="skill_name",
+            model_cls=Skill,
+            revision=revision,
+        )
+
+    def _update_record_unlocked(
+        self,
+        records: list[Any],
+        target_id: str,
+        updates: dict[str, Any],
+        *,
+        identity_field: str,
+        model_cls: type[BaseModel],
+        revision: int,
+    ) -> bool:
+        for index, record in enumerate(records):
+            if str(getattr(record, identity_field)) != target_id:
+                continue
+            payload = {**record.model_dump(), **dict(updates)}
+            payload[identity_field] = getattr(record, identity_field)
+            payload["bank_version"] = revision
+            payload["updated_at"] = self._now()
+            updated = model_cls.model_validate(payload)
+            if updated == record:
+                return False
+            records[index] = updated
+            return True
+        console_logger.warning(
+            "Memory record not found for update: %s=%s", identity_field, target_id
+        )
+        return False
+
+    @staticmethod
+    def _unique(values: list[str]) -> list[str]:
+        output: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value or "").strip()
+            key = text.casefold()
+            if text and key not in seen:
+                output.append(text)
+                seen.add(key)
+        return output
+
+    def _ensure_writable(self, operation: str) -> None:
+        if self._read_only:
+            raise RuntimeError(
+                f"Memory bank is frozen read-only; refused operation {operation}"
+            )
+
+    @staticmethod
+    def _now() -> str:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

@@ -48,6 +48,7 @@ class HssdRetrievalServer:
         hssd_zvec_collection_path: str | None = None,
         hssd_embedding_base_url: str | None = None,
         hssd_embedding_dimension: int = 2048,
+        hssd_all_assets_manifest_path: str | None = None,
         clip_device: str | None = None,
     ) -> None:
         """Initialize the HSSD retrieval server manager.
@@ -84,6 +85,7 @@ class HssdRetrievalServer:
         self._hssd_zvec_collection_path = hssd_zvec_collection_path
         self._hssd_embedding_base_url = hssd_embedding_base_url
         self._hssd_embedding_dimension = hssd_embedding_dimension
+        self._hssd_all_assets_manifest_path = hssd_all_assets_manifest_path
         self._clip_device = clip_device
         self._app: HssdRetrievalApp | None = None
         self._server_thread: Thread | None = None
@@ -120,6 +122,7 @@ class HssdRetrievalServer:
                 hssd_zvec_collection_path=self._hssd_zvec_collection_path,
                 hssd_embedding_base_url=self._hssd_embedding_base_url,
                 hssd_embedding_dimension=self._hssd_embedding_dimension,
+                hssd_all_assets_manifest_path=self._hssd_all_assets_manifest_path,
                 clip_device=self._clip_device,
             )
 

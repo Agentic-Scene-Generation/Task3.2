@@ -1,9 +1,8 @@
-import unittest
-
 import json
 import os
 import sys
 import types
+import unittest
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,7 +11,23 @@ from unittest.mock import patch
 
 import numpy as np
 
-from scripts.build_memory_index import build_memory_indexes
+from scenesmith.agent_utils.scoring import CategoryScore, FurnitureCritiqueWithScores
+from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
+from scenesmith.scene_expert.context_bundle import (
+    build_llm_call_debug_record,
+    build_stage_context_bundle,
+)
+from scenesmith.scene_expert.global_planner import (
+    _SYSTEM_PROMPT,
+    GlobalPlanner,
+    _reconcile_floor_plan_zone_guidance,
+    _reconcile_stage_brief,
+)
+from scenesmith.scene_expert.hooks import (
+    SceneExpertHookRunner,
+    _attach_stage_relation_context,
+    _reconcile_task_spec_stage_ownership,
+)
 from scenesmith.scene_expert.memory.embedding import (
     SceneMemoryEmbedder,
     resolve_memory_embedding_model_dir,
@@ -29,20 +44,6 @@ from scenesmith.scene_expert.memory.schemas import (
 from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.text_builder import build_embedding_text
 from scenesmith.scene_expert.memory.writer import MemoryWriter
-from scenesmith.scene_expert.context_bundle import (
-    build_llm_call_debug_record,
-    build_stage_context_bundle,
-)
-from scenesmith.scene_expert.hooks import (
-    SceneExpertHookRunner,
-    _reconcile_task_spec_stage_ownership,
-)
-from scenesmith.scene_expert.global_planner import (
-    GlobalPlanner,
-    _SYSTEM_PROMPT,
-    _reconcile_floor_plan_zone_guidance,
-    _reconcile_stage_brief,
-)
 from scenesmith.scene_expert.repair_taxonomy import (
     FailureCategory,
     classify_hard_reasons,
@@ -56,8 +57,6 @@ from scenesmith.scene_expert.schemas import (
     StageVerifyReport,
     VerifyIssue,
 )
-from scenesmith.agent_utils.scoring import CategoryScore, FurnitureCritiqueWithScores
-from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
 from scenesmith.scene_expert.task_compiler import (
     _fallback_spec_from_prompt,
     _normalize_stage_ownership,
@@ -67,6 +66,8 @@ from scenesmith.scene_expert.verifier import (
     StageVerifier,
     _map_scenesmith_scores,
 )
+from scenesmith.scenebenchmark_critic.object_taxonomy import generation_owner
+from scripts.build_memory_index import build_memory_indexes
 
 
 class SceneExpertMemoryTest(unittest.TestCase):
@@ -341,6 +342,111 @@ class SceneExpertMemoryTest(unittest.TestCase):
             any("setting" in value for value in spec.required_small_objects)
         )
 
+    def test_task_compiler_drops_structural_anchors_from_inventory(self) -> None:
+        spec = _normalize_stage_ownership(
+            SceneTaskSpec(
+                room_type="living room",
+                style="functional",
+                required_large_objects=["table", "door"],
+                required_wall_objects=["mirror", "window"],
+                required_small_objects=["opening"],
+            )
+        )
+
+        self.assertEqual(["table"], spec.required_large_objects)
+        self.assertEqual(["mirror"], spec.required_wall_objects)
+        self.assertEqual([], spec.required_small_objects)
+
+    def test_task_compiler_keeps_wall_declared_screen_in_wall_inventory(self) -> None:
+        spec = _normalize_stage_ownership(
+            SceneTaskSpec(
+                room_type="living room",
+                style="functional",
+                required_large_objects=["sofa"],
+                required_wall_objects=["screen"],
+            ),
+            prompt="Mount a screen opposite the sofa.",
+        )
+
+        self.assertEqual(["sofa"], spec.required_large_objects)
+        self.assertEqual(["monitor"], spec.required_wall_objects)
+        self.assertEqual([], spec.required_small_objects)
+
+    def test_generation_owner_separates_inventory_stage_from_screen_semantics(
+        self,
+    ) -> None:
+        self.assertEqual(
+            "wall_mounted",
+            generation_owner("screen", declared_owner="wall_mounted"),
+        )
+        self.assertEqual(
+            "manipuland",
+            generation_owner(
+                "computer monitor",
+                relation="on_top_of",
+                endpoint="subject",
+                declared_owner="wall_mounted",
+            ),
+        )
+        self.assertEqual(
+            "wall_mounted",
+            generation_owner(
+                "projector screen",
+                declared_owner="wall_mounted",
+            ),
+        )
+        self.assertEqual(
+            "wall_mounted",
+            generation_owner(
+                "television",
+                relation="mounted_on_wall",
+                endpoint="subject",
+                declared_owner="furniture",
+            ),
+        )
+        self.assertEqual(
+            "furniture",
+            generation_owner("television", declared_owner="furniture"),
+        )
+        self.assertEqual(
+            "manipuland",
+            generation_owner(
+                "television",
+                relation="on_top_of",
+                endpoint="subject",
+                declared_owner="furniture",
+            ),
+        )
+        self.assertEqual(
+            "manipuland",
+            generation_owner(
+                "glass_bowl",
+                relation="on_top_of",
+                endpoint="subject",
+                declared_owner="manipuland",
+            ),
+        )
+
+    def test_task_compiler_normalizes_descriptive_inventory_categories(self) -> None:
+        spec = _normalize_stage_ownership(
+            SceneTaskSpec(
+                room_type="living room",
+                style="functional",
+                required_large_objects=[
+                    "circular ceramic table",
+                    "rectangular rug",
+                    "chest_of_drawer",
+                    "sofa_chair",
+                    "wall_cabinet",
+                ],
+            )
+        )
+
+        self.assertEqual(
+            ["table", "rug", "dresser", "sofa_chair", "wall_cabinet"],
+            spec.required_large_objects,
+        )
+
     def test_contract_ownership_respects_floor_and_surface_support(self) -> None:
         floor_contract = {
             "constraints": [
@@ -405,17 +511,200 @@ class SceneExpertMemoryTest(unittest.TestCase):
             SceneTaskSpec(
                 room_type="living_room",
                 style="standard",
-                required_large_objects=["tv stand"],
-                required_small_objects=["television"],
+                required_large_objects=["tv stand", "television"],
             ),
             media_contract,
         )
 
-        self.assertCountEqual(
-            ["tv stand", "television"], media_spec.required_large_objects
+        self.assertEqual(["tv stand"], media_spec.required_large_objects)
+        self.assertEqual(["television"], media_spec.required_small_objects)
+        self.assertEqual("manipuland", media_contract["constraints"][0]["stage"])
+
+        bowl_contract = {
+            "constraints": [
+                {
+                    "relation": "on_top_of",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "subjects": {"category": "glass_bowl", "count": 1},
+                    "targets": {"category": "dining_table", "count": 1},
+                }
+            ]
+        }
+        bowl_spec = _reconcile_task_spec_stage_ownership(
+            SceneTaskSpec(
+                room_type="dining_room",
+                style="standard",
+                required_large_objects=["dining table"],
+                required_small_objects=["glass bowl"],
+            ),
+            bowl_contract,
         )
-        self.assertNotIn("television", media_spec.required_small_objects)
-        self.assertEqual("furniture", media_contract["constraints"][0]["stage"])
+
+        self.assertIn("glass bowl", bowl_spec.required_small_objects)
+        self.assertNotIn("glass bowl", bowl_spec.required_large_objects)
+        self.assertEqual("manipuland", bowl_contract["constraints"][0]["stage"])
+
+    def test_subject_support_ownership_beats_passive_media_target(self) -> None:
+        faces = {
+            "relation": "faces",
+            "stage": "wall_mounted",
+            "strength": "hard",
+            "subjects": {"category": "sofa", "count": 1},
+            "targets": {"category": "television", "count": 1},
+        }
+        supported = {
+            "relation": "on_top_of",
+            "stage": "wall_mounted",
+            "strength": "hard",
+            "subjects": {"category": "television", "count": 1},
+            "targets": {"category": "tv_stand", "count": 1},
+        }
+
+        for constraints in (
+            [dict(faces), dict(supported)],
+            [dict(supported), dict(faces)],
+        ):
+            contract = {"constraints": constraints}
+            reconciled = _reconcile_task_spec_stage_ownership(
+                SceneTaskSpec(
+                    room_type="living_room",
+                    style="standard",
+                    required_large_objects=["sofa", "tv stand"],
+                    required_wall_objects=["television"],
+                ),
+                contract,
+            )
+
+            self.assertIn("television", reconciled.required_small_objects)
+            self.assertNotIn("television", reconciled.required_large_objects)
+            self.assertNotIn("television", reconciled.required_wall_objects)
+            self.assertTrue(
+                all(row["stage"] == "manipuland" for row in contract["constraints"])
+            )
+
+    def test_explicit_wall_mount_still_owns_television(self) -> None:
+        contract = {
+            "constraints": [
+                {
+                    "relation": "mounted_on_wall",
+                    "stage": "wall_mounted",
+                    "strength": "hard",
+                    "subjects": {"category": "television", "count": 1},
+                    "targets": {"category": "wall", "count": 1},
+                }
+            ]
+        }
+        reconciled = _reconcile_task_spec_stage_ownership(
+            SceneTaskSpec(
+                room_type="living_room",
+                style="standard",
+                required_large_objects=["television"],
+            ),
+            contract,
+        )
+
+        self.assertEqual(["television"], reconciled.required_wall_objects)
+        self.assertNotIn("television", reconciled.required_large_objects)
+
+    def test_attached_task_spec_is_checkpoint_serializable_metadata(self) -> None:
+        scene = SimpleNamespace(text_description="room", metadata={})
+        task_spec = SceneTaskSpec(
+            room_type="living_room",
+            style="standard",
+            required_large_objects=["side table", "side table", "side table"],
+        )
+
+        _attach_stage_relation_context(
+            scene,
+            relation_context=None,
+            intent_contract=None,
+            task_spec=task_spec,
+        )
+
+        self.assertEqual(
+            scene.scene_expert_task_spec,
+            scene.metadata["scene_expert_task_spec"],
+        )
+
+    def test_supported_plant_ownership_is_relation_first_and_order_independent(
+        self,
+    ) -> None:
+        required = {
+            "relation": "required_count",
+            "stage": "furniture",
+            "strength": "hard",
+            "subjects": {"category": "plant", "count": 3},
+        }
+        supported = {
+            "relation": "on_top_of",
+            "stage": "furniture",
+            "strength": "hard",
+            "subjects": {"category": "plant", "count": 3},
+            "targets": {"category": "sideboard", "count": 1},
+        }
+
+        results = []
+        for constraints in (
+            [dict(required), dict(supported)],
+            [dict(supported), dict(required)],
+        ):
+            contract = {"constraints": constraints}
+            results.append(
+                _reconcile_task_spec_stage_ownership(
+                    SceneTaskSpec(
+                        room_type="dining_room",
+                        style="standard",
+                        required_large_objects=["sideboard", "plant", "plant", "plant"],
+                    ),
+                    contract,
+                )
+            )
+            relation = next(
+                row for row in contract["constraints"] if row["relation"] == "on_top_of"
+            )
+            self.assertEqual("manipuland", relation["stage"])
+            required_row = next(
+                row
+                for row in contract["constraints"]
+                if row["relation"] == "required_count"
+            )
+            self.assertEqual("manipuland", required_row["stage"])
+
+        for result in results:
+            self.assertEqual(3, result.required_small_objects.count("plant"))
+            self.assertNotIn("plant", result.required_large_objects)
+
+    def test_floor_or_near_plant_remains_furniture(self) -> None:
+        contract = {
+            "constraints": [
+                {
+                    "relation": "required_count",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "subjects": {"category": "plant", "count": 1},
+                },
+                {
+                    "relation": "near",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "subjects": {"category": "plant", "count": 1},
+                    "targets": {"category": "sofa", "count": 1},
+                },
+            ]
+        }
+
+        result = _reconcile_task_spec_stage_ownership(
+            SceneTaskSpec(
+                room_type="living_room",
+                style="standard",
+                required_large_objects=["sofa", "plant"],
+            ),
+            contract,
+        )
+
+        self.assertIn("plant", result.required_large_objects)
+        self.assertNotIn("plant", result.required_small_objects)
 
     def test_repair_taxonomy_classifies_core_hard_failures(self) -> None:
         failures = classify_hard_reasons(
@@ -473,7 +762,41 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertIn("original_task=A study", bundle.scene_summary)
         self.assertNotIn("Mutable StageBrief", bundle.scene_summary)
 
-    def test_stage_working_memory_commits_public_failure_event(self) -> None:
+    def test_stage_context_bundle_derives_opening_clearance_zones(self) -> None:
+        scene = types.SimpleNamespace(
+            room_geometry=types.SimpleNamespace(
+                length=6.0,
+                width=5.0,
+                openings=[
+                    {
+                        "opening_id": "door_1",
+                        "opening_type": "door",
+                        "wall_direction": "west",
+                        "center_world": [-3.0, 0.0, 1.05],
+                        "width": 0.9,
+                        "clearance_bbox_min": [-3.0, -0.45, 0.0],
+                        "clearance_bbox_max": [-2.1, 0.45, 2.1],
+                    }
+                ],
+            ),
+            objects={},
+            text_description="A living room.",
+        )
+
+        bundle = build_stage_context_bundle(
+            stage="furniture",
+            agent_role="designer",
+            event="request_initial_design",
+            scene=scene,
+        )
+
+        self.assertEqual(len(bundle.forbidden_zones), 1)
+        self.assertEqual(bundle.forbidden_zones[0].zone_id, "door_1")
+        self.assertEqual(bundle.forbidden_zones[0].severity, "hard")
+        self.assertIn("fully_opening_free_walls=north,south,east", bundle.scene_summary)
+        self.assertIn("door_1", bundle.to_llm_text())
+
+    def test_stage_working_memory_commits_public_evidence_event(self) -> None:
         class FakeTransform:
             def translation(self):
                 return np.array([0.0, 0.0, 0.0])
@@ -509,7 +832,11 @@ class SceneExpertMemoryTest(unittest.TestCase):
             root = Path(tmp)
             public_dir = root / "scene_expert_memory" / "ablation_test"
             old_env = os.environ.get("SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR")
+            old_read_only_env = os.environ.get(
+                "SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY"
+            )
             os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] = str(public_dir)
+            os.environ.pop("SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY", None)
             try:
                 memory = StageWorkingMemory(
                     root_dir=root / "scene_000" / "room_bedroom",
@@ -532,10 +859,17 @@ class SceneExpertMemoryTest(unittest.TestCase):
                     os.environ.pop("SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR", None)
                 else:
                     os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] = old_env
+                if old_read_only_env is None:
+                    os.environ.pop("SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY", None)
+                else:
+                    os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY"] = (
+                        old_read_only_env
+                    )
 
             self.assertTrue((public_dir / "events.jsonl").exists())
-            self.assertTrue((public_dir / "failure_cases.jsonl").exists())
-            self.assertGreater((public_dir / "failure_cases.jsonl").stat().st_size, 0)
+            self.assertFalse((public_dir / "failure_cases.jsonl").exists())
+            event = json.loads((public_dir / "events.jsonl").read_text().strip())
+            self.assertEqual("evidence_only", event["promotion_status"])
 
     def test_furniture_stage_verifier_fails_hard_missing_and_collision(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1195,32 +1529,7 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertEqual("stage", failure.content["scope"])
         self.assertTrue(failure.content["embedding_text"])
 
-    def test_memory_writer_extracts_reasoning_content_and_markdown_json(self) -> None:
-        writer = MemoryWriter.__new__(MemoryWriter)
-        message = types.SimpleNamespace(
-            content=None,
-            model_dump=lambda: {
-                "content": None,
-                "model_extra": {
-                    "reasoning_content": (
-                        "```json\n"
-                        '{"updates":[{"op":"NOOP","memory_type":"success_case","content":{}}]}'
-                        "\n```"
-                    )
-                },
-            },
-        )
-        response = types.SimpleNamespace(
-            choices=[types.SimpleNamespace(message=message, finish_reason="stop")]
-        )
-
-        raw = writer._extract_response_text(response)
-        data = writer._parse_json_payload(raw)
-
-        self.assertEqual(1, len(data["updates"]))
-        self.assertEqual("NOOP", data["updates"][0]["op"])
-
-    def test_memory_writer_builds_conservative_fallback_success_ops(self) -> None:
+    def test_memory_writer_never_builds_retrievable_fallback_success(self) -> None:
         writer = MemoryWriter.__new__(MemoryWriter)
         trace_summary = "\n".join(
             [
@@ -1234,16 +1543,7 @@ class SceneExpertMemoryTest(unittest.TestCase):
         full_report = FullVerifyReport(overall_score=0.8, pass_scene=True)
 
         ops = writer._fallback_success_ops(trace_summary, full_report)
-        filtered = writer._gate_and_enrich_ops(ops, full_report)
-
-        self.assertEqual(1, len(filtered))
-        op = filtered[0]
-        self.assertEqual("ADD", op.op)
-        self.assertEqual("success_case", op.memory_type)
-        self.assertEqual("furniture", op.content["stage"])
-        self.assertEqual("bedroom", op.content["room_type"])
-        self.assertIn("bed", op.content["required_objects"])
-        self.assertTrue(op.content["embedding_text"])
+        self.assertEqual([], ops)
 
     def test_embedding_model_dir_resolves_to_bge_m3_under_models_dir(self) -> None:
         with patch.dict(
@@ -1284,6 +1584,7 @@ class SceneExpertMemoryTest(unittest.TestCase):
 
         fake_module = types.SimpleNamespace(BGEM3FlagModel=DummyBGEM3FlagModel)
         with TemporaryDirectory() as tmp:
+            (Path(tmp) / "model.safetensors").touch()
             with patch.dict(sys.modules, {"FlagEmbedding": fake_module}):
                 embedder = SceneMemoryEmbedder(model_dir=tmp, device="cpu")
                 matrix = embedder.encode(["bedroom furniture"])
@@ -1364,6 +1665,7 @@ class SceneExpertMemoryTest(unittest.TestCase):
                 str(Path("/models/bge-m3")),
                 index.manifest["embedding_model_dir"],
             )
+            self.assertTrue(index.manifest["records_fingerprint"])
 
     def test_hybrid_retriever_strict_mode_fails_on_missing_index(self) -> None:
         class DummyEmbedder:
@@ -1473,6 +1775,10 @@ class SceneExpertMemoryTest(unittest.TestCase):
                 positive_guidance=["use bed as the anchor"],
                 placement_reference=["bed_1 (bed): x=0.0, y=0.0, yaw=0"],
                 scores={"semantic": 0.9, "aesthetic": 0.8, "physics": 0.9},
+                source_task_id="task_prior",
+                source_task_ids=["task_prior"],
+                source_run_id="run_prior",
+                source_run_ids=["run_prior"],
             )
             failure = FailureCase(
                 failure_id="fail_asset_001",
@@ -1535,11 +1841,24 @@ class SceneExpertMemoryTest(unittest.TestCase):
 
             self.assertEqual(1, len(pack.success_hints))
             self.assertIn("use bed as the anchor", pack.success_hints[0])
-            self.assertIn("Reference Layout", pack.placement_reference)
+            # Legacy world coordinates have no verified local frame. Keep the
+            # useful semantic lesson, but do not copy that layout to a new room.
+            self.assertEqual("", pack.placement_reference)
+            self.assertIn(
+                "legacy_world_layout_omitted", pack.selections[0].evidence_warnings
+            )
             self.assertEqual(1, len(pack.failure_hints))
             self.assertIn("do not retry", pack.failure_hints[0])
             self.assertEqual(1, len(pack.skill_texts))
             self.assertIn("arrange_bedroom_anchor", pack.skill_texts[0])
+            self.assertEqual(
+                ["task_prior"],
+                pack.retrieved_source_task_ids["success_bedroom_001"],
+            )
+            self.assertEqual(
+                ["run_prior"],
+                pack.retrieved_source_run_ids["success_bedroom_001"],
+            )
 
     def test_hybrid_retriever_writes_timing_jsonl(self) -> None:
         class DummyEmbedder:

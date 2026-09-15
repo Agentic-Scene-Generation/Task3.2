@@ -135,6 +135,22 @@ def test_separate_display_rewrites_named_media_console_with_display() -> None:
     assert "without a television" in normalized.object_descriptions[0]
 
 
+def test_structured_component_exclusion_rewrites_without_prompt_pattern() -> None:
+    request = AssetGenerationRequest(
+        object_descriptions=["Media console with a television mounted on top"],
+        short_names=["media_console"],
+        object_type=ObjectType.FURNITURE,
+        desired_dimensions=[[1.6, 0.45, 1.1]],
+        scene_prompt_context="The TV is supported by a TV stand.",
+        forbidden_semantic_components=[["television"]],
+    )
+
+    normalized = _normalize_independent_media_requests(request)
+
+    assert normalized.short_names == ["tv_stand"]
+    assert normalized.forbidden_semantic_components == [["television"]]
+
+
 class TestAssetManager(unittest.TestCase):
     """Test AssetManager functionality."""
 
@@ -355,6 +371,41 @@ class TestAssetManager(unittest.TestCase):
         )
         self.assertEqual(result.successful_assets, [recovered])
         self.assertEqual(result.failed_assets, [])
+
+    def test_direct_hssd_assesses_single_candidate_with_component_exclusion(self):
+        request = AssetGenerationRequest(
+            object_descriptions=["TV stand without a display"],
+            short_names=["tv_stand"],
+            object_type=ObjectType.FURNITURE,
+            desired_dimensions=[[1.4, 0.45, 0.7]],
+            forbidden_semantic_components=[["television"]],
+        )
+        candidate = HssdRetrievalResult(
+            mesh_path="/tmp/stand.glb",
+            hssd_id="stand",
+            object_name="tv stand",
+            similarity_score=0.91,
+            size=(1.4, 0.45, 0.7),
+            category="storage",
+        )
+        with patch(
+            "scenesmith.agent_utils.asset_manager."
+            "choose_hssd_candidate_from_iso_renders",
+            return_value=RenderedAssetChoice(candidates=[]),
+        ) as choice:
+            ranked = self.asset_manager._rank_direct_hssd_candidates(
+                request=request,
+                index=0,
+                candidates=[candidate],
+                enabled=True,
+                top_n=1,
+                rendered_assets_dir=self.temp_dir,
+            )
+
+        self.assertEqual(ranked.candidates, [])
+        self.assertEqual(
+            choice.call_args.kwargs["forbidden_components"], ["television"]
+        )
 
     def test_selected_hssd_beam_uses_procedural_fallback_without_retrying_rejects(self):
         """A rejected HSSD candidate cannot replace a failed selected beam."""
@@ -748,6 +799,83 @@ class TestAssetManager(unittest.TestCase):
         self.assertEqual(
             kwargs["additional_metadata"]["actual_dimensions"],
             [1.36, 0.53, 0.85],
+        )
+
+    def test_direct_hssd_candidate_can_preserve_native_dimensions(self):
+        """The experiment switch must bypass local HSSD mesh fitting only."""
+        self.asset_manager.cfg.asset_manager.hssd.scale_to_requested_dimensions = (
+            False
+        )
+        request = AssetGenerationRequest(
+            object_descriptions=["Dining room sideboard"],
+            short_names=["sideboard"],
+            object_type=ObjectType.FURNITURE,
+            desired_dimensions=[[1.36, 0.53, 0.85]],
+        )
+        candidate = HssdRetrievalResult(
+            mesh_path=str(self.temp_dir / "sideboard.gltf"),
+            hssd_id="sideboard_mesh",
+            object_name="sideboard",
+            similarity_score=0.9,
+            size=(1.2, 0.47, 0.75),
+            category="sideboard",
+        )
+        config = self.asset_manager._create_asset_paths(
+            request.object_descriptions, request.short_names
+        )[0]
+        physics = MeshPhysicsAnalysis(
+            up_axis="+Y",
+            front_axis="+Z",
+            material="wood",
+            mass_kg=20.0,
+            mass_range_kg=[15.0, 25.0],
+            friction_coefficient=0.4,
+        )
+        bbox_min = np.array([-0.6, -0.235, 0.0])
+        bbox_max = np.array([0.6, 0.235, 0.75])
+        created = MagicMock(spec=SceneObject)
+
+        with (
+            patch.object(
+                self.asset_manager, "_analyze_mesh_physics", return_value=physics
+            ),
+            patch.object(
+                self.asset_manager,
+                "_override_hssd_asset_annotations",
+                return_value=physics,
+            ),
+            patch("scenesmith.agent_utils.asset_manager.canonicalize_mesh"),
+            patch.object(
+                self.asset_manager,
+                "_scale_and_measure_canonical_mesh",
+                return_value=(
+                    config.sdf_dir / "sideboard.gltf",
+                    bbox_min,
+                    bbox_max,
+                    1.0,
+                ),
+            ) as scale_mesh,
+            patch.object(
+                self.asset_manager, "_generate_collision_geometry", return_value=[]
+            ),
+            patch("scenesmith.agent_utils.asset_manager.generate_drake_sdf"),
+            patch.object(
+                self.asset_manager, "_create_scene_object", return_value=created
+            ) as create_scene_object,
+        ):
+            result = self.asset_manager._process_direct_hssd_candidate(
+                request=request,
+                index=0,
+                config=config,
+                candidate=candidate,
+            )
+
+        self.assertIs(result, created)
+        self.assertIsNone(scale_mesh.call_args.kwargs["desired_dimensions"])
+        kwargs = create_scene_object.call_args.kwargs
+        self.assertEqual(kwargs["scale_factor"], 1.0)
+        self.assertFalse(
+            kwargs["additional_metadata"]["requested_dimension_fit_applied"]
         )
 
     def test_direct_hssd_rug_uses_planar_fit_and_static_covering_sdf(self):

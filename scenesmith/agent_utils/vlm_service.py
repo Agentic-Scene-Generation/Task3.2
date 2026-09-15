@@ -6,6 +6,7 @@ from openai import OpenAI
 
 from scenesmith.agent_utils.thinking import (
     chat_template_kwargs_from_effort,
+    openrouter_extra_body,
     prepend_text_thinking_directive,
     responses_api_reasoning_effort,
     thinking_directive_from_effort,
@@ -137,8 +138,10 @@ class VLMService:
             kwargs = {
                 "model": model,
                 "messages": messages,
-                "extra_body": chat_template_kwargs_from_effort(
-                    reasoning_effort, model=model
+                "extra_body": openrouter_extra_body(
+                    chat_template_kwargs_from_effort(
+                        reasoning_effort, model=model
+                    )
                 ),
             }
 

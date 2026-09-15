@@ -14,22 +14,25 @@ import logging
 import os
 import re
 import time
+
 from pathlib import Path
+from typing import Any
 
-from openai import OpenAI
-
-from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.agent_utils.thinking import (
     chat_template_kwargs_from_effort,
+    openrouter_extra_body,
     prepend_text_thinking_directive,
     thinking_directive_from_effort,
 )
+from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
+from scenesmith.scene_expert.memory.adaptation import effective_relation_grade
 from scenesmith.scene_expert.schemas import (
     HarnessContext,
     MemoryPack,
     SceneTaskSpec,
     StageBrief,
 )
+from scenesmith.utils.openai_strict_schema import make_openai_strict_json_schema
 
 console_logger = logging.getLogger(__name__)
 
@@ -58,7 +61,34 @@ Stages in order: floor_plan → furniture → wall_mounted → ceiling_mounted �
 You MUST output valid JSON matching this exact schema:
 {
   "stage": "string — current stage name",
+  "stage_policy": "auto or required_only — echo the supplied policy",
+  "optional_assets_allowed": true,
+  "required_objects": ["copy the prompt-explicit hard minimum for this stage"],
+  "optional_asset_recommendations": [
+    {
+      "name": "same-stage asset category",
+      "count": 1,
+      "priority": "low, medium, or high",
+      "rationale": "why this improves this specific room",
+      "placement_guidance": "capacity-aware placement guidance"
+    }
+  ],
   "stage_objective": "string — one clear sentence describing the goal for this stage",
+  "memory_adaptations": [
+    {
+      "memory_type": "success, failure, or skill",
+      "memory_id": "exact candidate memory_id",
+      "source_content_hash": "exact candidate content_hash",
+      "decision": "accepted, adapted, or rejected",
+      "reason": "why applicable to this current design problem or why rejected",
+      "source_relation_indices": [0],
+      "bindings": [{"source_role": "source object role", "current_role": "current task or observed role", "object_ids": []}],
+      "preconditions": ["conditions that must hold in this scene"],
+      "actions": ["complete current-task design or repair procedure; preserve safety conditions"],
+      "checks": ["how the designer checks the action against the current intent"],
+      "advice_checks": []
+    }
+  ],
   "recommended_skills": ["list of skill names from memory to apply, can be empty"],
   "constraints_for_designer": [
     "list of concrete placement/arrangement rules for the designer",
@@ -74,7 +104,57 @@ You MUST output valid JSON matching this exact schema:
 
 Guidelines:
 - Be specific and actionable. Vague guidance is useless for small models.
-- Derive constraints from: the task spec, the current scene state, AND the retrieved memory.
+- Keep ordinary StageBrief fields derived ONLY from the task and current scene.
+  All memory-derived advice belongs ONLY in memory_adaptations. Never copy a
+  rejected candidate into constraints, objective, optional proposals, checks,
+  failure_patterns_to_avoid, or recommended_skills. Omitted choices abstain.
+- Decide for every typed candidate. Accept only useful, applicable experience;
+  adapt actions to current roles/anchors/supports. Unknown evidence is not a
+  verified solution. Bind existing objects by exact current ID; leave IDs empty
+  for a role still to be created. Do not invent objects, coordinates, axes or
+  measured clearance. Preserve full skill preconditions/procedure/checks.
+- Prefer methods that add a spatial decision or avoid a demonstrated mistake;
+  reject inventory/rule restatements as redundant_task_rule. Never force memory
+  use. A shared task goal is fine if the METHOD adds useful information.
+- For placement_experience candidates, include advice_checks with fields:
+  source_episode_id (exact catalog ID), metric (anchor_local_offset_m,
+  relative_yaw_deg, aabb_separation_m, bbox_center_distance_m, or native_constraint), subject_role and
+  anchor_role (exact source names), constraint_id (empty for geometry).
+  Bind these roles as usual. Select at least one available source metric.
+  These are read-only observations, not desired numeric thresholds. AABB gaps
+  are not walkable clearance; transform yaw is not semantic front. Use
+  native_constraint only for a matching current spatial predicate supported by
+  the source native checks; never substitute a required-object count.
+- Spatial method_steps are transfer_unverified hypotheses. Keep their episode
+  and critic sources distinct: a critic excerpt is a source-scene opinion, not
+  a deterministic result. Use the relevant step and its source pairs together.
+  Never turn source measurements or quoted thresholds into fixed action/check
+  constants or guarantees. Describe how to recompute for current assets instead.
+  Set source_method_step_indices to the relevant zero-based method steps and
+  retain ALL of those steps' episode references in source_relation_indices.
+  For relation_bindings, observe each declared metric on its exact source pair;
+  do not substitute a wall gap for fixture spacing or AABB gap for center distance.
+  bbox_center_distance_m means bounding-box centers, NOT optical light centers.
+  A critic-advice-only step has no geometric verdict: leave advice_checks empty
+  and do not select source_context_episode_ids as method evidence. Its current
+  behavior may be observed, but never report a measured spatial success for it.
+  Unrelated steps may be excluded. Null means all method steps, not automatic filtering.
+- Source cases may include unrelated objects and whole-scene inventories.
+  Select only the source relation_index rows actually used by your advice in
+  source_relation_indices. Bind EVERY nonempty subject_role and target_role in
+  those rows, including wall/room anchors; do not bind unrelated source objects
+  merely to complete the source scene. Never copy unselected source relations
+  into actions, checks, or preconditions. Spatial candidates require at least
+  one selected row, except when only critic-advice-only steps are selected;
+  use [] for those steps or when the candidate has no spatial relations.
+  Null is the legacy all-rows scope, not an automatic choice of relevant rows.
+  Example: a bedroom source includes (0) bed against_wall wall and (1) wardrobe
+  corner_of_room room. For bed anchoring alone select [0], bind bed to current
+  bed (IDs empty if not created), and wall to a real current wall ID or an
+  explicit current task anchor. Do NOT import wardrobe/corner placement.
+- An observed optional object is context, NOT a required asset. For template
+  counts/groups use the exact current hard intent, never the source quantities.
+  A suggestion cannot alter critic scoring, skip a stage, or suppress autonomy.
 - The Authoritative Stage Intent section contains the exact hard contract rows
   for this stage. Cover every constraint_id and never rewrite, weaken, or
   replace one with a convention.
@@ -82,13 +162,19 @@ Guidelines:
   later-stage wall anchors. Reserve a continuous wall segment for every listed
   object; doors and windows must not intersect a reserved segment. Do not move
   a later object away from its explicit required wall merely to keep an opening.
+- After floor_plan, Resolved Opening Reservations contain authoritative room
+  geometry. Keep furniture out of hard door/open clearances. Place tall or focal
+  wall-backed furniture only on a continuous usable segment that does not cross
+  a window; prefer a fully opening-free wall when it satisfies the task relation.
 - Functional zones named only through later furniture (for example, living,
   dining, work, or storage areas) are not architectural partitions. At
   floor_plan, make those later arrangements feasible through dimensions,
   circulation, and opening-free wall length. Do not invent rooms, partitions,
   or other structural markers unless the Immutable User Task explicitly asks
   for structural separation.
-- Prioritize failure patterns from memory — they encode hard-won lessons.
+- Build the plan from the immutable task and positive guidance first. Treat the
+  bounded, verified failure pattern from memory as one local guardrail; it must
+  not suppress required assets, optional design autonomy, or an entire stage.
 - When an Immutable User Task is supplied, its explicit object, topology, and
   facing relations are authoritative. Memory and current-scene observations may
   refine only non-conflicting details. Omit a suggestion instead of replacing an
@@ -97,8 +183,16 @@ Guidelines:
   reinterpret an object assigned to another stage. A non-empty "Required objects
   for this stage" inventory is a minimum, not an exhaustive list: same-stage
   supporting objects may be suggested when they improve function or completeness,
-  unless the Immutable User Task explicitly forbids them. When that inventory is
-  empty, emit an observation-only brief with no object-placement instruction.
+  unless the Immutable User Task explicitly forbids them.
+- Under stage_policy=auto, always preserve every required object and independently
+  recommend 0-6 useful OPTIONAL same-stage assets based on room type, style, usable
+  capacity, openings, circulation, support surfaces, and already placed objects.
+  An empty required inventory means there is no hard minimum; it never disables
+  the stage and never makes the brief observation-only.
+- Under stage_policy=required_only, return no optional recommendations. The native
+  stage still executes and verifies the required inventory, even when it is empty.
+- Optional recommendations are soft. Never phrase them as required, never let them
+  displace a required asset, and omit them when capacity or constraints are unsafe.
 - Never turn a non-empty required inventory into an "only these objects" rule
   unless that exclusivity appears explicitly in the Immutable User Task.
 - Keep constraints_for_designer to 3-6 items max. More is not better.
@@ -113,6 +207,144 @@ _STAGE_DESCRIPTIONS = {
     "ceiling_mounted": "Place ceiling-mounted objects (lights, fans) on the ceiling.",
     "manipuland": "Place small manipulable objects (books, cups, plants) on furniture surfaces.",
 }
+
+_STAGE_CRITIC_CHECKS = {
+    "floor_plan": [
+        "Verify room footprint, dimensions, wall geometry, and floor layout",
+        "Verify doors/openings provide valid access and room connectivity",
+        "Verify windows/openings have architecturally reasonable placement and daylight",
+        "Do not evaluate furniture, wall decor, ceiling fixtures, or manipulands",
+    ],
+    "furniture": [
+        "Verify prompt-required furniture is present with correct semantic assets",
+        "Verify furniture poses, orientation, functional relationships, and clearance",
+        "Verify furniture is collision-free, reachable, and inside the room",
+        "Do not require wall decor, ceiling fixtures, or manipulands",
+    ],
+    "wall_mounted": [
+        "Verify stage-required wall-mounted objects are present and correctly mounted",
+        "Verify mounting height, spacing, opening clearance, and visual balance",
+        "Do not redesign furniture or require ceiling/manipuland objects",
+    ],
+    "ceiling_mounted": [
+        "Verify stage-required ceiling objects are present and correctly mounted",
+        "Verify coverage, spacing, clearance, and visual balance",
+        "Do not redesign upstream stages or require manipulands",
+    ],
+    "manipuland": [
+        "Verify stage-required small objects are present on valid support surfaces",
+        "Verify support, usability, local spacing, and collision-free placement",
+        "Treat all upstream architecture and furniture as fixed context",
+    ],
+}
+
+_COMMON_DOWNSTREAM_OBJECT_TERMS = {
+    "furniture",
+    "wall decor",
+    "ceiling fixture",
+    "manipuland",
+    "bed",
+    "nightstand",
+    "wardrobe",
+    "dresser",
+    "sofa",
+    "couch",
+    "table",
+    "chair",
+    "desk",
+    "rug",
+    "plant",
+    "cabinet",
+    "shelf",
+    "books",
+    "cup",
+}
+
+
+def _contains_term(text: str, term: str) -> bool:
+    normalized_term = str(term or "").casefold().strip()
+    if not normalized_term:
+        return False
+    return bool(
+        re.search(
+            rf"(?<![a-z0-9_]){re.escape(normalized_term)}(?![a-z0-9_])",
+            text,
+        )
+    )
+
+
+def _floor_plan_rule_mentions_downstream_placement(
+    text: str,
+    task_spec: SceneTaskSpec,
+) -> bool:
+    """Reject floor-plan hints that attempt downstream object placement."""
+    lowered = str(text or "").casefold()
+    object_terms = {
+        *_COMMON_DOWNSTREAM_OBJECT_TERMS,
+        *(
+            str(value).casefold()
+            for value in (
+                task_spec.required_large_objects
+                + task_spec.required_wall_objects
+                + task_spec.required_ceiling_objects
+                + task_spec.required_small_objects
+            )
+            if str(value).strip()
+        ),
+    }
+    if not any(_contains_term(lowered, term) for term in object_terms):
+        return False
+    capacity_only = any(
+        marker in lowered
+        for marker in ("reserve", "capacity", "accommodate", "plan space")
+    ) and any(
+        marker in lowered for marker in ("do not place", "downstream", "later stage")
+    )
+    return not capacity_only
+
+
+def enforce_stage_brief_scope(
+    stage_brief: StageBrief,
+    task_spec: SceneTaskSpec,
+) -> StageBrief:
+    """Keep planner output within deterministic pipeline-stage ownership."""
+    stage = stage_brief.stage
+    constraints = list(stage_brief.constraints_for_designer)
+    failures = list(stage_brief.failure_patterns_to_avoid)
+    recommended_skills = list(stage_brief.recommended_skills)
+    stage_objective = stage_brief.stage_objective
+    if stage == "floor_plan":
+        stage_objective = (
+            f"Complete the floor_plan stage for a {task_spec.room_type}: "
+            f"{_STAGE_DESCRIPTIONS['floor_plan']}"
+        )
+        constraints = [
+            value
+            for value in constraints
+            if not _floor_plan_rule_mentions_downstream_placement(value, task_spec)
+        ]
+        recommended_skills = [
+            value
+            for value in recommended_skills
+            if not _floor_plan_rule_mentions_downstream_placement(value, task_spec)
+        ]
+        failures = [
+            value
+            for value in failures
+            if not _floor_plan_rule_mentions_downstream_placement(value, task_spec)
+        ]
+    return stage_brief.model_copy(
+        update={
+            "stage_objective": stage_objective,
+            "recommended_skills": recommended_skills,
+            "constraints_for_designer": constraints,
+            "checks_for_critic": list(
+                _STAGE_CRITIC_CHECKS.get(stage, stage_brief.checks_for_critic)
+            ),
+            "failure_patterns_to_avoid": failures,
+        }
+    )
+
 
 _INVENTORY_CLOSING_PATTERNS = (
     re.compile(
@@ -436,7 +668,10 @@ def _add_floor_plan_reservation_guidance(
         category = str(subject.get("category") or "object").replace("_", " ")
         role = str(target.get("role") or "").strip().lower()
         relation = str(reservation.get("relation") or "")
-        if relation == "centered_on_wall" and role:
+        reservation_kind = str(reservation.get("reservation_kind") or "")
+        if reservation_kind == "opening_adjacency":
+            anchors.append(f"{category} next to a window")
+        elif relation == "centered_on_wall" and role:
             anchors.append(f"{category} centered on the {role} wall")
         elif role:
             anchors.append(f"{category} on a {role} wall")
@@ -459,9 +694,26 @@ def _add_floor_plan_reservation_guidance(
             details.append(
                 "aligned opening-free spans on opposed walls for each media-viewing pair"
             )
-        if zone_area:
+        opening_adjacency = [
+            item for item in manifest.reservations if item.kind == "opening_adjacency"
+        ]
+        if opening_adjacency:
+            details.append(
+                "a separate continuous opening-free wall segment on at least one "
+                "side of a matching window for every strict next-to reservation; "
+                "doors and other openings cannot share that capacity"
+            )
+        if zone_area and (
+            not manifest.explicit_geometry.detected
+            or manifest.explicit_geometry.functional_zone_area_policy != "advisory"
+        ):
             details.append(
                 f"at least {zone_area:g} m2 total usable area for later functional zones"
+            )
+        elif zone_area:
+            details.append(
+                "the exact user-specified footprint is immutable; use functional "
+                "zones as a downstream layout advisory rather than enlarging it"
             )
         details.append(
             "an adaptive implicit-window budget of 1 for rooms up to 25 m2, "
@@ -484,7 +736,9 @@ def _add_floor_plan_reservation_guidance(
     )
     check = (
         "Verify every reserved wall-anchor segment remains large enough and "
-        "unobstructed by doors or windows before handing the room to furniture."
+        "unobstructed by doors or windows, and every reserved window-side segment "
+        "remains large enough and unobstructed by doors or other openings before "
+        "handing the room to furniture."
     )
     constraints = list(brief.constraints_for_designer)
     if guidance not in constraints:
@@ -501,19 +755,66 @@ def _add_floor_plan_reservation_guidance(
 
 
 def _format_memory_for_prompt(memory_pack: MemoryPack) -> str:
-    """Format memory pack into a compact text block."""
-    parts: list[str] = []
-    if memory_pack.success_hints:
-        parts.append("Success patterns from similar scenes:")
-        parts.extend(f"  {i+1}. {h}" for i, h in enumerate(memory_pack.success_hints))
-    if memory_pack.failure_hints:
-        parts.append("Known failure patterns to avoid:")
-        parts.extend(f"  {i+1}. {h}" for i, h in enumerate(memory_pack.failure_hints))
-    if memory_pack.skill_texts:
-        parts.append("Applicable skills:")
-        for skill_text in memory_pack.skill_texts:
-            parts.append(skill_text)
-    return "\n".join(parts) if parts else "No relevant memory retrieved for this stage."
+    """Expose complete, identity-bound candidates to the existing Planner call."""
+    rows = memory_pack.deduplicated().selections
+    if not rows:
+        return "No identity-bound memory candidates. Return memory_adaptations=[]."
+    return json.dumps(
+        [
+            {
+                "memory_type": row.memory_type,
+                "memory_id": row.memory_id,
+                "content_hash": row.content_hash,
+                "advice": row.injected_text,
+                "verified_spatial_reference": row.placement_text,
+                "spatial_relations": [
+                    {
+                        **{
+                            key: value
+                            for key, value in relation.items()
+                            if key not in {"verification_evidence", "geometry_verified"}
+                        },
+                        "verification_status": effective_relation_grade(relation),
+                        "relation_index": index,
+                    }
+                    for index, relation in enumerate(row.spatial_relations)
+                ],
+                "applicability": row.applicability,
+                "placement_experience": (
+                    {
+                        "procedure": row.placement_experience.get("procedure", []),
+                        "method_steps": row.placement_experience.get(
+                            "method_steps", []
+                        ),
+                        "critic_advice": row.placement_experience.get(
+                            "critic_advice", []
+                        ),
+                        "applicability": row.placement_experience.get(
+                            "applicability", []
+                        ),
+                        "episodes": [
+                            {
+                                "episode_id": e["episode_id"],
+                                "subject_role": e["subject"].get("name")
+                                or e["subject"].get("category"),
+                                "anchor_role": e["anchor"].get("name")
+                                or e["anchor"].get("category"),
+                                "measurements": e["measurements"],
+                                "native_checks": e.get("native_checks", []),
+                            }
+                            for e in row.placement_experience.get("episodes", [])
+                        ],
+                    }
+                    if row.placement_experience
+                    else {}
+                ),
+                "evidence_warnings": row.evidence_warnings,
+            }
+            for row in rows
+        ],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
 
 
 def _stage_required_objects(task_spec: SceneTaskSpec, stage: str) -> list[str]:
@@ -529,6 +830,59 @@ def _stage_required_objects(task_spec: SceneTaskSpec, stage: str) -> list[str]:
     )
 
 
+def _brief_required_objects(task_spec: SceneTaskSpec, stage: str) -> list[str]:
+    """Return assets actually created by ``stage``, not downstream capacity."""
+    if stage == "floor_plan":
+        return list(task_spec.required_architectural_features)
+    return _stage_required_objects(task_spec, stage)
+
+
+def _apply_stage_policy(
+    brief: StageBrief,
+    context: HarnessContext,
+    *,
+    original_task: str = "",
+) -> StageBrief:
+    """Make policy semantics deterministic after the model-generated proposal."""
+    policy = context.stage_policy
+    required = _brief_required_objects(context.task_spec, context.stage)
+    inventory_closed = _task_explicitly_closes_inventory(original_task, required)
+    optional = (
+        list(brief.optional_asset_recommendations)
+        if policy == "auto" and not inventory_closed
+        else []
+    )
+    constraints = list(brief.constraints_for_designer)
+    if inventory_closed:
+        policy_rule = (
+            "The immutable user task explicitly closes this stage inventory. "
+            "Complete its required assets without optional additions, but still "
+            "execute and verify the native stage."
+        )
+    elif policy == "auto":
+        policy_rule = (
+            "Treat prompt-required assets as the non-negotiable minimum, then use "
+            "native designer judgment for useful same-stage optional assets that fit "
+            "the room type, style, usable capacity, circulation, and existing scene."
+        )
+    else:
+        policy_rule = (
+            "This required_only ablation disables optional asset proposals, but the "
+            "native stage must still execute and verify every prompt-required asset."
+        )
+    if policy_rule not in constraints:
+        constraints = [*constraints[:5], policy_rule]
+    return brief.model_copy(
+        update={
+            "stage_policy": policy,
+            "optional_assets_allowed": bool(policy == "auto" and not inventory_closed),
+            "required_objects": required,
+            "optional_asset_recommendations": optional,
+            "constraints_for_designer": constraints,
+        }
+    )
+
+
 def _format_task_spec(task_spec: SceneTaskSpec, stage: str) -> str:
     """Format task spec focusing on stage-relevant requirements."""
     lines = [
@@ -537,7 +891,13 @@ def _format_task_spec(task_spec: SceneTaskSpec, stage: str) -> str:
     ]
 
     required = _stage_required_objects(task_spec, stage)
-    if required:
+    if stage == "floor_plan" and task_spec.required_large_objects:
+        lines.append(
+            "Downstream furniture capacity requirements (plan space only; do not "
+            "place these objects in floor_plan): "
+            + ", ".join(task_spec.required_large_objects)
+        )
+    elif required:
         lines.append(
             "Required objects for this stage (minimum, not exhaustive): "
             f"{', '.join(required)}"
@@ -589,15 +949,21 @@ class GlobalPlanner:
         api_key: str | None = None,
         max_tokens: int = 2048,
         temperature: float = 0.2,
+        llm_client: Any | None = None,
     ) -> None:
         self._model = model
         self._max_tokens = max_tokens
         self._temperature = temperature
-        self._client = OpenAI(
-            base_url=api_base_url
-            or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
-            api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
-        )
+        self._structured_llm = llm_client
+        self._client = None
+        if self._structured_llm is None:
+            from openai import OpenAI
+
+            self._client = OpenAI(
+                base_url=api_base_url
+                or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
+                api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
+            )
         self.last_trace: dict = {}
 
     def generate_stage_brief(
@@ -619,38 +985,96 @@ class GlobalPlanner:
         stage = context.stage
         console_logger.info(f"GlobalPlanner: generating StageBrief for stage '{stage}'")
 
-        # Empty inventories must be a true no-op.  Letting an LLM read the
-        # original prompt here can otherwise recreate a manipuland or furniture
-        # object in the wall stage, contradicting the compiled contract.
-        hard_constraints = (
-            context.relation_context.hard_constraints
-            if context.relation_context is not None
-            else []
-        )
-        if (
-            not _stage_required_objects(context.task_spec, stage)
-            and not hard_constraints
-        ):
-            console_logger.info(
-                "GlobalPlanner: %s has no TaskCompiler-owned objects; using no-op brief",
-                stage,
-            )
-            self.last_trace = {
-                "status": "no_op",
-                "stage": stage,
-                "attempts": [],
-                "hard_constraint_ids": [],
-                "hard_constraint_coverage": 1.0,
-            }
-            return _add_floor_plan_reservation_guidance(
-                self._fallback_brief(context), context
-            )
-
         user_message = self._build_user_message(
             context,
             scene_state_summary,
             original_task=original_task,
         )
+
+        structured_llm = getattr(self, "_structured_llm", None)
+        if structured_llm is not None:
+            result = structured_llm.complete(
+                role="global_planner",
+                stage=stage,
+                event="generate_stage_brief",
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": user_message},
+                ],
+                response_model=StageBrief,
+            )
+            attempts = [
+                attempt.model_dump() | {"attempt": max(0, int(attempt.attempt) - 1)}
+                for attempt in result.attempts
+            ]
+            failure_reason = f"{result.final_error_kind}: {result.final_error}".strip(
+                ": "
+            )
+            if result.value is not None and result.value.stage == stage:
+                brief = _reconcile_stage_brief(
+                    result.value,
+                    original_task=original_task,
+                    room_type=context.task_spec.room_type,
+                    required_objects=_stage_required_objects(context.task_spec, stage),
+                )
+                brief = _reconcile_floor_plan_zone_guidance(
+                    brief,
+                    original_task=original_task,
+                    functional_zones=context.task_spec.functional_zones,
+                )
+                brief = enforce_stage_brief_scope(brief, context.task_spec)
+                brief = _apply_stage_policy(
+                    brief,
+                    context,
+                    original_task=original_task,
+                )
+                brief = _add_floor_plan_reservation_guidance(brief, context)
+                self.last_trace = {
+                    "status": "ok",
+                    "stage": stage,
+                    "stage_policy": context.stage_policy,
+                    "required_objects": brief.required_objects,
+                    "optional_asset_recommendations": [
+                        item.model_dump(mode="json")
+                        for item in brief.optional_asset_recommendations
+                    ],
+                    "attempts": attempts,
+                    "hard_constraint_ids": (
+                        context.relation_context.hard_constraint_ids
+                        if context.relation_context is not None
+                        else []
+                    ),
+                    "hard_constraint_coverage": 1.0,
+                }
+                return brief
+
+            if result.value is not None:
+                failure_reason = (
+                    f"StageBrief.stage must be {stage!r}, "
+                    f"got {result.value.stage!r}"
+                )
+            self.last_trace = {
+                "status": "fallback",
+                "stage": stage,
+                "stage_policy": context.stage_policy,
+                "attempts": attempts,
+                "failure_reason": failure_reason,
+                "hard_constraint_ids": (
+                    context.relation_context.hard_constraint_ids
+                    if context.relation_context is not None
+                    else []
+                ),
+                "hard_constraint_coverage": 1.0,
+            }
+            console_logger.warning(
+                "Structured GlobalPlanner failed for %s; using main-compatible "
+                "fallback brief: %s",
+                stage,
+                failure_reason,
+            )
+            return _add_floor_plan_reservation_guidance(
+                self._fallback_brief(context, original_task=original_task), context
+            )
 
         attempts: list[dict] = []
         previous_output = ""
@@ -679,6 +1103,8 @@ class GlobalPlanner:
                 )
             started_at = time.perf_counter()
             raw = ""
+            response = None
+            response_elapsed_sec: float | None = None
             try:
                 response = self._client.chat.completions.create(
                     model=self._model,
@@ -690,13 +1116,16 @@ class GlobalPlanner:
                         "json_schema": {
                             "name": "stage_brief",
                             "strict": True,
-                            "schema": StageBrief.model_json_schema(),
+                            "schema": make_openai_strict_json_schema(
+                                StageBrief.model_json_schema()
+                            ),
                         },
                     },
-                    extra_body=chat_template_kwargs_from_effort(
-                        "none", model=self._model
+                    extra_body=openrouter_extra_body(
+                        chat_template_kwargs_from_effort("none", model=self._model)
                     ),
                 )
+                response_elapsed_sec = round(time.perf_counter() - started_at, 6)
                 message = response.choices[0].message
                 raw = message.content
                 if not raw:
@@ -722,17 +1151,33 @@ class GlobalPlanner:
                     original_task=original_task,
                     functional_zones=context.task_spec.functional_zones,
                 )
+                brief = enforce_stage_brief_scope(brief, context.task_spec)
+                brief = _apply_stage_policy(
+                    brief,
+                    context,
+                    original_task=original_task,
+                )
                 brief = _add_floor_plan_reservation_guidance(brief, context)
                 attempts.append(
                     {
                         "attempt": attempt,
                         "status": "ok",
-                        "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                        "elapsed_sec": (
+                            response_elapsed_sec
+                            if response_elapsed_sec is not None
+                            else round(time.perf_counter() - started_at, 6)
+                        ),
                     }
                 )
                 self.last_trace = {
                     "status": "ok",
                     "stage": stage,
+                    "stage_policy": context.stage_policy,
+                    "required_objects": brief.required_objects,
+                    "optional_asset_recommendations": [
+                        item.model_dump(mode="json")
+                        for item in brief.optional_asset_recommendations
+                    ],
                     "attempts": attempts,
                     "hard_constraint_ids": (
                         context.relation_context.hard_constraint_ids
@@ -750,7 +1195,11 @@ class GlobalPlanner:
                         output=raw or "",
                         raw_response=response,
                     ).model_dump()
-                    | {"attempt": attempt, "status": "ok"}
+                    | {
+                        "attempt": attempt,
+                        "status": "ok",
+                        "elapsed_sec": response_elapsed_sec,
+                    }
                 )
                 return brief
             except Exception as exc:
@@ -771,9 +1220,14 @@ class GlobalPlanner:
                         event="generate_stage_brief",
                         prompt=messages,
                         output=raw,
+                        raw_response=response,
                         error=validation_error,
                     ).model_dump()
-                    | {"attempt": attempt, "status": "error"}
+                    | {
+                        "attempt": attempt,
+                        "status": "error",
+                        "elapsed_sec": round(time.perf_counter() - started_at, 6),
+                    }
                 )
 
         attempts.append(
@@ -782,6 +1236,7 @@ class GlobalPlanner:
         self.last_trace = {
             "status": "fallback",
             "stage": stage,
+            "stage_policy": context.stage_policy,
             "attempts": attempts,
             "failure_reason": validation_error,
             "hard_constraint_ids": (
@@ -797,7 +1252,7 @@ class GlobalPlanner:
             validation_error,
         )
         return _add_floor_plan_reservation_guidance(
-            self._fallback_brief(context), context
+            self._fallback_brief(context, original_task=original_task), context
         )
 
     def _build_user_message(
@@ -814,6 +1269,7 @@ class GlobalPlanner:
         parts = [
             f"## Current Stage: {context.stage}",
             f"Stage description: {stage_desc}",
+            f"Stage execution policy: {context.stage_policy}",
             "",
             "## Task Specification",
             task_spec_text,
@@ -860,54 +1316,95 @@ class GlobalPlanner:
                         sort_keys=True,
                     ),
                 ]
+            if context.relation_context.resolved_opening_reservations:
+                parts += [
+                    "",
+                    "## Resolved Opening Reservations (authoritative geometry)",
+                    json.dumps(
+                        context.relation_context.resolved_opening_reservations,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                ]
 
-        parts += [
-            "",
-            "## Retrieved Memory",
-            memory_text,
-            "",
-            f"## Budget: max_designer_iterations={context.stage_budget.max_designer_iterations}, "
-            f"max_repair_steps={context.stage_budget.max_repair_steps}",
-            "",
-            "Generate the StageBrief JSON for the designer agent.",
-        ]
+        parts += ["", "## Retrieved Memory", memory_text]
+        if (
+            context.stage_budget.max_designer_iterations > 0
+            or context.stage_budget.max_repair_steps > 0
+        ):
+            parts += [
+                "",
+                f"## Budget: max_designer_iterations={context.stage_budget.max_designer_iterations}, "
+                f"max_repair_steps={context.stage_budget.max_repair_steps}",
+            ]
+        parts += ["", "Generate the StageBrief JSON for the designer agent."]
 
         return "\n".join(parts)
 
-    def _fallback_brief(self, context: HarnessContext) -> StageBrief:
+    def _fallback_brief(
+        self,
+        context: HarnessContext,
+        *,
+        original_task: str = "",
+    ) -> StageBrief:
         """Minimal safe StageBrief used when the model call fails."""
         stage = context.stage
         required = _stage_required_objects(context.task_spec, stage)
 
         constraints = []
-        if required:
+        if stage == "floor_plan" and context.task_spec.required_large_objects:
+            constraints.append(
+                "Reserve adequate floor area and circulation for downstream "
+                "furniture: "
+                + ", ".join(context.task_spec.required_large_objects)
+                + ". Do not place furniture during floor_plan."
+            )
+        elif required:
             constraints.append(
                 f"Ensure these objects are present: {', '.join(required)}"
             )
             constraints.append(f"Follow {context.task_spec.style} aesthetic style")
             constraints.append("Maintain clear walking paths and avoid overcrowding")
+        elif context.stage_policy == "auto":
+            constraints.append(
+                "No asset is explicitly required for this stage. Still execute the "
+                "native stage and autonomously add useful same-stage assets when they "
+                "fit the room type, style, usable capacity, circulation, support "
+                "surfaces, and existing scene."
+            )
         else:
             constraints.append(
-                "No objects are allocated to this stage; do not create, move, or "
-                "reinterpret objects owned by another stage."
+                "No asset is explicitly required and optional planning is disabled by "
+                "required_only. Still execute the native stage and preserve stage "
+                "ownership."
             )
 
-        return StageBrief(
-            stage=stage,
-            stage_objective=(
-                f"Complete the {stage} stage for a {context.task_spec.room_type}"
-                if required
-                else f"Preserve the existing scene during the empty {stage} stage"
+        brief = enforce_stage_brief_scope(
+            StageBrief(
+                stage=stage,
+                stage_policy=context.stage_policy,
+                required_objects=_brief_required_objects(context.task_spec, stage),
+                stage_objective=f"Complete the {stage} stage for a {context.task_spec.room_type}",
+                recommended_skills=[],
+                constraints_for_designer=constraints,
+                checks_for_critic=[
+                    (
+                        "Verify all required objects are present"
+                        if required
+                        else "Verify stage-appropriate completeness and ownership"
+                    ),
+                    (
+                        "Check for collisions"
+                        if required
+                        else "Check optional additions for capacity and collisions"
+                    ),
+                ],
+                failure_patterns_to_avoid=[],
             ),
-            recommended_skills=[],
-            constraints_for_designer=constraints,
-            checks_for_critic=[
-                (
-                    "Verify all required objects are present"
-                    if required
-                    else "Verify no cross-stage object was created or moved"
-                ),
-                "Check for collisions" if required else "Preserve existing geometry",
-            ],
-            failure_patterns_to_avoid=[],
+            context.task_spec,
+        )
+        return _apply_stage_policy(
+            brief,
+            context,
+            original_task=original_task,
         )

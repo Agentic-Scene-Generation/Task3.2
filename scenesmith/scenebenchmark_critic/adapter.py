@@ -25,6 +25,11 @@ from scenesmith.scenebenchmark_critic.evaluator import build_all_checks
 from scenesmith.scenebenchmark_critic.intent_contract import (
     attach_intent_contract_to_case_pack,
 )
+from scenesmith.scenebenchmark_critic.opening_geometry import (
+    normalized_opening_type,
+    normalized_wall_direction,
+    opening_physical_bounds,
+)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.constants import (
     BEDS,
     MEDIA,
@@ -360,6 +365,7 @@ def room_scene_to_case_pack(
         "task_instruction": scene.text_description,
         "room_type": scene.room_type,
         "scene_geometry": scene_geometry,
+        "physics_evidence": _physics_evidence_for_scene(scene),
         "checks": [],
     }
     # Preserve the original task separately from the mutable stage prompt.
@@ -368,6 +374,17 @@ def room_scene_to_case_pack(
     attach_intent_contract_to_case_pack(scene, case_pack)
     case_pack["checks"] = build_all_checks(case_pack, metrics=metrics)
     return case_pack
+
+
+def _physics_evidence_for_scene(scene: RoomScene) -> dict[str, Any] | None:
+    """Read only the structured physics artifact, never a human log string."""
+    metadata = getattr(scene, "metadata", None)
+    if isinstance(metadata, dict):
+        evidence = metadata.get("scenebenchmark_physics_evidence")
+        if isinstance(evidence, dict):
+            return dict(evidence)
+    evidence = getattr(scene, "scenebenchmark_physics_evidence", None)
+    return dict(evidence) if isinstance(evidence, dict) else None
 
 
 def house_scene_to_case_pack(
@@ -436,6 +453,15 @@ def _room_scene_geometry(
                 continue
             objects.append(_object_to_geometry(wall, scene, offset))
             added_object_ids.add(wall_id)
+        for opening in getattr(scene.room_geometry, "openings", ()) or ():
+            opening_id = str(getattr(opening, "opening_id", "") or "")
+            if not opening_id or opening_id in added_object_ids:
+                continue
+            proxy = _opening_geometry_proxy(opening, scene, offset)
+            if proxy is None:
+                continue
+            objects.append(proxy)
+            added_object_ids.add(opening_id)
 
     included_ids: set[str] = set()
     allowed_types = (
@@ -620,6 +646,56 @@ def _opening_record(opening: Any, offset: np.ndarray) -> dict[str, Any]:
             "max": (np.array(bbox_max, dtype=float) + offset).tolist(),
         }
     return record
+
+
+def _opening_geometry_proxy(
+    opening: Any, scene: RoomScene, offset: np.ndarray
+) -> dict[str, Any] | None:
+    """Build a read-only critic object for a RoomGeometry opening."""
+    geom = scene.room_geometry
+    bounds = opening_physical_bounds(
+        opening,
+        wall_thickness_m=float(getattr(geom, "wall_thickness", 0.05) or 0.05),
+        offset=offset,
+    )
+    category = normalized_opening_type(opening)
+    if bounds is None or category not in {"door", "opening", "window"}:
+        return None
+    lower, upper = bounds
+    center = (lower + upper) / 2.0
+    size = upper - lower
+    opening_id = str(getattr(opening, "opening_id", "") or "")
+    return {
+        "id": opening_id,
+        "room": scene.room_id,
+        "name": opening_id,
+        "description": f"structural {category}",
+        "object_type": "structural",
+        "category": category,
+        "category_norm": category,
+        "yaw_deg": 0.0,
+        "bbox_world": {
+            "center": center.tolist(),
+            "size": size.tolist(),
+            "min": lower.tolist(),
+            "max": upper.tolist(),
+        },
+        "footprint_world": [
+            [float(lower[0]), float(lower[1])],
+            [float(upper[0]), float(lower[1])],
+            [float(upper[0]), float(upper[1])],
+            [float(lower[0]), float(upper[1])],
+        ],
+        "interaction_faces": [],
+        "functional_hints": {},
+        "object_function_profile": {},
+        "metadata": {
+            "structural_proxy": True,
+            "opening_id": opening_id,
+            "wall_direction": normalized_wall_direction(opening),
+        },
+        "nav_obstacle_class": "structural",
+    }
 
 
 def _local_bbox_size(obj: SceneObject, *, fallback_size: np.ndarray) -> np.ndarray:
@@ -862,11 +938,17 @@ def _support_surface_to_region(
     corners_world = np.array([surface.transform @ corner for corner in corners_local])
     corners_world = corners_world + offset
     z_world = float((surface.transform @ np.array([0.0, 0.0, 0.0]))[2] + offset[2])
+    clearance_above_m = max(
+        float(surface.bounding_box_max[2] - surface.bounding_box_min[2]), 0.0
+    )
+    if not math.isfinite(clearance_above_m):
+        clearance_above_m = 0.0
     return {
         "region_id": str(surface.surface_id),
         "support_kind": "top_surface",
         "height_world_z": z_world,
-        "clearance_above_m": None,
+        "clearance_above_m": clearance_above_m,
+        "open_above": getattr(surface, "open_above", False) is True,
         "access_type": "top",
         "area_m2": surface.area,
         "polygon_world_xy": corners_world[:, :2].tolist(),

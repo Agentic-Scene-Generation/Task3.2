@@ -11,14 +11,22 @@ from omegaconf import DictConfig
 from pydrake.all import RigidTransform, RollPitchYaw
 
 from scenesmith.agent_utils.action_logger import log_scene_action
+from scenesmith.agent_utils.asset_scaling_policy import (
+    agent_rescale_tools_enabled,
+    filter_agent_rescale_tools,
+)
 from scenesmith.agent_utils.asset_manager import (
     AssetGenerationRequest,
     AssetGenerationResult as DomainAssetGenerationResult,
     AssetManager,
 )
-from scenesmith.agent_utils.semantic_names import semantic_name_candidates_for_request
+from scenesmith.agent_utils.semantic_names import (
+    forbidden_semantic_components_for_request,
+    semantic_name_candidates_for_request,
+)
 from scenesmith.agent_utils.furniture_layout_planning import (
     apply_bedroom_asset_size_policy,
+    opening_clearance_conflict_for_transform,
 )
 from scenesmith.agent_utils.loop_detector import LoopDetector
 from scenesmith.agent_utils.placement_noise import (
@@ -47,6 +55,9 @@ from scenesmith.furniture_agents.tools.response_dataclasses import (
     FurniturePlacementResult,
     Position3D,
     Rotation3D,
+)
+from scenesmith.floor_plan_agents.tools.polygon_geometry import (
+    room_geometry_covers_object,
 )
 
 console_logger = logging.getLogger(__name__)
@@ -327,6 +338,17 @@ class FurnitureTools:
         self, scene_obj: SceneObject, transform: RigidTransform
     ) -> tuple[bool, str]:
         """Validate the full object AABB, not just its center point."""
+        if not room_geometry_covers_object(
+            self.scene.room_geometry,
+            scene_obj,
+            transform=transform,
+        ):
+            return (
+                False,
+                f"Full footprint for {scene_obj.name} would extend outside the "
+                "polygon floor. Choose a pose farther from an edge or concave notch.",
+            )
+
         room_bounds = self._get_room_bounds_xy()
         world_bounds = self._world_bounds_for_transform(scene_obj, transform)
         if room_bounds is None or world_bounds is None:
@@ -361,6 +383,25 @@ class FurnitureTools:
                 + "; ".join(violations),
             )
         return True, ""
+
+    def _check_opening_clearance_for_transform(
+        self, scene_obj: SceneObject, transform: RigidTransform
+    ) -> tuple[bool, str]:
+        """Reject candidate furniture poses inside hard door/open clearances."""
+        conflict = opening_clearance_conflict_for_transform(
+            scene=self.scene,
+            scene_obj=scene_obj,
+            transform=transform,
+        )
+        if conflict is None:
+            return True, ""
+        return (
+            False,
+            f"Full bounding box for {scene_obj.name} would overlap hard "
+            f"{conflict.opening_type} clearance {conflict.zone_id} on "
+            f"{conflict.wall}_wall. Choose an opening-free wall segment or a "
+            "position outside the clearance volume.",
+        )
 
     def _create_loop_error_response(
         self, method_name: str, attempt_count: int, args: tuple, kwargs: dict
@@ -511,6 +552,12 @@ class FurnitureTools:
                     ObjectType.FURNITURE,
                     scene=self.scene,
                 ),
+                forbidden_semantic_components=forbidden_semantic_components_for_request(
+                    getattr(self.scene, "scene_expert_task_spec", None),
+                    size_policy_result.short_names,
+                    ObjectType.FURNITURE,
+                    scene=self.scene,
+                ),
             )
             return self._generate_assets_impl(request)
 
@@ -638,14 +685,18 @@ class FurnitureTools:
             """
             return self._rescale_furniture_impl(object_id, scale_factor)
 
-        return {
-            "generate_assets": generate_assets,
-            "add_furniture_to_scene_tool": add_furniture_to_scene_tool,
-            "move_furniture_tool": move_furniture_tool,
-            "remove_furniture_tool": remove_furniture_tool,
-            "rescale_furniture_tool": rescale_furniture_tool,
-            "list_available_assets": list_available_assets,
-        }
+        return filter_agent_rescale_tools(
+            {
+                "generate_assets": generate_assets,
+                "add_furniture_to_scene_tool": add_furniture_to_scene_tool,
+                "move_furniture_tool": move_furniture_tool,
+                "remove_furniture_tool": remove_furniture_tool,
+                "rescale_furniture_tool": rescale_furniture_tool,
+                "list_available_assets": list_available_assets,
+            },
+            self.cfg,
+            tool_names={"rescale_furniture_tool"},
+        )
 
     @log_scene_action
     def _add_furniture_to_scene_impl(
@@ -785,6 +836,29 @@ class FurnitureTools:
                     noisy_error,
                 )
                 scene_object.transform = base_transform
+
+            opening_valid, opening_error = self._check_opening_clearance_for_transform(
+                scene_obj=scene_object,
+                transform=scene_object.transform,
+            )
+            if not opening_valid:
+                base_opening_valid, _ = self._check_opening_clearance_for_transform(
+                    scene_obj=scene_object,
+                    transform=base_transform,
+                )
+                if base_opening_valid:
+                    console_logger.info(
+                        "Placement noise would enter an opening clearance for %s; "
+                        "using un-noised transform",
+                        scene_object.object_id,
+                    )
+                    scene_object.transform = base_transform
+                else:
+                    return self._create_failure_result(
+                        asset_id=asset_id,
+                        message=opening_error,
+                        error_type=FurnitureErrorType.INVALID_POSITION,
+                    )
 
             # Add to scene.
             self.scene.add_object(scene_object)
@@ -998,6 +1072,22 @@ class FurnitureTools:
                     error_type=FurnitureErrorType.POSITION_OUT_OF_BOUNDS,
                 ).to_json()
 
+            opening_valid, opening_error = self._check_opening_clearance_for_transform(
+                scene_obj=scene_obj,
+                transform=new_transform,
+            )
+            if not opening_valid:
+                return FurnitureOperationResult(
+                    success=False,
+                    message=opening_error,
+                    object_id=object_id,
+                    error_type=FurnitureErrorType.INVALID_POSITION,
+                    suggested_action=(
+                        "Use the opening-aware floor reservations and move to a "
+                        "continuous opening-free wall segment."
+                    ),
+                ).to_json()
+
             # Update object to new absolute pose.
             self.scene.move_object(object_id=unique_id, new_transform=new_transform)
 
@@ -1148,6 +1238,13 @@ class FurnitureTools:
         console_logger.info(
             f"Tool called: rescale_furniture (id={object_id}, scale={scale_factor})"
         )
+        if not agent_rescale_tools_enabled(self.cfg):
+            return RescaleResult(
+                success=False,
+                message="Furniture rescaling is disabled by the asset scaling policy.",
+                object_id=object_id,
+                error_type=RescaleErrorType.RESCALING_DISABLED,
+            ).to_json()
         safety_denial = self._safety_denial_rescale(
             object_id=object_id,
             scale_factor=scale_factor,
@@ -1159,6 +1256,37 @@ class FurnitureTools:
                 object_id=object_id,
                 error_type=RescaleErrorType.INVALID_SCALE_FACTOR,
             ).to_json()
+
+        obj = self.scene.get_object(UniqueID(object_id))
+        if (
+            obj is not None
+            and self.scene.room_geometry.footprint_vertices is not None
+            and obj.sdf_path is not None
+        ):
+            affected = [
+                candidate
+                for candidate in self.scene.objects.values()
+                if candidate.sdf_path == obj.sdf_path
+            ]
+            invalid = [
+                str(candidate.object_id)
+                for candidate in affected
+                if not room_geometry_covers_object(
+                    self.scene.room_geometry,
+                    candidate,
+                    bbox_scale=scale_factor,
+                )
+            ]
+            if invalid:
+                return RescaleResult(
+                    success=False,
+                    message=(
+                        "Rescale would move these furniture footprints outside the "
+                        f"polygon floor: {', '.join(invalid)}"
+                    ),
+                    object_id=object_id,
+                    error_type=RescaleErrorType.RESCALE_FAILED,
+                ).to_json()
 
         result = rescale_object_common(
             scene=self.scene,

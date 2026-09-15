@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass, field
 from typing import Any
 
 from scenesmith.scenebenchmark_critic.core.geometry import (
     GeometryStore,
     bbox_gap_xy,
+    is_floor_covering,
     is_small_object,
     object_category,
     object_footprint_polygon,
@@ -92,6 +95,13 @@ def evaluate_support_relation(
     dz = abs(float(smin[2]) - support_top)
     gap = bbox_gap_xy(subject, target)
     support_modes = _support_modes(target)
+    floor_covering_result = _floor_covering_footprint_support(
+        subject,
+        target,
+        subject_bottom=float(smin[2]),
+    )
+    if floor_covering_result is not None:
+        return floor_covering_result
     stack_result = _eval_manipuland_stack_support_result(subject, target, store=store)
     if stack_result is not None:
         return stack_result
@@ -266,6 +276,52 @@ def evaluate_support_relation(
         _bbox_support_evidence(
             subject, target, overlap_ratio=overlap_ratio, height_delta=dz
         ),
+    )
+
+
+def _floor_covering_footprint_support(
+    subject: dict[str, Any],
+    target: dict[str, Any],
+    *,
+    subject_bottom: float,
+) -> SupportRelationResult | None:
+    """Evaluate ``on_top_of`` rugs as floor-footprint coverage, not rigid support."""
+    if not is_floor_covering(target):
+        return None
+    target_bbox = target.get("bbox_world") or {}
+    height_delta = abs(subject_bottom - _support_top_z(target_bbox))
+    overlap_ratio = _footprint_overlap_ratio_xy(subject, target, inflate=0.02)
+    evidence = _bbox_support_evidence(
+        subject,
+        target,
+        overlap_ratio=overlap_ratio,
+        height_delta=height_delta,
+    )
+    if overlap_ratio >= 0.80 and height_delta <= 0.10:
+        return _support_result(
+            "pass",
+            0.95,
+            "subject footprint lies on the floor covering "
+            f"(overlap {overlap_ratio:.2f}, height delta {height_delta:.2f}m).",
+            "floor_covering_footprint",
+            evidence,
+        )
+    if overlap_ratio >= 0.50 and height_delta <= 0.12:
+        return _support_result(
+            "degraded",
+            0.72,
+            "subject footprint only partially lies on the floor covering "
+            f"(overlap {overlap_ratio:.2f}, height delta {height_delta:.2f}m).",
+            "floor_covering_footprint",
+            evidence,
+        )
+    return _support_result(
+        "fail",
+        0.96,
+        "subject footprint does not lie on the floor covering "
+        f"(overlap {overlap_ratio:.2f}, height delta {height_delta:.2f}m).",
+        "floor_covering_footprint",
+        evidence,
     )
 
 
@@ -536,6 +592,7 @@ def _eval_object_on_support_regions(
 
     _rank, overlap_ratio, region, dz = best
     clearance = _region_clearance(region)
+    open_above = _region_open_above(region)
     region_id = str(region.get("region_id") or "support_region")
     kind = str(region.get("support_kind") or "support_region")
     if (
@@ -550,11 +607,18 @@ def _eval_object_on_support_regions(
             f"matched {kind} `{region_id}` for upright reading material with overlap {overlap_ratio:.2f} "
             f"and height delta {dz:.2f}m; ignoring noisy internal shelf clearance {clearance:.2f}m.",
         )
-    if overlap_ratio >= 0.55 and dz <= 0.14 and subject_height <= clearance + 0.08:
+    if (
+        overlap_ratio >= 0.55
+        and dz <= 0.14
+        and _height_fits_region_clearance(
+            subject_height, clearance, open_above=open_above, slack_m=0.08
+        )
+    ):
+        clearance_text = "open above" if open_above else f"clearance {clearance:.2f}m"
         return (
             "pass",
             0.9,
-            f"matched {kind} `{region_id}` with overlap {overlap_ratio:.2f}, height delta {dz:.2f}m, and clearance {clearance:.2f}m.",
+            f"matched {kind} `{region_id}` with overlap {overlap_ratio:.2f}, height delta {dz:.2f}m, and {clearance_text}.",
         )
     reading_edge_result = _reading_material_shelf_region_fallback(
         subject,
@@ -565,6 +629,7 @@ def _eval_object_on_support_regions(
         overlap_ratio=overlap_ratio,
         dz=dz,
         clearance=clearance,
+        open_above=open_above,
         subject_height=subject_height,
     )
     if reading_edge_result is not None:
@@ -577,6 +642,7 @@ def _eval_object_on_support_regions(
         overlap_ratio=overlap_ratio,
         dz=dz,
         clearance=clearance,
+        open_above=open_above,
         subject_height=subject_height,
     )
     if small_upright_result is not None:
@@ -589,15 +655,23 @@ def _eval_object_on_support_regions(
         overlap_ratio=overlap_ratio,
         dz=dz,
         clearance=clearance,
+        open_above=open_above,
         subject_height=subject_height,
     )
     if weight_rack_result is not None:
         return weight_rack_result
-    if overlap_ratio >= 0.35 and dz <= 0.18 and subject_height <= clearance + 0.14:
+    if (
+        overlap_ratio >= 0.35
+        and dz <= 0.18
+        and _height_fits_region_clearance(
+            subject_height, clearance, open_above=open_above, slack_m=0.14
+        )
+    ):
+        clearance_text = "open above" if open_above else f"clearance {clearance:.2f}m"
         return (
             "degraded",
             0.72,
-            f"partially matched {kind} `{region_id}` near the support edge: overlap {overlap_ratio:.2f}, height delta {dz:.2f}m, clearance {clearance:.2f}m.",
+            f"partially matched {kind} `{region_id}` near the support edge: overlap {overlap_ratio:.2f}, height delta {dz:.2f}m, {clearance_text}.",
         )
     if overlap_ratio >= 0.55 and dz <= 0.14:
         return (
@@ -657,13 +731,16 @@ def _reading_material_shelf_region_fallback(
     overlap_ratio: float,
     dz: float,
     clearance: float,
+    open_above: bool,
     subject_height: float,
 ) -> tuple[str, float, str] | None:
     if not _is_multilevel_shelf_like_target(target):
         return None
     if not _token_text_has_any(subject, STACKABLE_SUPPORT_TEXT_HINTS):
         return None
-    if subject_height > clearance + 0.16:
+    if not _height_fits_region_clearance(
+        subject_height, clearance, open_above=open_above, slack_m=0.16
+    ):
         return None
     if kind == "top_surface" and overlap_ratio >= 0.45 and dz <= 0.18:
         return (
@@ -691,6 +768,7 @@ def _small_upright_top_surface_region_fallback(
     overlap_ratio: float,
     dz: float,
     clearance: float,
+    open_above: bool,
     subject_height: float,
 ) -> tuple[str, float, str] | None:
     if kind != "top_surface":
@@ -701,7 +779,9 @@ def _small_upright_top_surface_region_fallback(
         return None
     if overlap_ratio < 0.85 or dz > 0.18:
         return None
-    if subject_height > clearance + 0.10:
+    if not _height_fits_region_clearance(
+        subject_height, clearance, open_above=open_above, slack_m=0.10
+    ):
         return None
     return (
         "pass",
@@ -720,6 +800,7 @@ def _weight_plate_rack_region_fallback(
     overlap_ratio: float,
     dz: float,
     clearance: float,
+    open_above: bool,
     subject_height: float,
 ) -> tuple[str, float, str] | None:
     if not _is_weight_plate_subject(subject):
@@ -728,7 +809,9 @@ def _weight_plate_rack_region_fallback(
         return None
     if kind not in {"top_surface", "internal_shelf"}:
         return None
-    if subject_height > clearance + 0.14:
+    if not _height_fits_region_clearance(
+        subject_height, clearance, open_above=open_above, slack_m=0.14
+    ):
         return None
     if overlap_ratio < 0.35 or dz > 0.18:
         return None
@@ -1779,9 +1862,24 @@ def _region_height_world(region: dict[str, Any]) -> float | None:
 
 def _region_clearance(region: dict[str, Any]) -> float:
     try:
-        return max(float(region.get("clearance_above_m")), 0.0)
+        clearance = float(region.get("clearance_above_m"))
     except Exception:
         return 1.0
+    return max(clearance, 0.0) if math.isfinite(clearance) else 0.0
+
+
+def _region_open_above(region: dict[str, Any]) -> bool:
+    return region.get("open_above") is True
+
+
+def _height_fits_region_clearance(
+    subject_height: float,
+    clearance: float,
+    *,
+    open_above: bool,
+    slack_m: float,
+) -> bool:
+    return open_above or subject_height <= clearance + slack_m
 
 
 def _is_internal_support_region(region: dict[str, Any]) -> bool:

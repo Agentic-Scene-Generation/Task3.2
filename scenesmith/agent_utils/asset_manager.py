@@ -150,8 +150,17 @@ def _normalize_independent_media_requests(
 ) -> "AssetGenerationRequest":
     """Avoid a display-bearing console when the scene requests a second display."""
     context = str(request.scene_prompt_context or "")
-    if request.object_type != ObjectType.FURNITURE or not _SEPARATE_MEDIA_ROLES.search(
-        context
+    forbidden_components = request.forbidden_semantic_components or [
+        [] for _ in request.object_descriptions
+    ]
+    has_structured_separate_media = any(
+        normalize_semantic_name(component)
+        in {"television", "tv", "display", "screen", "monitor"}
+        for values in forbidden_components
+        for component in values
+    )
+    if request.object_type != ObjectType.FURNITURE or not (
+        has_structured_separate_media or _SEPARATE_MEDIA_ROLES.search(context)
     ):
         return request
 
@@ -207,6 +216,7 @@ def _normalize_independent_media_requests(
         operation_type=request.operation_type,
         scene_id=request.scene_id,
         semantic_name_candidates=semantic_candidates,
+        forbidden_semantic_components=[list(values) for values in forbidden_components],
     )
 
 
@@ -319,6 +329,9 @@ class AssetGenerationRequest:
 
     semantic_name_candidates: list[list[str]] | None = None
     """TaskCompiler-owned labels that rendered VLM selection may choose from."""
+
+    forbidden_semantic_components: list[list[str]] | None = None
+    """Per-asset components that must remain separate physical objects."""
 
 
 @dataclass
@@ -653,6 +666,16 @@ class AssetManager:
                 fit_axes=fit_axes,
             )
         return final_path, bbox_min, bbox_max, applied_scale
+
+    def _should_scale_hssd_to_requested_dimensions(self) -> bool:
+        """Return whether HSSD meshes should be fitted to requested dimensions.
+
+        The requested dimensions are still sent to HSSD retrieval for candidate
+        ranking when this is false.  This switch controls only the local mesh
+        conversion step after a candidate has been selected.
+        """
+        hssd_config = getattr(getattr(self.cfg, "asset_manager", None), "hssd", None)
+        return bool(getattr(hssd_config, "scale_to_requested_dimensions", True))
 
     def _hssd_uniform_fit_min_ratio(self, description: str) -> float:
         """Choose a semantic floor for uniformly fitted HSSD proportions."""
@@ -1438,7 +1461,13 @@ class AssetManager:
         rendered_assets_dir: Path,
     ) -> RenderedAssetChoice:
         """Apply rendered-choice ranking to the direct, non-router HSSD path."""
-        if not enabled or len(candidates) <= 1:
+        forbidden_components = (
+            request.forbidden_semantic_components[index]
+            if request.forbidden_semantic_components
+            and index < len(request.forbidden_semantic_components)
+            else None
+        )
+        if not enabled or (len(candidates) <= 1 and not forbidden_components):
             return RenderedAssetChoice(
                 candidates=candidates,
                 semantic_name=normalize_semantic_name(request.short_names[index])
@@ -1473,6 +1502,7 @@ class AssetManager:
                 and index < len(request.semantic_name_candidates)
                 else None
             ),
+            forbidden_components=forbidden_components,
             # Keep a per-room, machine-readable trail for the observability UI.
             audit_path=self.output_dir / "audit" / "hssd_rendered_choice.jsonl",
             retrieval_backend=str(
@@ -1574,12 +1604,19 @@ class AssetManager:
             blender_server=self.blender_server,
             object_type=request.object_type,
         )
-        scaling_dimensions = self._align_linear_cutlery_requested_dimensions(
-            canonical_path=canonical_path,
-            object_type=request.object_type,
-            description=request.object_descriptions[index],
-            short_name=short_name,
-            desired_dimensions=request.desired_dimensions[index],
+        scale_to_requested_dimensions = (
+            self._should_scale_hssd_to_requested_dimensions()
+        )
+        scaling_dimensions = (
+            self._align_linear_cutlery_requested_dimensions(
+                canonical_path=canonical_path,
+                object_type=request.object_type,
+                description=request.object_descriptions[index],
+                short_name=short_name,
+                desired_dimensions=request.desired_dimensions[index],
+            )
+            if scale_to_requested_dimensions
+            else None
         )
 
         final_gltf_path, bbox_min, bbox_max, applied_scale = (
@@ -1630,6 +1667,7 @@ class AssetManager:
             "hssd_mesh_id": mesh_id,
             "requested_dimensions": list(request.desired_dimensions[index]),
             "actual_dimensions": (bbox_max - bbox_min).tolist(),
+            "requested_dimension_fit_applied": bool(scaling_dimensions),
         }
         if floor_covering:
             metadata.update(
@@ -1928,6 +1966,11 @@ class AssetManager:
             if request.semantic_name_candidates is not None
             else None
         )
+        unique_forbidden_components = (
+            [request.forbidden_semantic_components[i] for i in unique_indices]
+            if request.forbidden_semantic_components is not None
+            else None
+        )
 
         # Create reduced request with only unique items.
         unique_request = AssetGenerationRequest(
@@ -1940,6 +1983,7 @@ class AssetManager:
             operation_type=request.operation_type,
             scene_id=request.scene_id,
             semantic_name_candidates=unique_semantic_candidates,
+            forbidden_semantic_components=unique_forbidden_components,
         )
 
         # Create asset path configurations.
@@ -2150,6 +2194,20 @@ class AssetManager:
                             )
                         )
                         continue
+
+                    # Preserve per-request component separation through router
+                    # analysis, including when it rewrites the support name.
+                    forbidden = (
+                        request.forbidden_semantic_components[idx]
+                        if request.forbidden_semantic_components
+                        and idx < len(request.forbidden_semantic_components)
+                        else []
+                    )
+                    for item in analysis.items:
+                        if _MEDIA_SUPPORT_SHORT_NAME.search(
+                            normalize_semantic_name(item.short_name)
+                        ):
+                            item.forbidden_semantic_components = list(forbidden)
 
                     # Collect items and track modifications.
                     all_items.extend(analysis.items)
@@ -2476,6 +2534,11 @@ class AssetManager:
         }
         if generated.hssd_id is not None:
             additional_metadata["hssd_mesh_id"] = generated.hssd_id
+        if generated.asset_source == "hssd":
+            additional_metadata["requested_dimensions"] = list(item.dimensions)
+            additional_metadata["requested_dimension_fit_applied"] = bool(
+                item.dimensions
+            ) and self._should_scale_hssd_to_requested_dimensions()
         if retrieved_floor_covering:
             actual_dimensions = bbox_max - bbox_min
             additional_metadata.update(
@@ -2959,8 +3022,8 @@ class AssetManager:
                 short_name=config.short_name,
                 desired_dimensions=desired_dimensions,
             )
-            if is_hssd
-            else desired_dimensions
+            if is_hssd and self._should_scale_hssd_to_requested_dimensions()
+            else (None if is_hssd else desired_dimensions)
         )
 
         # Scale mesh to desired dimensions while keeping glTF Y-up explicit.

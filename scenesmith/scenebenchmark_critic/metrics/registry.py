@@ -14,6 +14,9 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.evaluator im
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.bedside_group import (
     evaluate_bedside_group_alignment,
 )
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.activity_zone_separation import (
+    evaluate_activity_zone_separation,
+)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.classroom_workstation import (
     evaluate_classroom_workstation_distribution,
 )
@@ -31,6 +34,9 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.m
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_center import (
     evaluate_room_center_alignment,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_containment import (
+    evaluate_room_containment,
 )
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.study_furniture_layout import (
     evaluate_study_furniture_layout,
@@ -50,6 +56,9 @@ from scenesmith.scenebenchmark_critic.metrics.interaction_clearance.builder impo
 from scenesmith.scenebenchmark_critic.metrics.interaction_clearance.evaluator import (
     evaluate_clearance,
 )
+from scenesmith.scenebenchmark_critic.metrics.physics_collision.evaluator import (
+    evaluate_physics_collision_evidence,
+)
 from scenesmith.scenebenchmark_critic.metrics.spatial_accessibility.builder import (
     build_spatial_accessibility_checks,
 )
@@ -65,9 +74,9 @@ from scenesmith.scenebenchmark_critic.metrics.visual_clearance.evaluator import 
 
 
 def _interaction_evaluator(
-    _case_pack: dict, check: dict, _config: object
+    _case_pack: dict, check: dict, config: object
 ) -> dict | None:
-    return evaluate_clearance(check)
+    return evaluate_clearance(check, config=config)
 
 
 def _spatial_evaluator(case_pack: dict, check: dict, config: object) -> dict | None:
@@ -91,8 +100,10 @@ METRIC_REGISTRY: dict[str, MetricPlugin] = {
             evaluate_bedside_group_alignment,
             evaluate_classroom_workstation_distribution,
             evaluate_room_center_alignment,
+            evaluate_room_containment,
             evaluate_study_furniture_layout,
             evaluate_edge_distribution,
+            evaluate_activity_zone_separation,
             evaluate_manipuland_completeness,
             evaluate_dining_place_setting_alignment,
             evaluate_workstation_focal_alignment,
@@ -110,6 +121,11 @@ METRIC_REGISTRY: dict[str, MetricPlugin] = {
         display_label_zh="交互净空",
         check_builder=build_interaction_clearance_checks,
         rule_evaluator=_interaction_evaluator,
+    ),
+    "physics_collision": MetricPlugin(
+        name="physics_collision",
+        display_label_zh="物理碰撞",
+        extension_evaluators=(evaluate_physics_collision_evidence,),
     ),
     "visual_clearance": MetricPlugin(
         name="visual_clearance",

@@ -48,6 +48,14 @@ def compute_wall_normals(walls: list["SceneObject"]) -> dict[str, np.ndarray]:
 
     wall_normals = {}
     for wall in walls:
+        stored_normal = wall.metadata.get("inward_normal")
+        if stored_normal is not None:
+            normal_2d = np.asarray(stored_normal, dtype=float)
+            if normal_2d.shape != (2,) or np.linalg.norm(normal_2d) <= 1e-6:
+                raise ValueError(f"Invalid inward normal for wall {wall.name}")
+            wall_normals[wall.name] = normal_2d / np.linalg.norm(normal_2d)
+            continue
+
         # Wall center position in XY plane.
         wall_center_2d = wall.transform.translation()[:2]
 
@@ -166,7 +174,7 @@ class ClearanceOpeningData:
     opening_type: str
     """Type: 'door', 'window', or 'open'."""
 
-    wall_direction: str
+    wall_direction: str | None
     """Cardinal direction: 'north', 'south', 'east', 'west'."""
 
     center_world: list[float]
@@ -196,10 +204,20 @@ class ClearanceOpeningData:
     position_along_wall: float
     """Distance from wall start to opening center."""
 
+    wall_id: str | None = None
+    """Stable wall identifier; required to disambiguate polygon edges."""
+
+    wall_inward_normal: list[float] | None = None
+    """Exact room-facing normal for non-cardinal walls."""
+
+    clearance_polygon: list[list[float]] | None = None
+    """Room-local oriented XY clearance boundary for polygon walls."""
+
     def to_dict(self) -> dict:
         """Serialize to dictionary for JSON storage."""
         return {
             "opening_id": self.opening_id,
+            "wall_id": self.wall_id,
             "opening_type": self.opening_type,
             "wall_direction": self.wall_direction,
             "center_world": self.center_world,
@@ -211,6 +229,8 @@ class ClearanceOpeningData:
             "wall_start": self.wall_start,
             "wall_end": self.wall_end,
             "position_along_wall": self.position_along_wall,
+            "wall_inward_normal": self.wall_inward_normal,
+            "clearance_polygon": self.clearance_polygon,
         }
 
     @classmethod
@@ -218,6 +238,7 @@ class ClearanceOpeningData:
         """Deserialize from dictionary."""
         return cls(
             opening_id=data["opening_id"],
+            wall_id=data.get("wall_id"),
             opening_type=data["opening_type"],
             wall_direction=data["wall_direction"],
             center_world=data["center_world"],
@@ -229,6 +250,8 @@ class ClearanceOpeningData:
             wall_start=data["wall_start"],
             wall_end=data["wall_end"],
             position_along_wall=data["position_along_wall"],
+            wall_inward_normal=data.get("wall_inward_normal"),
+            clearance_polygon=data.get("clearance_polygon"),
         )
 
 
@@ -395,7 +418,7 @@ class RoomMaterials:
 
 @dataclass
 class Wall:
-    """A room's wall in one direction.
+    """A room wall represented by a finite line segment.
 
     Each room has exactly 4 walls (N/S/E/W). Wall geometry is computed from
     room position + dimensions. A wall can face multiple rooms in T-junction
@@ -408,8 +431,8 @@ class Wall:
     room_id: str
     """Room that owns this wall."""
 
-    direction: WallDirection
-    """Cardinal direction of this wall."""
+    direction: WallDirection | None
+    """Cardinal direction for rectangle modes; None for polygon edges."""
 
     start_point: tuple[float, float]
     """(x, y) start of wall segment in global coordinates."""
@@ -429,6 +452,9 @@ class Wall:
     openings: list[Opening] = field(default_factory=list)
     """Openings (doors/windows) in this wall."""
 
+    inward_normal: tuple[float, float] | None = None
+    """Room-facing unit normal for polygon walls."""
+
     def cache_key(self, wall_height: float, material: Material | None = None) -> str:
         """Generate cache key for wall GLTF caching.
 
@@ -447,7 +473,8 @@ class Wall:
             "wall_id": self.wall_id,
             "start_point": self.start_point,
             "end_point": self.end_point,
-            "direction": self.direction.value,
+            "direction": self.direction.value if self.direction else None,
+            "inward_normal": self.inward_normal,
             "is_exterior": self.is_exterior,
             "wall_height": wall_height,
             "material": str(material.path) if material else None,
@@ -461,13 +488,14 @@ class Wall:
         return {
             "wall_id": self.wall_id,
             "room_id": self.room_id,
-            "direction": self.direction.value,
+            "direction": self.direction.value if self.direction else None,
             "start_point": list(self.start_point),
             "end_point": list(self.end_point),
             "length": self.length,
             "is_exterior": self.is_exterior,
             "faces_rooms": self.faces_rooms,
             "openings": [opening.to_dict() for opening in self.openings],
+            "inward_normal": list(self.inward_normal) if self.inward_normal else None,
         }
 
     @classmethod
@@ -476,13 +504,18 @@ class Wall:
         return cls(
             wall_id=data["wall_id"],
             room_id=data["room_id"],
-            direction=WallDirection(data["direction"]),
+            direction=(
+                WallDirection(data["direction"]) if data.get("direction") else None
+            ),
             start_point=tuple(data["start_point"]),
             end_point=tuple(data["end_point"]),
             length=data["length"],
             is_exterior=data.get("is_exterior", True),
             faces_rooms=data.get("faces_rooms", []),
             openings=[Opening.from_dict(o) for o in data.get("openings", [])],
+            inward_normal=(
+                tuple(data["inward_normal"]) if data.get("inward_normal") else None
+            ),
         )
 
 
@@ -506,7 +539,10 @@ class PlacedRoom:
     """Room depth in meters."""
 
     walls: list[Wall] = field(default_factory=list)
-    """Exactly 4 walls: N, S, E, W."""
+    """Four cardinal walls for rectangle modes, N edge walls for polygon mode."""
+
+    footprint_vertices: list[tuple[float, float]] | None = None
+    """Actual house-coordinate footprint for polygon mode."""
 
     def to_dict(self) -> dict:
         """Serialize placed room to dictionary."""
@@ -516,6 +552,11 @@ class PlacedRoom:
             "width": self.width,
             "depth": self.depth,
             "walls": [wall.to_dict() for wall in self.walls],
+            "footprint_vertices": (
+                [list(vertex) for vertex in self.footprint_vertices]
+                if self.footprint_vertices is not None
+                else None
+            ),
         }
 
     @classmethod
@@ -527,6 +568,11 @@ class PlacedRoom:
             width=data["width"],
             depth=data["depth"],
             walls=[Wall.from_dict(w) for w in data.get("walls", [])],
+            footprint_vertices=(
+                [tuple(vertex) for vertex in data["footprint_vertices"]]
+                if data.get("footprint_vertices") is not None
+                else None
+            ),
         )
 
 
@@ -579,6 +625,9 @@ class RoomSpec:
     blocking them.
     """
 
+    footprint_vertices: list[tuple[float, float]] | None = None
+    """Canonical AABB-min polygon footprint; None for room/house modes."""
+
     def to_dict(self) -> dict:
         """Serialize room spec to dictionary."""
         return {
@@ -590,6 +639,11 @@ class RoomSpec:
             "prompt": self.prompt,
             "connections": {k: v.value for k, v in self.connections.items()},
             "exterior_walls": [w.value for w in self.exterior_walls],
+            "footprint_vertices": (
+                [list(vertex) for vertex in self.footprint_vertices]
+                if self.footprint_vertices is not None
+                else None
+            ),
         }
 
     @classmethod
@@ -610,6 +664,11 @@ class RoomSpec:
             length=data.get("length", 6.0),
             connections=connections,
             exterior_walls=exterior_walls,
+            footprint_vertices=(
+                [tuple(vertex) for vertex in data["footprint_vertices"]]
+                if data.get("footprint_vertices") is not None
+                else None
+            ),
         )
 
 
@@ -658,10 +717,42 @@ class RoomGeometry:
     openings: list["ClearanceOpeningData"] = field(default_factory=list)
     """All door/window/open openings with physics and rendering data."""
 
+    footprint_vertices: list[tuple[float, float]] | None = None
+    """Exact room-local floor footprint; None for rectangle modes."""
+
+    @property
+    def room_local_footprint_vertices(self) -> list[tuple[float, float]]:
+        """Return the authoritative room-local floor boundary for every room mode.
+
+        Polygon rooms store their exact (possibly concave) footprint. Rectangle
+        modes derive the equivalent four-vertex footprint from their dimensions so
+        downstream stages can use one boundary representation.
+        """
+        if self.footprint_vertices is not None:
+            return list(self.footprint_vertices)
+
+        if self.length <= 0 or self.width <= 0:
+            return []
+
+        half_length = self.length / 2
+        half_width = self.width / 2
+        return [
+            (-half_length, -half_width),
+            (half_length, -half_width),
+            (half_length, half_width),
+            (-half_length, half_width),
+        ]
+
+    @property
+    def is_polygon(self) -> bool:
+        """Whether downstream stages must use the exact polygon path."""
+        return self.footprint_vertices is not None
+
     def content_hash(self) -> str:
         """Generate content hash for this floor plan."""
         floor_plan_dict = {
             "sdf_path": str(self.sdf_path) if self.sdf_path else "",
+            "footprint_vertices": self.footprint_vertices,
         }
 
         # Hash SDF file content.
@@ -733,6 +824,11 @@ class RoomGeometry:
             "openings": [o.to_dict() for o in self.openings],
             "floor": floor_data,
             "wall_normals": wall_normals_data,
+            "footprint_vertices": (
+                [list(vertex) for vertex in self.footprint_vertices]
+                if self.footprint_vertices is not None
+                else None
+            ),
         }
 
     @classmethod
@@ -803,6 +899,11 @@ class RoomGeometry:
             openings=[
                 ClearanceOpeningData.from_dict(o) for o in data.get("openings", [])
             ],
+            footprint_vertices=(
+                [tuple(vertex) for vertex in data["footprint_vertices"]]
+                if data.get("footprint_vertices") is not None
+                else None
+            ),
         )
 
 
@@ -870,6 +971,9 @@ class HouseLayout:
     For interior walls: (room_a, room_b, None) - direction not needed.
     For exterior walls: (room_a, None, direction) - direction is wall facing (north, south, etc).
     """
+
+    boundary_wall_ids: dict[str, str] = field(default_factory=dict)
+    """Stable label-to-wall mapping used by polygon mode."""
 
     def __post_init__(self) -> None:
         """Create package.xml for Drake package://scene/ URI resolution."""
@@ -1007,6 +1111,7 @@ class HouseLayout:
             "placement_valid": self.placement_valid,
             "connectivity_valid": self.connectivity_valid,
             "boundary_labels": {k: list(v) for k, v in self.boundary_labels.items()},
+            "boundary_wall_ids": self.boundary_wall_ids,
             "room_geometries": room_geometries_data,
         }
 
@@ -1154,6 +1259,7 @@ class HouseLayout:
             placement_valid=data.get("placement_valid", False),
             connectivity_valid=data.get("connectivity_valid", False),
             boundary_labels=boundary_labels,
+            boundary_wall_ids=data.get("boundary_wall_ids", {}),
         )
 
     def content_hash(self) -> str:

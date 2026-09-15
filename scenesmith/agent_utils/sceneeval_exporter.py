@@ -208,6 +208,12 @@ class SceneEvalExporter:
         # Find the PlacedRoom and Wall matching this wall direction.
         for placed_room in self.house_layout.placed_rooms:
             for wall in placed_room.walls:
+                if wall.wall_id == wall_name:
+                    for opening in wall.openings:
+                        hole = self._opening_to_hole(opening, wall_height)
+                        if hole:
+                            holes.append(hole)
+                    break
                 # Match wall by wall_id suffix (e.g., 'living_room_north' -> 'north').
                 wall_dir = wall.wall_id.split("_")[-1]
                 if wall_dir == target_dir:
@@ -311,6 +317,24 @@ class SceneEvalExporter:
         bbox_max = np.array(wall.bbox_max)
         extents = bbox_max - bbox_min
 
+        footprint = self.scene.room_geometry.footprint_vertices
+        if footprint is not None:
+            start = footprint[index]
+            end = footprint[(index + 1) % len(footprint)]
+            wall_id = str(wall.metadata.get("wall_id", wall.name))
+            return {
+                "id": f"wall|room|{wall_id}|{index}",
+                "roomId": "room",
+                "type": "Wall",
+                "height": float(extents[2]),
+                "depth": float(self.scene.room_geometry.wall_thickness),
+                "points": [
+                    [float(start[0]), float(start[1]), 0.0],
+                    [float(end[0]), float(end[1]), 0.0],
+                ],
+                "holes": self._get_wall_openings(wall_id),
+            }
+
         # Get room-facing normal from room geometry (points into room).
         normal = self.scene.room_geometry.wall_normals.get(
             wall.name, np.array([0.0, 0.0])
@@ -356,6 +380,12 @@ class SceneEvalExporter:
         Returns:
             List of 4 corner points [[x, y, z], ...] in counter-clockwise order.
         """
+        if self.scene.room_geometry.footprint_vertices is not None:
+            return [
+                [float(vertex[0]), float(vertex[1]), 0.0]
+                for vertex in self.scene.room_geometry.footprint_vertices
+            ]
+
         # For rectangular rooms, we need to find the inner bounds.
         # Collect wall inner surface positions by orientation.
         min_x = float("inf")  # Right edge of left wall.
@@ -737,6 +767,16 @@ class SceneEvalExporter:
         if not placed_room:
             return []
 
+        if placed_room.footprint_vertices is not None:
+            return [
+                [
+                    float(vertex[0] + offset_x),
+                    float(vertex[1] + offset_y),
+                    0.0,
+                ]
+                for vertex in placed_room.footprint_vertices
+            ]
+
         # Use PlacedRoom dimensions (accounts for rotation during placement).
         # PlacedRoom.width = X dimension, PlacedRoom.depth = Y dimension.
         min_x = offset_x
@@ -816,8 +856,9 @@ class SceneEvalExporter:
                 }
             )
 
+        wall_key = wall.direction.value if wall.direction is not None else wall.wall_id
         return {
-            "id": f"wall|{room_id}|{wall.direction.value}|{index}",
+            "id": f"wall|{room_id}|{wall_key}|{index}",
             "roomId": room_id,
             "type": "Wall",
             "height": float(wall_height),

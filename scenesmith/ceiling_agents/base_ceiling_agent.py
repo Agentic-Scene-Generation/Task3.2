@@ -177,6 +177,10 @@ class BaseCeilingAgent(ABC):
         # Compute bounds from room geometry dimensions.
         # Room is centered at origin, so bounds are +/- half dimensions.
         room_geom = scene.room_geometry
+        if room_geom is not None and room_geom.footprint_vertices is not None:
+            xs = [vertex[0] for vertex in room_geom.footprint_vertices]
+            ys = [vertex[1] for vertex in room_geom.footprint_vertices]
+            return (min(xs), min(ys), max(xs), max(ys))
         if room_geom is not None and room_geom.length > 0 and room_geom.width > 0:
             half_length = room_geom.length / 2
             half_width = room_geom.width / 2

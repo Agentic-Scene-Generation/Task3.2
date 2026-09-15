@@ -20,6 +20,7 @@ from agents.run import RunResult
 from agents.tracing import custom_span
 from omegaconf import DictConfig
 
+from scenesmith.agent_utils.asset_scaling_policy import agent_rescale_tools_enabled
 from scenesmith.agent_utils.base_stateful_agent import (
     BaseStatefulAgent,
     log_agent_usage,
@@ -226,6 +227,7 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
             room_description=room_description,
             wall_count=len(self.wall_surfaces),
             required_wall_objects=self.required_wall_object_constraints,
+            asset_rescaling_enabled=agent_rescale_tools_enabled(self.cfg),
         )
 
     def _create_critic_tools(self) -> list[FunctionTool]:
@@ -274,6 +276,7 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
             room_description=room_description,
             wall_count=len(self.wall_surfaces),
             required_wall_objects=self.required_wall_object_constraints,
+            asset_rescaling_enabled=agent_rescale_tools_enabled(self.cfg),
         )
 
     def _build_scenebenchmark_critic_context(self) -> str | None:
@@ -474,12 +477,12 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
                 console_logger.info(
                     "Explicit wall requirement detected; forcing initial wall design"
                 )
+                scene_hash_before = self._planner_scene_hash()
+                mutation_count_before = getattr(
+                    self, "_planner_successful_designer_mutations", 0
+                )
                 try:
                     await self._request_initial_design_impl()
-                    required_prepass_ran = True
-                    self._planner_initial_design_tool_calls = max(
-                        self._planner_initial_design_tool_calls, 1
-                    )
                 except MaxTurnsExceeded:
                     # Tool side effects already committed by the designer are useful.
                     # Let the planner inspect and repair the partial result instead of
@@ -488,13 +491,17 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
                         "Required wall design pre-pass reached its turn limit; "
                         "continuing with planner refinement"
                     )
-                    required_prepass_ran = bool(
-                        self.scene.get_objects_by_type(ObjectType.WALL_MOUNTED)
+                finally:
+                    self._record_successful_designer_mutation(scene_hash_before)
+
+                required_prepass_ran = (
+                    getattr(self, "_planner_successful_designer_mutations", 0)
+                    > mutation_count_before
+                )
+                if required_prepass_ran:
+                    self._planner_initial_design_tool_calls = max(
+                        self._planner_initial_design_tool_calls, 1
                     )
-                    if required_prepass_ran:
-                        self._planner_initial_design_tool_calls = max(
-                            self._planner_initial_design_tool_calls, 1
-                        )
 
         # Get runner instruction for planner to start workflow.
         planner_runner_prompt = WallAgentPrompts.STATEFUL_PLANNER_RUNNER_INSTRUCTION
@@ -604,13 +611,12 @@ class StatefulWallAgent(BaseStatefulAgent, BaseWallAgent):
                 # The final critic call can identify an occluded clock/shelf after
                 # the planner has exhausted its designer budget. Repair those
                 # geometry-proven issues before the caller persists the wall stage.
-                fixes = improve_wall_visual_clearance(
+                improve_wall_visual_clearance(
                     scene,
                     wall_surfaces=self.wall_surfaces,
                     config=self.cfg,
+                    on_accept=self.rendering_manager.clear_cache,
                 )
-                if fixes:
-                    self.rendering_manager.clear_cache()
 
                 removed_media = converge_cross_stage_media_inventory(
                     scene, self.required_wall_object_constraints

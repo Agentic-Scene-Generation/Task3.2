@@ -1,6 +1,9 @@
 """Tests for deterministic seating orientation repair."""
 
+import hashlib
+
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -12,6 +15,8 @@ from scenesmith.agent_utils.seating_orientation_guard import (
     _is_functional_surface,
     align_seating_to_nearest_surface,
 )
+from scenesmith.scenebenchmark_critic.api import seating_orientation_targets
+from scenesmith.scenebenchmark_critic.intent_contract import SCHEMA_VERSION
 
 
 def _object(
@@ -128,7 +133,9 @@ def test_wall_guest_chairs_already_facing_desk_use_wall_normal_priority() -> Non
         assert abs(wall_bounds[0][0] - chair_bounds[1][0] - 0.03) < 1e-7
 
 
-def test_explicit_prompt_facing_contract_keeps_wall_guest_chairs_desk_relative() -> None:
+def test_explicit_prompt_facing_contract_keeps_wall_guest_chairs_desk_relative() -> (
+    None
+):
     chair = _object(
         "guest_chair_0",
         ObjectType.FURNITURE,
@@ -270,3 +277,180 @@ def test_seat_within_forty_five_degrees_is_unchanged() -> None:
 
     assert fixes == []
     np.testing.assert_allclose(chair.transform.GetAsMatrix4(), old_transform)
+
+
+def test_unconstrained_sofa_defaults_to_nearest_wall_parallel_axis() -> None:
+    sofa = _object(
+        "sectional_sofa_0",
+        ObjectType.FURNITURE,
+        (1.35, 0.0, 0.45),
+        (1.8, 0.8, 0.9),
+        yaw_deg=27.0,
+    )
+    side_table = _object(
+        "side_table_0",
+        ObjectType.FURNITURE,
+        (0.5, 0.0, 0.3),
+        (0.4, 0.4, 0.6),
+    )
+    east_wall = _object("east_wall", ObjectType.WALL, (2.5, 0.0, 1.35), (0.1, 5.0, 2.7))
+    scene = _scene(sofa, side_table, east_wall)
+    scene.room_geometry = SimpleNamespace(length=5.0, width=5.0)
+
+    fixes = align_seating_to_nearest_surface(
+        scene,
+        allowed_targets_by_seat={"sectional_sofa_0": set()},
+    )
+
+    assert [(fix.subject_id, fix.target_id) for fix in fixes] == [
+        ("sectional_sofa_0", "east_wall")
+    ]
+    front = sofa.transform.rotation().matrix() @ np.array([0.0, 1.0, 0.0])
+    np.testing.assert_allclose(front[:2], [-1.0, 0.0], atol=1e-7)
+
+
+def test_contract_target_can_be_wall_mounted_media() -> None:
+    sofa = _object(
+        "sofa_0",
+        ObjectType.FURNITURE,
+        (0.0, -0.5, 0.45),
+        (1.8, 0.8, 0.9),
+        yaw_deg=180.0,
+    )
+    television = _object(
+        "television_0",
+        ObjectType.WALL_MOUNTED,
+        (0.0, 1.2, 1.3),
+        (1.2, 0.1, 0.7),
+    )
+
+    fixes = align_seating_to_nearest_surface(
+        _scene(sofa, television),
+        allowed_targets_by_seat={"sofa_0": {"television_0"}},
+    )
+
+    assert [(fix.subject_id, fix.target_id) for fix in fixes] == [
+        ("sofa_0", "television_0")
+    ]
+    assert _front_angle_to_target_deg(sofa, television) < 1e-6
+
+
+def test_across_from_contract_authorizes_media_but_not_next_to_target() -> None:
+    sofa = _object(
+        "sofa_0",
+        ObjectType.FURNITURE,
+        (0.0, -0.5, 0.45),
+        (1.8, 0.8, 0.9),
+        yaw_deg=180.0,
+    )
+    television = _object(
+        "television_0",
+        ObjectType.WALL_MOUNTED,
+        (0.0, 1.2, 1.3),
+        (1.2, 0.1, 0.7),
+    )
+    side_table = _object(
+        "side_table_0",
+        ObjectType.FURNITURE,
+        (1.0, -0.5, 0.3),
+        (0.4, 0.4, 0.6),
+    )
+    scene = _scene(sofa, television, side_table)
+    scene.text_description = "A sofa sits across from a wall-mounted television with a side table next to it."
+    scene.scenebenchmark_intent_contract = {
+        "schema_version": SCHEMA_VERSION,
+        "prompt_sha256": hashlib.sha256(
+            " ".join(scene.text_description.split()).encode("utf-8")
+        ).hexdigest(),
+        "constraints": [
+            {
+                "relation": "across_from",
+                "stage": "wall_mounted",
+                "strength": "hard",
+                "subjects": {"category": "sofa", "count": 1},
+                "targets": {"category": "television", "count": 1},
+                "source": "explicit_prompt",
+                "evidence_span": "sofa sits across from a wall-mounted television",
+            },
+            {
+                "relation": "next_to",
+                "stage": "furniture",
+                "strength": "hard",
+                "subjects": {"category": "side_table", "count": 1},
+                "targets": {"category": "sofa", "count": 1},
+                "source": "explicit_prompt",
+                "evidence_span": "side table next to it",
+            },
+        ],
+    }
+
+    targets = seating_orientation_targets(scene)
+
+    assert targets == {"sofa_0": {"television_0"}}
+
+
+def test_wall_backed_sofa_snap_rolls_back_new_window_obstruction() -> None:
+    sofa = _object(
+        "sofa_0",
+        ObjectType.FURNITURE,
+        (1.5, 0.0, 0.5),
+        (1.8, 0.8, 1.0),
+        yaw_deg=-90.0,
+    )
+    east_wall = _object(
+        "east_wall",
+        ObjectType.WALL,
+        (2.5, 0.0, 1.35),
+        (0.1, 5.0, 2.7),
+    )
+    scene = _scene(sofa, east_wall)
+    scene.room_geometry = SimpleNamespace(
+        length=5.0,
+        width=5.0,
+        openings=[
+            SimpleNamespace(
+                opening_id="window_0",
+                opening_type="window",
+                clearance_bbox_min=[2.0, -0.75, 0.0],
+                clearance_bbox_max=[2.5, 0.75, 2.0],
+                sill_height=0.5,
+                height=1.5,
+            )
+        ],
+    )
+    old_transform = sofa.transform.GetAsMatrix4().copy()
+
+    fixes = align_seating_to_nearest_surface(
+        scene,
+        allowed_targets_by_seat={"sofa_0": {"east_wall"}},
+    )
+
+    assert fixes == []
+    np.testing.assert_allclose(sofa.transform.GetAsMatrix4(), old_transform)
+
+
+def test_l_sofa_explicit_rotation_rolls_back_when_footprint_leaves_room() -> None:
+    sofa = _object(
+        "l_sofa_0",
+        ObjectType.FURNITURE,
+        (1.3, 0.0, 0.45),
+        (2.8, 1.0, 0.9),
+        yaw_deg=90.0,
+    )
+    television = _object(
+        "television_0",
+        ObjectType.WALL_MOUNTED,
+        (1.3, 1.8, 1.3),
+        (1.2, 0.1, 0.7),
+    )
+    scene = _scene(sofa, television)
+    scene.room_geometry = SimpleNamespace(length=4.0, width=4.0)
+    old_transform = sofa.transform.GetAsMatrix4().copy()
+
+    fixes = align_seating_to_nearest_surface(
+        scene,
+        allowed_targets_by_seat={"l_sofa_0": {"television_0"}},
+    )
+
+    assert fixes == []
+    np.testing.assert_allclose(sofa.transform.GetAsMatrix4(), old_transform)

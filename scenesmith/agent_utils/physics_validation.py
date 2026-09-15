@@ -1165,6 +1165,13 @@ def compute_thin_covering_boundary_violations(
     """
     # Compute usable floor bounds (inside walls).
     half_wall = wall_thickness / 2.0
+    exact_usable_floor = None
+    if scene.room_geometry.footprint_vertices is not None:
+        from shapely.geometry import Point, Polygon
+
+        exact_usable_floor = Polygon(scene.room_geometry.footprint_vertices).buffer(
+            -half_wall, join_style="mitre"
+        )
     room_length = scene.room_geometry.length  # x-dimension
     room_width = scene.room_geometry.width  # y-dimension
 
@@ -1198,6 +1205,30 @@ def compute_thin_covering_boundary_violations(
         center_x, center_y = pos[0], pos[1]
 
         exceeded_boundaries: list[str] = []
+
+        if exact_usable_floor is not None:
+            if shape == "circular":
+                footprint = Point(center_x, center_y).buffer(min(width, depth) / 2.0)
+            else:
+                rot_matrix = transform.rotation().matrix()
+                yaw = np.arctan2(rot_matrix[1, 0], rot_matrix[0, 0])
+                footprint = Polygon(
+                    _get_obb_corners_2d(
+                        center_x=center_x,
+                        center_y=center_y,
+                        half_w=width / 2.0,
+                        half_d=depth / 2.0,
+                        yaw=yaw,
+                    )
+                )
+            if not exact_usable_floor.covers(footprint):
+                violations.append(
+                    ThinCoveringBoundaryViolation(
+                        covering_id=str(obj_id),
+                        exceeded_boundaries=["polygon wall"],
+                    )
+                )
+            continue
 
         if shape == "circular":
             # For circular thin coverings, use radius = min(width, depth) / 2.

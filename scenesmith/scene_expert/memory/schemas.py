@@ -1,14 +1,369 @@
-"""Pydantic schemas for the SceneExpert fast memory system."""
+"""Stable data contracts for the SceneExpert fast-memory bank.
+
+The persisted record schemas are intentionally backward compatible: old JSONL
+records load with conservative defaults, while new records carry provenance and
+bank-version metadata.  The compact ``MemoryWriterResponse`` schemas are kept
+separate from persisted records so an LLM never owns record identity, quality
+scores, provenance, or promotion status.
+"""
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+import hashlib
+import json
+
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+MEMORY_SCHEMA_VERSION = "sceneexpert.memory.v3"
+MemoryStatus = Literal["candidate", "active", "quarantined"]
+MemorySource = Literal["llm", "deterministic", "legacy", "imported"]
 
 
-class SuccessCase(BaseModel):
+class MemorySourceProvenance(BaseModel):
+    """Stable locator for the evidence from which a memory was derived."""
+
+    task_id: str = ""
+    run_id: str = ""
+    trace_id: str = ""
+    scene_state_path: str = ""
+    stage: str = ""
+    prompt_fingerprint: str = ""
+    evidence_refs: list[str] = Field(default_factory=list)
+    critic_source: str = ""
+
+
+class MemoryCheckEvidence(BaseModel):
+    """One exact-constraint observation copied from the native critic result."""
+
+    constraint_id: str
+    check_id: str
+    stage: str
+    label: str
+    evaluation_state: str = ""
+    scoring_tier: str = "unknown"
+    source: Literal["main_deterministic_critic"] = "main_deterministic_critic"
+    result_hash: str
+    constraint_hash: str
+    scene_state_path: str = ""
+    metric: str = ""
+    observations: dict[str, Any] = Field(default_factory=dict)
+
+
+class SpatialRelationMemory(BaseModel):
+    """Transferable spatial relation grounded in critic or geometry evidence.
+
+    Exact coordinates are optional because they are usually scene-specific.  A
+    relation is safe to promote without coordinates only when its semantic
+    endpoints and evidence reference are retained.
+    """
+
+    relation_type: str = Field(min_length=1)
+    subject_role: str = ""
+    target_role: str = ""
+    normalized_offset: list[float] = Field(default_factory=list, max_length=3)
+    yaw_delta_deg: float | None = None
+    clearance_m: dict[str, float] = Field(default_factory=dict)
+    cardinality: dict[str, Any] = Field(default_factory=dict)
+    evidence_source: Literal[
+        "critic", "deterministic", "scene_geometry", "task_contract", "legacy"
+    ] = "legacy"
+    evidence_ref: str = ""
+    geometry_verified: bool = False
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    verification_status: Literal[
+        "unknown", "requirement_only", "verified_pass", "verified_fail", "inconclusive"
+    ] = "unknown"
+    verification_evidence: list[MemoryCheckEvidence] = Field(default_factory=list)
+    template_parameters: list[str] = Field(default_factory=list)
+    claim_hash: str = ""
+
+    def current_claim_hash(self) -> str:
+        """Bind verification to these semantics, not a subsequently edited claim."""
+        claim = self.model_dump(
+            mode="json",
+            include={
+                "relation_type",
+                "subject_role",
+                "target_role",
+                "cardinality",
+                "normalized_offset",
+                "yaw_delta_deg",
+                "clearance_m",
+                "template_parameters",
+            },
+        )
+        return hashlib.sha256(
+            json.dumps(claim, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
+
+    @property
+    def has_verified_geometry(self) -> bool:
+        """Legacy stage-wide flags alone never certify a spatial solution."""
+        return (
+            self.verification_status == "verified_pass"
+            and self.claim_hash == self.current_claim_hash()
+            and bool(self.verification_evidence)
+            and all(
+                item.constraint_id == self.evidence_ref
+                and bool(item.check_id and item.result_hash and item.constraint_hash)
+                and item.label == "pass"
+                and item.scoring_tier == "core"
+                and item.evaluation_state
+                not in {"unknown", "deferred", "not_applicable"}
+                for item in self.verification_evidence
+            )
+        )
+
+    @property
+    def has_verified_failure(self) -> bool:
+        """A failed observation also belongs only to the unchanged claim."""
+        return (
+            self.verification_status == "verified_fail"
+            and self.claim_hash == self.current_claim_hash()
+            and any(
+                item.constraint_id == self.evidence_ref
+                and bool(item.check_id and item.result_hash and item.constraint_hash)
+                and item.label == "fail"
+                and item.scoring_tier == "core"
+                and item.evaluation_state
+                not in {"unknown", "deferred", "not_applicable"}
+                for item in self.verification_evidence
+            )
+        )
+
+    def to_guidance_text(self) -> str:
+        """Render a compact designer-facing relation without inventing geometry."""
+        endpoints = " ".join(
+            value
+            for value in (self.subject_role, self.relation_type, self.target_role)
+            if value
+        )
+        parts = [endpoints or self.relation_type]
+        if self.cardinality:
+            parts.append(
+                "parameters="
+                + json.dumps(
+                    self.cardinality,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        if self.template_parameters:
+            parts.append("bind from current task=" + ",".join(self.template_parameters))
+        if self.normalized_offset:
+            parts.append(
+                "normalized offset="
+                + ",".join(f"{value:.3f}" for value in self.normalized_offset)
+            )
+        if self.yaw_delta_deg is not None:
+            parts.append(f"yaw delta={self.yaw_delta_deg:.1f}deg")
+        if self.clearance_m:
+            parts.append(
+                "clearance="
+                + ",".join(
+                    f"{key}:{value:.3f}m"
+                    for key, value in sorted(self.clearance_m.items())
+                )
+            )
+        evidence_label = (
+            "verified_pass"
+            if self.has_verified_geometry
+            else (
+                "verified_fail"
+                if self.has_verified_failure
+                else (
+                    "requirement_only"
+                    if self.evidence_source == "task_contract"
+                    else "unverified"
+                )
+            )
+        )
+        parts.append(f"evidence={evidence_label}")
+        return "; ".join(parts)
+
+
+class SkillApplicability(BaseModel):
+    """Explicit guardrails preventing a skill from leaking to unrelated tasks."""
+
+    room_types: list[str] = Field(default_factory=list)
+    excluded_room_types: list[str] = Field(default_factory=list)
+    required_object_roles: list[str] = Field(default_factory=list)
+    required_relation_types: list[str] = Field(default_factory=list)
+    forbidden_conditions: list[str] = Field(default_factory=list)
+
+
+class MemoryUtilityObservation(BaseModel):
+    """One immutable observation of how selected memory affected a later run."""
+
+    memory_id: str
+    memory_type: Literal["success", "failure", "skill"]
+    task_id: str = ""
+    run_id: str = ""
+    stage: str = ""
+    selected_rank: int = Field(default=0, ge=0)
+    retrieval_score: float | None = None
+    injected: bool = False
+    retrieved: bool = True
+    planner_selected: bool = False
+    prompt_delivered: bool = False
+    action_observed: bool | None = None
+    target_verified: bool | None = None
+    decision_evidence_refs: list[str] = Field(default_factory=list)
+    stage_passed: bool | None = None
+    quality_delta: float | None = None
+    latency_delta_sec: float | None = None
+    outcome: Literal["positive", "negative", "neutral", "unknown"] = "unknown"
+    outcome_basis: str = ""
+    evidence_ref: str = ""
+
+
+class PlacementEpisode(BaseModel):
+    """One immutable observed object pair, not a universal placement rule."""
+
+    episode_id: str
+    stage: str
+    state_fingerprint: str
+    subject: dict[str, Any]
+    anchor: dict[str, Any]
+    measurements: dict[str, Any] = Field(default_factory=dict)
+    before_measurements: dict[str, Any] = Field(default_factory=dict)
+    actions: list[dict[str, Any]] = Field(default_factory=list)
+    native_checks: list[dict[str, Any]] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    observation_scope: str = "stage_attempt_final; intermediate states not inferred"
+    stage_passed: bool | None = None
+    stage_scores: dict[str, float] = Field(default_factory=dict)
+    repair_verified: bool = False
+
+    def content_hash(self) -> str:
+        """Hash observations including their exact provenance, excluding the ID."""
+        return hashlib.sha256(
+            json.dumps(
+                self.model_dump(mode="json", exclude={"episode_id"}),
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+
+class CriticAdviceEvidence(BaseModel):
+    """An exact source-report excerpt, not a deterministic spatial verdict."""
+
+    evidence_id: str
+    stage: str
+    stage_entry_index: int
+    trace_id: str
+    report_hash: str
+    source: str
+    quote: str
+    state_fingerprint: str = ""
+    # Names mentioned in the quote and present in source observations. They
+    # permit current-role binding, not inference of a measured spatial pair.
+    object_roles: list[str] = Field(default_factory=list)
+
+    def content_hash(self) -> str:
+        """Bind the unchanged quote to its report, stage and trace."""
+        return hashlib.sha256(
+            json.dumps(
+                self.model_dump(mode="json", exclude={"evidence_id"}),
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+
+class PlacementRelationCandidate(BaseModel):
+    """Exact source pair and observable requested by the Writer, not its value."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    episode_id: str
+    subject_id: str
+    anchor_id: str
+    metric: Literal[
+        "pair_observation",
+        "aabb_separation_m",
+        "anchor_local_offset_m",
+        "relative_yaw_deg",
+        "bbox_center_distance_m",
+    ]
+
+
+class PlacementRelationEvidence(PlacementRelationCandidate):
+    """Code-owned source measurement; no success or transferable target implied."""
+
+    value: float | list[float] | None = None
+
+
+class PlacementMethodStep(BaseModel):
+    """A transfer hypothesis with explicit source links, never proven benefit."""
+
+    instruction: str
+    episode_ids: list[str] = Field(default_factory=list)
+    critic_refs: list[str] = Field(default_factory=list)
+    binding: Literal["explicit", "legacy_shared_refs"] = "explicit"
+    evidence_kinds: list[Literal["source_observation", "critic_advice"]] = Field(
+        default_factory=list
+    )
+    verification_status: Literal["transfer_unverified"] = "transfer_unverified"
+    relation_binding_version: Literal[0, 1] = 0
+    relation_bindings: list[PlacementRelationEvidence] = Field(default_factory=list)
+
+
+class PlacementExperience(BaseModel):
+    """LLM procedure bound to observations by Python, with explicit limits."""
+
+    schema_version: str = "placement-experience.v1"
+    procedure: list[str] = Field(default_factory=list)
+    applicability: list[str] = Field(default_factory=list)
+    episodes: list[PlacementEpisode] = Field(default_factory=list)
+    method_steps: list[PlacementMethodStep] = Field(default_factory=list)
+    critic_advice: list[CriticAdviceEvidence] = Field(default_factory=list)
+    # Unused observations certify the same source stage only, never a method pair.
+    source_context_episode_ids: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(
+        default_factory=lambda: [
+            "Observed transforms are not semantic front directions or universal thresholds.",
+            "Recompute geometry for current assets; never replay source IDs/world poses.",
+            "Stage success and associated actions do not establish causal repair benefit.",
+        ]
+    )
+
+
+class MemoryRecordBase(BaseModel):
+    """Common lifecycle and provenance fields for every persisted record."""
+
+    schema_version: str = MEMORY_SCHEMA_VERSION
+    status: MemoryStatus = "active"
+    source: MemorySource = "legacy"
+    source_task_id: str = ""
+    source_run_id: str = ""
+    source_task_ids: list[str] = Field(default_factory=list)
+    source_run_ids: list[str] = Field(default_factory=list)
+    prompt_fingerprint: str = ""
+    evidence_refs: list[str] = Field(default_factory=list)
+    critic_evidence: list[str] = Field(default_factory=list)
+    bank_version: int = Field(default=0, ge=0)
+    observation_count: int = Field(default=1, ge=1)
+    positive_utility_count: int = Field(default=0, ge=0)
+    negative_utility_count: int = Field(default=0, ge=0)
+    updated_at: str = ""
+    provenance: MemorySourceProvenance = Field(default_factory=MemorySourceProvenance)
+    spatial_relations: list[SpatialRelationMemory] = Field(default_factory=list)
+    placement_experience: PlacementExperience | None = None
+
+
+class SuccessCase(MemoryRecordBase):
     """A recorded successful scene generation pattern."""
 
     case_id: str
+    promotion_scope: Literal["scene", "stage", "relation"] = "scene"
+    source_scene_passed: bool = True
     room_type: str
     style: str = ""
     stage: str
@@ -23,9 +378,9 @@ class SuccessCase(BaseModel):
     placement_reference: list[str] = Field(
         default_factory=list,
         description=(
-            "Exact object placements that achieved these scores. "
+            "Legacy, scene-local placements retained for source auditing. "
             "One entry per object: 'object_id (name): x=..., y=..., yaw=...'. "
-            "Injected directly into the designer prompt as a spatial reference."
+            "Not injected as transferable geometry without a verified spatial relation."
         ),
     )
     scores: dict[str, float] = Field(default_factory=dict)
@@ -57,17 +412,24 @@ class SuccessCase(BaseModel):
         return "\n".join(lines)
 
     def to_placement_text(self) -> str:
-        """Format placement_reference as a designer-readable reference block."""
-        if not self.placement_reference:
+        """Render verified relations, never unframed legacy world coordinates."""
+        verified_relations = [
+            relation
+            for relation in self.spatial_relations
+            if relation.has_verified_geometry
+        ]
+        if not verified_relations:
             return ""
         score_str = ", ".join(f"{k}={v:.2f}" for k, v in self.scores.items())
         lines = [
             f"=== Reference Layout ({self.stage} / {self.room_type} / {self.style}) ===",
             f"Scores achieved: {score_str}",
-            "Object placements that produced these scores:",
+            "Verified spatial observations (not proof of causal benefit):",
         ]
-        for entry in self.placement_reference:
-            lines.append(f"  {entry}")
+        # Unframed legacy world coordinates remain in storage for audit. They
+        # are not a transferable, verified solution for a different room.
+        for relation in verified_relations:
+            lines.append(f"  relation: {relation.to_guidance_text()}")
         lines.append(
             "Use this as a spatial reference. "
             "Adapt positions to the current room size and prompt if needed."
@@ -76,7 +438,7 @@ class SuccessCase(BaseModel):
         return "\n".join(lines)
 
 
-class FailureCase(BaseModel):
+class FailureCase(MemoryRecordBase):
     """A recorded failure pattern with its verified repair action."""
 
     failure_id: str
@@ -109,7 +471,11 @@ class FailureCase(BaseModel):
         return (
             f"[Avoid/{self.stage}] In {self.room_type}: {avoid_text}"
             + (f" — reason: {self.failure_reason}" if self.failure_reason else "")
-            + (f" — fix: {self.repair_action}" if self.repair_action else "")
+            + (
+                f" — {'verified fix' if self.repair_verified else 'unverified suggestion'}: {self.repair_action}"
+                if self.repair_action
+                else ""
+            )
             + (f" — check: {self.critic_check}" if self.critic_check else "")
         )
 
@@ -118,13 +484,21 @@ class FailureCase(BaseModel):
         avoid_text = self.negative_constraint or self.bad_pattern
         parts = [f"[Avoid/{self.stage}] {avoid_text}"]
         if self.repair_action:
-            parts.append(f"Fix: {self.repair_action}")
+            label = "Verified fix" if self.repair_verified else "Unverified suggestion"
+            parts.append(f"{label}: {self.repair_action}")
         if self.critic_check:
             parts.append(f"Check: {self.critic_check}")
+        if self.spatial_relations:
+            parts.append(
+                "Relations: "
+                + " | ".join(
+                    relation.to_guidance_text() for relation in self.spatial_relations
+                )
+            )
         return " ".join(part for part in parts if part)
 
 
-class Skill(BaseModel):
+class Skill(MemoryRecordBase):
     """A reusable procedural skill template."""
 
     skill_name: str
@@ -147,10 +521,37 @@ class Skill(BaseModel):
     created_at: str = ""
     last_used_at: str = ""
     usage_count: int = 0
+    semantic_signature: str = ""
+    skill_aliases: list[str] = Field(default_factory=list)
+    promotion_scope: Literal["scene", "stage"] = "stage"
+    source_scene_passed: bool = False
+    independent_support_count: int = Field(default=1, ge=1)
+    activation_min_independent_support: int = Field(default=2, ge=2)
+    activation_reason: str = ""
+    applicability: SkillApplicability = Field(default_factory=SkillApplicability)
+    utility_observations: list[MemoryUtilityObservation] = Field(default_factory=list)
 
     def to_procedure_text(self) -> str:
         """Format skill as an ordered procedure for prompt injection."""
         lines = [f"[Skill: {self.skill_name}]"]
+        applicable_rooms = self.applicability.room_types or self.room_types
+        if applicable_rooms:
+            lines.append("Applicable rooms: " + ", ".join(applicable_rooms))
+        if self.applicability.required_object_roles:
+            lines.append(
+                "Required object roles: "
+                + ", ".join(self.applicability.required_object_roles)
+            )
+        if self.applicability.required_relation_types:
+            lines.append(
+                "Required task relations: "
+                + ", ".join(self.applicability.required_relation_types)
+            )
+        if self.applicability.forbidden_conditions:
+            lines.append(
+                "Do not apply when: "
+                + ", ".join(self.applicability.forbidden_conditions)
+            )
         if self.preconditions:
             lines.append("Preconditions: " + ", ".join(self.preconditions))
         if self.procedure:
@@ -159,13 +560,103 @@ class Skill(BaseModel):
         if self.failure_avoidance:
             lines.append("Avoid:")
             lines.extend(f"  - {rule}" for rule in self.failure_avoidance)
+        if self.postconditions:
+            lines.append("Postconditions:")
+            lines.extend(f"  - {condition}" for condition in self.postconditions)
+        if self.spatial_relations:
+            lines.append("Spatial relations:")
+            lines.extend(
+                f"  - {relation.to_guidance_text()}"
+                for relation in self.spatial_relations
+            )
         return "\n".join(lines)
 
 
 class MemoryUpdateOp(BaseModel):
     """A single memory update operation from the memory writer."""
 
-    op: str  # "ADD", "UPDATE", "NOOP"
-    memory_type: str  # "success_case", "failure_case", "skill"
+    op: Literal["ADD", "UPDATE", "NOOP"]
+    memory_type: Literal["success_case", "failure_case", "skill"]
     content: dict = Field(default_factory=dict)
     target_id: str = ""  # for UPDATE: the case_id / skill_name to update
+
+
+class PlacementMethodCandidate(BaseModel):
+    """Compact model-selected method; evidence and verification remain code-owned."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    instruction: str = Field(min_length=1, max_length=600)
+    episode_ids: list[str] = Field(default_factory=list, max_length=2)
+    critic_refs: list[str] = Field(default_factory=list, max_length=2)
+    relations: list[PlacementRelationCandidate] = Field(
+        default_factory=list, max_length=2
+    )
+
+
+class SuccessMemoryCandidate(BaseModel):
+    """Small, strict LLM output for one reusable successful pattern."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    stage: str = Field(min_length=1)
+    successful_pattern: list[str] = Field(min_length=1)
+    positive_guidance: list[str] = Field(default_factory=list)
+    episode_ids: list[str] = Field(default_factory=list, max_length=2)
+    procedure: list[str] = Field(default_factory=list, max_length=6)
+    applicability: list[str] = Field(default_factory=list, max_length=4)
+    method_steps: list[PlacementMethodCandidate] = Field(
+        default_factory=list, max_length=6
+    )
+
+
+class FailureMemoryCandidate(BaseModel):
+    """Small, strict LLM output for one transferable failure lesson."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    stage: str = Field(min_length=1)
+    object: str = ""
+    failure_type: str = Field(min_length=1)
+    bad_pattern: str = Field(min_length=1)
+    failure_reason: str = Field(min_length=1)
+    repair_action: str = Field(min_length=1)
+    repair_verified: bool = False
+    scope: Literal["global", "stage", "room", "object"] = "stage"
+    is_deterministic: bool = False
+    negative_constraint: str = ""
+    critic_check: str = ""
+    episode_ids: list[str] = Field(default_factory=list, max_length=2)
+    procedure: list[str] = Field(default_factory=list, max_length=6)
+    applicability: list[str] = Field(default_factory=list, max_length=4)
+    method_steps: list[PlacementMethodCandidate] = Field(
+        default_factory=list, max_length=6
+    )
+
+
+class SkillMemoryCandidate(BaseModel):
+    """Small, strict LLM output for a genuinely reusable procedure."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    skill_name: str = Field(min_length=1)
+    stage: str = Field(min_length=1)
+    preconditions: list[str] = Field(default_factory=list)
+    procedure: list[str] = Field(min_length=2)
+    failure_avoidance: list[str] = Field(default_factory=list)
+    postconditions: list[str] = Field(default_factory=list)
+
+
+class MemoryWriterResponse(BaseModel):
+    """Validated MemoryWriter response before deterministic promotion."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    success_cases: list[SuccessMemoryCandidate] = Field(
+        default_factory=list, max_length=5
+    )
+    failure_cases: list[FailureMemoryCandidate] = Field(
+        default_factory=list, max_length=5
+    )
+    skills: list[SkillMemoryCandidate] = Field(default_factory=list, max_length=2)
+    noop_reason: str = ""

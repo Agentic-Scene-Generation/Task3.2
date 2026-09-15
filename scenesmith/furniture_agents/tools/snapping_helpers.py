@@ -21,12 +21,10 @@ from scenesmith.furniture_agents.tools.response_dataclasses import (
     SnapToObjectResult,
 )
 from scenesmith.utils.geometry_utils import (
-    convert_mesh_yup_to_zup,
     rigid_transform_to_matrix,
 )
 from scenesmith.utils.mesh_loading import (
     get_collision_vertices_world,
-    load_collision_meshes_from_sdf,
     load_object_collision_geometry,
 )
 
@@ -35,6 +33,43 @@ console_logger = logging.getLogger(__name__)
 # Numerical thresholds for snapping algorithms.
 DEGENERATE_VOLUME_THRESHOLD = 1e-6  # Zero-volume detection.
 ZERO_DISTANCE_THRESHOLD = 1e-6  # Distance comparison threshold.
+
+
+def snap_to_oriented_wall(
+    obj: SceneObject, target: SceneObject, cfg: DictConfig
+) -> tuple[np.ndarray, float]:
+    """Snap to the room-facing plane of an arbitrary-yaw rectangular wall."""
+    normal = target.metadata.get("inward_normal")
+    if normal is None:
+        raise ValueError(f"Wall {target.name} has no inward normal")
+    normal_3d = np.array([normal[0], normal[1], 0.0], dtype=float)
+    normal_3d /= np.linalg.norm(normal_3d)
+    obj_vertices = get_collision_vertices_world(obj)
+
+    bbox_min, bbox_max = target.bbox_min, target.bbox_max
+    if bbox_min is None or bbox_max is None:
+        raise ValueError(f"Wall {target.name} has no bounds")
+    target_local_corners = np.array(
+        [
+            [x, y, z]
+            for x in (bbox_min[0], bbox_max[0])
+            for y in (bbox_min[1], bbox_max[1])
+            for z in (bbox_min[2], bbox_max[2])
+        ]
+    )
+    target_vertices = np.array(
+        [target.transform @ corner for corner in target_local_corners]
+    )
+    wall_face = np.max(target_vertices @ normal_3d)
+    object_near_face = np.min(obj_vertices @ normal_3d)
+    signed_move = wall_face + cfg.snap_to_object.snap_margin_m - object_near_face
+    movement = normal_3d * signed_move
+    return movement, float(abs(signed_move))
+
+
+def _has_collision_geometry_source(obj: SceneObject) -> bool:
+    """Return whether an object can provide collision or visual fallback geometry."""
+    return bool(obj.sdf_path or obj.geometry_path)
 
 
 def snap_mesh_to_aabb(
@@ -204,11 +239,11 @@ def snap_mesh_to_aabb(
 def compute_snap_direction_mesh_to_mesh(
     obj: SceneObject, target: SceneObject, cfg: DictConfig
 ) -> np.ndarray:
-    """Compute snap direction from obj to target using closest points on visual geometry.
+    """Compute snap direction from obj to target using collision geometry.
 
     Args:
-        obj: Object to move (must have geometry_path).
-        target: Target object (must have geometry_path).
+        obj: Object to move with collision or visual fallback geometry.
+        target: Target object with collision or visual fallback geometry.
         cfg: Configuration with snap_to_object.max_sample_vertices setting.
 
     Returns:
@@ -219,42 +254,24 @@ def compute_snap_direction_mesh_to_mesh(
     """
     start_time = time.time()
 
-    # Load meshes.
-    obj_mesh = trimesh.load(obj.geometry_path, force="mesh")
-    target_mesh = trimesh.load(target.geometry_path, force="mesh")
-
-    # Handle Scene objects (multiple meshes) by combining.
-    if isinstance(obj_mesh, trimesh.Scene):
-        meshes = [
-            g for g in obj_mesh.geometry.values() if isinstance(g, trimesh.Trimesh)
-        ]
-        obj_mesh = trimesh.util.concatenate(meshes) if meshes else None
-    if isinstance(target_mesh, trimesh.Scene):
-        meshes = [
-            g for g in target_mesh.geometry.values() if isinstance(g, trimesh.Trimesh)
-        ]
-        target_mesh = trimesh.util.concatenate(meshes) if meshes else None
-
-    if not isinstance(obj_mesh, trimesh.Trimesh):
-        raise ValueError(f"Could not load mesh from {obj.geometry_path}")
-    if not isinstance(target_mesh, trimesh.Trimesh):
-        raise ValueError(f"Could not load mesh from {target.geometry_path}")
+    # Use the same SDF-authoritative mesh source as the later iterative
+    # collision check. Applying a SceneObject scale factor after an SDF has
+    # already been rescaled would otherwise choose a direction from smaller,
+    # non-physical geometry.
+    obj_meshes = load_object_collision_geometry(obj)
+    target_meshes = load_object_collision_geometry(target)
+    if not obj_meshes:
+        raise ValueError(f"Could not load collision geometry for {obj.name}")
+    if not target_meshes:
+        raise ValueError(f"Could not load collision geometry for {target.name}")
+    obj_mesh = trimesh.util.concatenate([mesh.copy() for mesh in obj_meshes])
+    target_mesh = trimesh.util.concatenate([mesh.copy() for mesh in target_meshes])
 
     # Log mesh complexity for performance monitoring.
     console_logger.info(
         f"Computing snap direction: {obj.name} ({len(obj_mesh.vertices)} vertices) "
         f"→ {target.name} ({len(target_mesh.vertices)} vertices)"
     )
-
-    # Convert meshes from Y-up (GLTF) to Z-up (Drake) before applying transforms.
-    convert_mesh_yup_to_zup(obj_mesh)
-    convert_mesh_yup_to_zup(target_mesh)
-
-    # Apply runtime scale_factor (set by rescale operations).
-    if obj.scale_factor != 1.0:
-        obj_mesh.vertices *= obj.scale_factor
-    if target.scale_factor != 1.0:
-        target_mesh.vertices *= target.scale_factor
 
     # Transform meshes to world coordinates.
     obj_matrix = rigid_transform_to_matrix(obj.transform)
@@ -413,12 +430,14 @@ def snap_with_iterative_collision_check(
         return np.zeros(3), 0.0
     direction_unit = direction / direction_norm
 
-    # Load collision geometry for obj (applies SDF scale and runtime scale_factor).
+    # Load SDF-authoritative collision geometry for obj.
     obj_collision_meshes = load_object_collision_geometry(obj)
 
-    # Load collision geometry for target.
-    if target.geometry_path and target.sdf_path:
-        # Target has collision geometry (applies SDF scale and runtime scale_factor).
+    # Load collision geometry for target. A generated furniture asset can have
+    # only an SDF: that still is authoritative collision geometry.
+    target_uses_mesh_geometry = _has_collision_geometry_source(target)
+    if target_uses_mesh_geometry:
+        # Target has SDF-authoritative collision geometry.
         target_collision_meshes = load_object_collision_geometry(target)
     else:
         # Target is a wall or object without mesh - create AABB box mesh.
@@ -438,7 +457,15 @@ def snap_with_iterative_collision_check(
 
     # Create collision manager for target (stays fixed).
     target_manager = trimesh.collision.CollisionManager()
-    target_matrix = rigid_transform_to_matrix(target.transform)
+    # Fallback AABB vertices are already expressed in world coordinates.
+    # Applying the target transform again shifts a translated wall/object a
+    # second time and makes the iterative collision guard disagree with its
+    # world-space bounds.
+    target_matrix = (
+        rigid_transform_to_matrix(target.transform)
+        if target_uses_mesh_geometry
+        else np.eye(4)
+    )
     for i, piece in enumerate(target_collision_meshes):
         target_manager.add_object(f"target_{i}", piece, transform=target_matrix)
 
@@ -597,21 +624,15 @@ def resolve_collision_if_penetrating(
     """
     console_logger.info(f"Checking collision: {obj.name} vs {target.name}")
 
-    # Load collision geometry vertices in world coordinates.
-    # Get object vertices.
-    if not obj.sdf_path:
-        console_logger.info(f"Object {obj.name} has no SDF, skipping collision check")
-        return np.zeros(3)
-
-    obj_collision_meshes = load_collision_meshes_from_sdf(obj.sdf_path)
-    if not obj_collision_meshes:
+    # Use the same SDF-authoritative collision geometry as snapping and Drake.
+    # HSSD's scale_factor is support-surface metadata after its mesh/SDF has
+    # already been baked to the requested dimensions, so applying it here again
+    # would make the collision guard smaller than the physical object.
+    try:
+        obj_collision_meshes = load_object_collision_geometry(obj)
+    except ValueError:
         console_logger.info(f"No collision geometry for {obj.name}, skipping")
         return np.zeros(3)
-
-    # Apply object's runtime scale_factor (set by rescale operations).
-    if obj.scale_factor != 1.0:
-        for mesh in obj_collision_meshes:
-            mesh.vertices *= obj.scale_factor
 
     obj_vertices_local = np.vstack([m.vertices for m in obj_collision_meshes])
     transform_matrix = rigid_transform_to_matrix(obj.transform)
@@ -862,7 +883,13 @@ def select_and_execute_snap_algorithm(
     """
     start_time = time.time()
     try:
-        if orientation_applied:
+        if (
+            target.object_type == ObjectType.WALL
+            and target.metadata.get("inward_normal") is not None
+        ):
+            movement_vector, distance = snap_to_oriented_wall(obj, target, cfg)
+            algorithm = "oriented-wall"
+        elif orientation_applied:
             # Axis-constrained snapping: move only along facing direction.
             # This preserves the facing relationship established.
 
@@ -872,7 +899,7 @@ def select_and_execute_snap_algorithm(
             local_axis = np.array([0.0, 1.0 if orientation == "toward" else -1.0, 0.0])
             axis_world = obj.transform.rotation() @ local_axis
 
-            if target.geometry_path and target.sdf_path:
+            if _has_collision_geometry_source(target):
                 # Target has mesh geometry: use iterative collision checking.
                 movement_vector, distance = snap_with_iterative_collision_check(
                     obj=obj, target=target, direction=axis_world, cfg=cfg
@@ -894,9 +921,11 @@ def select_and_execute_snap_algorithm(
                 )
         else:
             # Closest-point snapping.
-            if obj.geometry_path and target.geometry_path:
+            if _has_collision_geometry_source(obj) and _has_collision_geometry_source(
+                target
+            ):
                 # Use iterative mesh-to-mesh algorithm.
-                # Compute direction from closest points on visual geometry.
+                # Compute direction from the same collision geometry used below.
                 direction = compute_snap_direction_mesh_to_mesh(
                     obj=obj, target=target, cfg=cfg
                 )
@@ -905,7 +934,7 @@ def select_and_execute_snap_algorithm(
                     obj=obj, target=target, direction=direction, cfg=cfg
                 )
                 algorithm = "iterative-mesh-to-mesh"
-            elif obj.geometry_path:
+            elif _has_collision_geometry_source(obj):
                 # Use mesh-to-AABB algorithm.
                 movement_vector, distance = snap_mesh_to_aabb(obj, target, cfg)
                 algorithm = "mesh-to-AABB"
@@ -913,7 +942,7 @@ def select_and_execute_snap_algorithm(
                 # Object missing geometry.
                 return SnapToObjectResult(
                     success=False,
-                    message=f"{obj.name} missing geometry_path - cannot snap",
+                    message=f"{obj.name} missing collision/visual geometry - cannot snap",
                     object_id=object_id,
                     target_id=target_id,
                     error_type=FurnitureErrorType.INVALID_POSITION,

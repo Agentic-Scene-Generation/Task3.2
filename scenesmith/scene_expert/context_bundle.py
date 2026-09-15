@@ -12,17 +12,21 @@ import hashlib
 import json
 import math
 import time
+
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from scenesmith.scene_expert.memory.delivery import prepare_memory_delivery
+from scenesmith.scene_expert.memory.state import build_memory_scene_state
 from scenesmith.scene_expert.schemas import (
     MemoryPack,
     SceneTaskSpec,
     StageBrief,
     StageRelationContext,
 )
+from scenesmith.utils.token_usage import normalize_token_usage
 
 
 def utc_now() -> str:
@@ -77,11 +81,14 @@ class ForbiddenZone(BaseModel):
 
 
 class LLMCallDebugRecord(BaseModel):
-    schema_version: str = "1.0"
+    schema_version: str = "scenesmith.llm_call_debug.v2"
     created_at: str = Field(default_factory=utc_now)
     stage: str
     agent_role: str
     event: str
+    # This stream also captures deterministic audit decisions with prompt/output
+    # evidence that do not make a provider API request.
+    event_kind: Literal["llm", "system"] = "llm"
     prompt_chars: int = 0
     prompt_hash: str = ""
     prompt_excerpt: str = ""
@@ -92,8 +99,25 @@ class LLMCallDebugRecord(BaseModel):
     output_excerpt: str = ""
     finish_reasons: list[str] = Field(default_factory=list)
     token_usage: dict[str, int] = Field(default_factory=dict)
+    requested_max_tokens: int | None = None
+    stage_execution_attempt: int | None = None
+    client_cancelled: bool | None = None
+    length_exhausted: bool | None = None
     raw_response_excerpt: str = ""
     error: str = ""
+    request_id: str = ""
+    attempt: int = 0
+    status: str = ""
+    error_kind: str = ""
+    retry_strategy: str = ""
+    thinking_mode: str = ""
+    response_format: str = ""
+    elapsed_sec: float | None = None
+    timeout_sec: float = 0.0
+    reasoning_chars: int = 0
+    queue_wait_sec: float | None = None
+    ttft_sec: float | None = None
+    decode_sec: float | None = None
 
 
 class StageContextBundle(BaseModel):
@@ -115,6 +139,8 @@ class StageContextBundle(BaseModel):
     last_hard_issues: list[str] = Field(default_factory=list)
     prompt_profile: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    memory_delivery: dict[str, Any] = Field(default_factory=dict)
+    decision_state: dict[str, Any] = Field(default_factory=dict)
 
     def to_llm_text(self, max_chars: int = 3200) -> str:
         """Return a concise human-readable context block for agent prompts."""
@@ -165,7 +191,12 @@ class StageContextBundle(BaseModel):
             )
         lines.append("=== End StageContextBundle ===")
         text = "\n".join(lines)
-        return text if len(text) <= max_chars else text[: max_chars - 3] + "..."
+        text = text if len(text) <= max_chars else text[: max_chars - 3] + "..."
+        # Cross-task advice has its own whole-record budget. Never cut an action
+        # or precondition with the native compact-state character limit.
+        if self.agent_role == "designer" and self.memory_delivery.get("text"):
+            text += "\n\n" + str(self.memory_delivery["text"])
+        return text
 
     def save(self, path: Path) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -246,6 +277,10 @@ def build_scene_summary(scene: Any | None) -> str:
             parts.append(f"room_size={float(length):.2f}m x {float(width):.2f}m")
         openings = getattr(room_geometry, "openings", []) or []
         if openings:
+            from scenesmith.agent_utils.furniture_layout_planning import (
+                build_opening_aware_reservation_plan,
+            )
+
             opening_bits = []
             for idx, opening in enumerate(openings[:12]):
                 wall = getattr(opening, "wall_direction", None)
@@ -254,6 +289,12 @@ def build_scene_summary(scene: Any | None) -> str:
                 typ = getattr(typ, "value", typ)
                 opening_bits.append(f"{idx}:{typ or 'opening'}@{wall or 'wall'}")
             parts.append("openings=" + ", ".join(opening_bits))
+            reservation_plan = build_opening_aware_reservation_plan(scene)
+            if reservation_plan.fully_opening_free_walls:
+                parts.append(
+                    "fully_opening_free_walls="
+                    + ",".join(reservation_plan.fully_opening_free_walls)
+                )
     # SceneExpert may append a StageBrief, memory, or previous critique to the
     # mutable scene description.  A context bundle shared with a critic must
     # retain the user's immutable task as its semantic source; otherwise a
@@ -294,8 +335,33 @@ def build_stage_context_bundle(
             except Exception:
                 continue
 
+    if forbidden_zones is None and scene is not None:
+        from scenesmith.agent_utils.furniture_layout_planning import (
+            build_opening_aware_reservation_plan,
+        )
+
+        reservation_plan = build_opening_aware_reservation_plan(scene)
+        forbidden_zones = [
+            ForbiddenZone(
+                zone_id=zone.zone_id,
+                zone_type=zone.opening_type,
+                severity=zone.severity,
+                wall=zone.wall,
+                bounds_xy=[
+                    zone.bounds_min[0],
+                    zone.bounds_min[1],
+                    zone.bounds_max[0],
+                    zone.bounds_max[1],
+                ],
+                source="resolved_room_geometry",
+                clearance_m=reservation_plan.opening_margin_m,
+            )
+            for zone in reservation_plan.zones
+        ]
+
     retrieved_memory = {}
     if memory_pack is not None:
+        memory_pack = memory_pack.deduplicated()
         retrieved_memory = {
             "success_hints": len(memory_pack.success_hints),
             "failure_hints": len(memory_pack.failure_hints),
@@ -307,8 +373,19 @@ def build_stage_context_bundle(
             "failure_excerpt": [
                 compact_text(x, 180) for x in memory_pack.failure_hints[:3]
             ],
+            "success_case_ids": memory_pack.success_case_ids,
+            "failure_case_ids": memory_pack.failure_case_ids,
+            "skill_names": memory_pack.skill_names,
         }
     prompt_text = _stringify_prompt(prompt)
+    memory_delivery = prepare_memory_delivery(
+        scene=scene,
+        stage=stage,
+        agent_role=agent_role,
+        event=event,
+        prompt=prompt_text,
+        last_hard_issues=last_hard_issues,
+    )
     return StageContextBundle(
         stage=stage,
         agent_role=agent_role,
@@ -334,6 +411,8 @@ def build_stage_context_bundle(
             "prompt_excerpt": compact_text(prompt_text, 1200),
         },
         metadata=metadata or {},
+        memory_delivery=memory_delivery,
+        decision_state=build_memory_scene_state(scene),
     )
 
 
@@ -356,13 +435,20 @@ def build_llm_call_debug_record(
     result: Any = None,
     raw_response: Any = None,
     error: str = "",
+    elapsed_sec: float | None = None,
+    event_kind: Literal["llm", "system"] = "llm",
+    requested_max_tokens: int | None = None,
+    stage_execution_attempt: int | None = None,
+    client_cancelled: bool | None = None,
 ) -> LLMCallDebugRecord:
     prompt_text = _stringify_prompt(prompt)
     output_text = _stringify_prompt(output)
+    finish_reasons = _extract_finish_reasons(result or raw_response)
     return LLMCallDebugRecord(
         stage=stage,
         agent_role=agent_role,
         event=event,
+        event_kind=event_kind,
         prompt_chars=len(prompt_text),
         prompt_hash=stable_hash(prompt_text),
         prompt_excerpt=compact_text(prompt_text, 1800),
@@ -371,28 +457,24 @@ def build_llm_call_debug_record(
         ),
         output_chars=len(output_text),
         output_excerpt=compact_text(output_text, 1800),
-        finish_reasons=_extract_finish_reasons(result or raw_response),
-        token_usage=_extract_token_usage(result),
+        finish_reasons=finish_reasons,
+        token_usage=_extract_token_usage(result or raw_response),
+        requested_max_tokens=requested_max_tokens,
+        stage_execution_attempt=stage_execution_attempt,
+        client_cancelled=client_cancelled,
+        length_exhausted=("length" in finish_reasons) or None,
         raw_response_excerpt=(
             compact_text(_stringify_prompt(raw_response), 2400)
             if raw_response is not None
             else ""
         ),
         error=error,
+        elapsed_sec=(max(0.0, float(elapsed_sec)) if elapsed_sec is not None else None),
     )
 
 
 def _extract_token_usage(result: Any) -> dict[str, int]:
-    usage = getattr(getattr(result, "context_wrapper", None), "usage", None)
-    if usage is None:
-        return {}
-    fields = {
-        "input_tokens": getattr(usage, "input_tokens", None),
-        "output_tokens": getattr(usage, "output_tokens", None),
-        "total_tokens": getattr(usage, "total_tokens", None),
-        "requests": getattr(usage, "requests", None),
-    }
-    return {k: int(v) for k, v in fields.items() if isinstance(v, int)}
+    return normalize_token_usage(result)
 
 
 def _extract_finish_reasons(value: Any) -> list[str]:

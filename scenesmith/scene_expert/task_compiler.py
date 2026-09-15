@@ -11,20 +11,24 @@ import logging
 import os
 import re
 import time
-from pathlib import Path
 
+from pathlib import Path
+from typing import Any
+
+from scenesmith.agent_utils.thinking import (
+    chat_template_kwargs_from_effort,
+    openrouter_extra_body,
+    prepend_text_thinking_directive,
+    thinking_directive_from_effort,
+)
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.schemas import SceneTaskSpec
 from scenesmith.scenebenchmark_critic.object_taxonomy import (
     canonical_object_category,
-    execution_owner,
+    generation_owner,
+    is_structural_anchor,
 )
-from scenesmith.agent_utils.thinking import (
-    chat_template_kwargs_from_effort,
-    prepend_text_thinking_directive,
-    thinking_directive_from_effort,
-)
-from scenesmith.utils.llm_json import parse_llm_json_object
+from scenesmith.utils.llm_json import json_response_format, parse_llm_json_object
 
 console_logger = logging.getLogger(__name__)
 
@@ -78,6 +82,8 @@ Rules:
 - Infer reasonable functional zones based on the room type and objects.
 - Infer reachability constraints for any small objects placed on furniture surfaces.
 - Keep object names concise (e.g. "bed" not "a large king-sized bed").
+- Windows, doors, and open connections are structural anchors owned by the
+  floor plan. Do not put them in any required_* object array.
 - Do not invent coordinates, room sides, or nearest-object identities.
 - Output ONLY the JSON object, no other text.
 
@@ -95,6 +101,36 @@ Example output:
   "aesthetic_constraints": ["balanced furniture placement", "clear walking paths"],
 }
 """
+
+
+_TASK_COMPILER_WIRE_FIELDS = (
+    "room_type",
+    "style",
+    "required_large_objects",
+    "required_wall_objects",
+    "required_ceiling_objects",
+    "required_small_objects",
+    "functional_zones",
+    "interaction_constraints",
+    "aesthetic_constraints",
+)
+
+
+def _task_compiler_wire_schema() -> dict[str, Any]:
+    """Return only the fields the model is responsible for generating."""
+    full = SceneTaskSpec.model_json_schema()
+    properties = full.get("properties") or {}
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            field: properties[field]
+            for field in _TASK_COMPILER_WIRE_FIELDS
+            if field in properties
+        },
+        "required": list(_TASK_COMPILER_WIRE_FIELDS),
+    }
+
 
 _ROOM_TYPE_KEYWORDS: dict[str, list[str]] = {
     "bedroom": ["bedroom", "bed", "nightstand", "wardrobe", "sleeping"],
@@ -325,6 +361,9 @@ _VIRTUAL_CATEGORIES = {
     "ceiling",
     "entrance",
     "entry",
+    "door",
+    "opening",
+    "window",
     "back_wall",
     "front_wall",
     "side_wall",
@@ -534,7 +573,10 @@ def _normalize_stage_ownership(
     _remove_spurious_generic_inventory_entries(inventories, prompt=prompt)
     for values in inventories.values():
         values[:] = [
-            value for value in values if inventory_key(value) not in _VIRTUAL_CATEGORIES
+            value
+            for value in values
+            if inventory_key(value) not in _VIRTUAL_CATEGORIES
+            and not is_structural_anchor(inventory_key(value))
         ]
 
     # The model may emit aliases as separate inventories (for example four
@@ -563,15 +605,7 @@ def _normalize_stage_ownership(
         inventories[owning_stage].extend([category] * desired_count)
 
     for values in inventories.values():
-        values[:] = [
-            (
-                inventory_key(value)
-                if "_".join(str(value or "").strip().lower().split())
-                in _INVENTORY_CATEGORY_ALIASES
-                else value
-            )
-            for value in values
-        ]
+        values[:] = [inventory_key(value) for value in values]
 
     physical_categories = {
         inventory_key(value) for values in inventories.values() for value in values
@@ -601,7 +635,10 @@ def _normalize_stage_ownership(
         if category in category_stages:
             category_stages[category] = "large"
     for category in _MANIPULAND_STAGE_CATEGORIES:
-        if category in category_stages:
+        if category in category_stages and category_stages[category] not in {
+            "wall",
+            "ceiling",
+        }:
             category_stages[category] = "small"
     for category in _FLOOR_STANDING_MEDIA_SUPPORT_CATEGORIES:
         if category in category_stages:
@@ -615,9 +652,9 @@ def _normalize_stage_ownership(
     owner_to_task_stage = {owner: stage for stage, owner in task_stage_to_owner.items()}
     for category, stage in list(category_stages.items()):
         category_stages[category] = owner_to_task_stage[
-            execution_owner(
+            generation_owner(
                 category,
-                existing_owner=task_stage_to_owner.get(stage, ""),
+                declared_owner=task_stage_to_owner.get(stage, ""),
             )
         ]
     desired_counts: dict[str, int] = {}
@@ -778,17 +815,21 @@ class TaskCompiler:
         api_key: str | None = None,
         max_tokens: int = 1536,
         temperature: float = 0.0,
+        llm_client: Any | None = None,
     ) -> None:
-        from openai import OpenAI
-
         self._model = model
         self._max_tokens = max_tokens
         self._temperature = temperature
-        self._client = OpenAI(
-            base_url=api_base_url
-            or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
-            api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
-        )
+        self._structured_llm = llm_client
+        self._client = None
+        if self._structured_llm is None:
+            from openai import OpenAI
+
+            self._client = OpenAI(
+                base_url=api_base_url
+                or os.environ.get("OPENAI_BASE_URL", "http://localhost:8000/v1"),
+                api_key=api_key or os.environ.get("OPENAI_API_KEY", "dummy"),
+            )
         self.last_trace: dict = {}
 
     def compile(self, prompt: str) -> SceneTaskSpec:
@@ -805,6 +846,66 @@ class TaskCompiler:
         """
         console_logger.info(f"TaskCompiler: compiling prompt: {prompt[:100]}...")
         user_message = f"Extract scene requirements from: {prompt}"
+        base_messages = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ]
+        structured_llm = getattr(self, "_structured_llm", None)
+        if structured_llm is not None:
+            result = structured_llm.complete(
+                role="task_compiler",
+                stage="task_compiler",
+                event="compile",
+                messages=base_messages,
+                response_model=SceneTaskSpec,
+            )
+            if result.value is None:
+                reason = (f"{result.final_error_kind}: {result.final_error}").strip(
+                    ": "
+                )
+                task_spec = _fallback_spec_from_prompt(prompt).model_copy(
+                    update={"compiler_failure_reason": reason}
+                )
+                self.last_trace = {
+                    "status": "fallback",
+                    "attempts": [attempt.model_dump() for attempt in result.attempts],
+                    "retry_count": max(0, len(result.attempts) - 1),
+                    "failure_reason": reason,
+                    "normalized_task_spec": task_spec.model_dump(
+                        mode="json", exclude_none=True
+                    ),
+                    "normalization_warnings": [],
+                }
+                console_logger.warning(
+                    "Structured TaskCompiler failed; using deterministic contract: %s",
+                    reason,
+                )
+                return task_spec
+
+            raw_task_spec = result.value
+            task_spec = _normalize_stage_ownership(
+                raw_task_spec, prompt=prompt
+            ).model_copy(
+                update={"compiler_status": "ok", "compiler_failure_reason": ""}
+            )
+            normalization_warnings = _task_spec_normalization_warnings(
+                raw_task_spec, task_spec
+            )
+            self.last_trace = {
+                "status": "ok",
+                "attempts": [attempt.model_dump() for attempt in result.attempts],
+                "retry_count": max(0, len(result.attempts) - 1),
+                "failure_reason": "",
+                "raw_task_spec": raw_task_spec.model_dump(
+                    mode="json", exclude_none=True
+                ),
+                "normalized_task_spec": task_spec.model_dump(
+                    mode="json", exclude_none=True
+                ),
+                "normalization_warnings": normalization_warnings,
+            }
+            return task_spec
+
         attempts: list[dict] = []
         previous_output = ""
         validation_error = ""
@@ -833,24 +934,25 @@ class TaskCompiler:
             started_at = time.perf_counter()
             raw = ""
             response = None
+            response_elapsed_sec: float | None = None
             try:
                 response = self._client.chat.completions.create(
                     model=self._model,
                     messages=messages,
                     temperature=self._temperature,
                     max_tokens=self._max_tokens,
-                    response_format={
-                        "type": "json_schema",
-                        "json_schema": {
-                            "name": "scene_task_spec",
-                            "strict": True,
-                            "schema": SceneTaskSpec.model_json_schema(),
-                        },
-                    },
-                    extra_body=chat_template_kwargs_from_effort(
-                        "none", model=self._model
+                    response_format=json_response_format(
+                        model=self._model,
+                        name="scene_task_spec",
+                        schema=_task_compiler_wire_schema(),
+                    ),
+                    extra_body=openrouter_extra_body(
+                        chat_template_kwargs_from_effort(
+                            "none", model=self._model
+                        )
                     ),
                 )
+                response_elapsed_sec = round(time.perf_counter() - started_at, 6)
                 message = response.choices[0].message
                 raw = message.content
                 if not raw:
@@ -901,7 +1003,7 @@ class TaskCompiler:
                     {
                         "input": messages,
                         "output": raw or "",
-                        "elapsed_sec": attempts[-1]["elapsed_sec"],
+                        "elapsed_sec": response_elapsed_sec,
                         "status": "ok",
                         "attempt": attempt,
                         "raw_task_spec": raw_task_spec.model_dump(
@@ -913,18 +1015,6 @@ class TaskCompiler:
                         "normalization_warnings": normalization_warnings,
                     }
                 )
-                usage = getattr(response, "usage", None)
-                if usage is not None:
-                    usage_payload = (
-                        usage.model_dump()
-                        if hasattr(usage, "model_dump")
-                        else vars(usage)
-                    )
-                    record["token_usage"] = {
-                        str(key): int(value)
-                        for key, value in usage_payload.items()
-                        if isinstance(value, int)
-                    }
                 _append_llm_debug(record)
                 return task_spec
             except Exception as exc:
@@ -952,7 +1042,11 @@ class TaskCompiler:
                     {
                         "input": messages,
                         "output": raw,
-                        "elapsed_sec": elapsed,
+                        "elapsed_sec": (
+                            response_elapsed_sec
+                            if response_elapsed_sec is not None
+                            else elapsed
+                        ),
                         "status": "error",
                         "attempt": attempt,
                     }

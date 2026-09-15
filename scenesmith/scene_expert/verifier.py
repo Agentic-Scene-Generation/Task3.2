@@ -13,20 +13,35 @@ from __future__ import annotations
 
 import logging
 import re
+
 from pathlib import Path
 
 import yaml
 
-from scenesmith.scenebenchmark_critic.object_taxonomy import (
-    canonical_object_category,
-    categories_are_equivalent,
-)
 from scenesmith.scene_expert.schemas import (
     FullVerifyReport,
     SceneTaskSpec,
     StageBrief,
     StageVerifyReport,
     VerifyIssue,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.intent_contract import (
+    SUPPORT_READINESS_FAILURE_CODE,
+)
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_containment import (
+    ROOM_CONTAINMENT_FAILURE_CODE,
+)
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    canonical_object_category,
+    categories_are_equivalent,
+    semantic_category_match,
+)
+from scenesmith.scenebenchmark_critic.relation_registry import (
+    STAGE_ORDER as CONTRACT_STAGE_ORDER,
+    relation_spec,
+)
+from scenesmith.scenebenchmark_critic.stage_ownership import (
+    normalize_result_stage_ownership,
 )
 
 console_logger = logging.getLogger(__name__)
@@ -66,6 +81,13 @@ _SCENESMITH_SCORE_MAPPING = {
     "space_utilization": "semantic",
 }
 _DETERMINISTIC_HARD_CHECK_MARKER = "DETERMINISTIC HARD-CHECK FAILED BEFORE VLM SCORING"
+_INCOMPLETE_CRITIQUE_PATTERNS = (
+    re.compile(
+        r"^(?:i'll|i will|let me)\s+(?:first\s+)?(?:validate|check|inspect|review)\b",
+        re.I,
+    ),
+    re.compile(r"\bbefore drawing conclusions\b", re.I),
+)
 
 
 def _load_scores_yaml(scores_yaml_path: Path) -> tuple[dict[str, float], str]:
@@ -104,6 +126,17 @@ def _load_scores_yaml(scores_yaml_path: Path) -> tuple[dict[str, float], str]:
                     }
                 )
     return flat, summary
+
+
+def _critique_is_final(summary: str) -> bool:
+    """Reject obvious tool-use preambles accidentally persisted as conclusions."""
+
+    normalized = " ".join(str(summary or "").split())
+    if not normalized:
+        return False
+    if any(pattern.search(normalized) for pattern in _INCOMPLETE_CRITIQUE_PATTERNS):
+        return False
+    return True
 
 
 # Maps stage name → subdirectory under scene_states/ that holds the stage scores.yaml.
@@ -156,7 +189,13 @@ def _find_scores_yaml(stage_output_dir: str, stage: str = "") -> Path | None:
             # Return the most recent per-object scores file (last manipuland placed).
             return max(candidates, key=lambda p: p.stat().st_mtime)
 
-    # Generic fallback: most recent scores.yaml under scene_states/ only
+    # With an explicit stage, never borrow another stage's score. A missing
+    # stage-specific score is accurate "no visual evidence", while a recent
+    # cross-stage score silently creates a false Slow Memory label.
+    if stage:
+        return None
+
+    # Generic fallback is retained only for legacy callers without a stage.
     # (exclude scene_renders/ which has per-iteration files).
     scene_states_dir = root / "scene_states"
     if scene_states_dir.exists():
@@ -260,6 +299,208 @@ def _add_issue_once(issues: list[VerifyIssue], issue: VerifyIssue) -> None:
     issues.append(issue)
 
 
+def _result_intent_constraint(result: dict) -> dict:
+    evidence = result.get("evidence")
+    if not isinstance(evidence, dict):
+        return {}
+    constraint = evidence.get("intent_constraint")
+    return constraint if isinstance(constraint, dict) else {}
+
+
+def _result_is_due(result: dict, stage: str) -> bool:
+    """Whether a deterministic result belongs to the current repair owner."""
+    if stage == "final":
+        return True
+    if stage not in CONTRACT_STAGE_ORDER:
+        return False
+    result = normalize_result_stage_ownership(result)
+    constraint = _result_intent_constraint(result)
+    diagnostics = result.get("diagnostics")
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    earliest = str(diagnostics.get("earliest_stage") or constraint.get("stage") or "")
+    if not earliest or earliest not in CONTRACT_STAGE_ORDER:
+        return False
+    return earliest == stage
+
+
+def _deterministic_core_failures(payload: dict | None, stage: str) -> list[dict]:
+    failures: list[dict] = []
+    for result in (payload or {}).get("results") or []:
+        if not isinstance(result, dict):
+            continue
+        tier = str(result.get("scoring_tier") or "core").lower()
+        label = str(result.get("label") or "").lower()
+        metric = str(result.get("metric") or "")
+        constraint = _result_intent_constraint(result)
+        if constraint and str(constraint.get("strength") or "hard").lower() != "hard":
+            continue
+        hard_label = label == "fail" or (
+            label == "degraded" and metric == "visual_clearance"
+        )
+        if tier != "core" or not hard_label or not _result_is_due(result, stage):
+            continue
+        failures.append(result)
+    return failures
+
+
+def non_degradable_blocker_codes(
+    issues: list[VerifyIssue],
+) -> tuple[str, ...]:
+    """Return typed deterministic failures that degraded mode cannot accept."""
+    blockers: set[str] = set()
+    for issue in issues:
+        if (
+            issue.scoring_tier != "core"
+            or issue.issue_type != "deterministic_relation_failure"
+        ):
+            continue
+        if issue.relation == ROOM_CONTAINMENT_FAILURE_CODE:
+            blockers.add(ROOM_CONTAINMENT_FAILURE_CODE)
+        if issue.diagnostics.get("support_readiness") is True:
+            blockers.add(SUPPORT_READINESS_FAILURE_CODE)
+    return tuple(sorted(blockers))
+
+
+def _non_degradable_blockers(
+    stage_reports: list[StageVerifyReport], payload: dict | None
+) -> list[str]:
+    """Retain typed blockers across resumed-stage finalization."""
+    blockers: set[str] = set()
+    final_issues = [
+        _issue_from_deterministic_result(result)
+        for result in _deterministic_core_failures(payload, "final")
+    ]
+    blockers.update(non_degradable_blocker_codes(final_issues))
+    for report in stage_reports:
+        blockers.update(non_degradable_blocker_codes(report.issues))
+    return sorted(blockers)
+
+
+def _deterministic_hard_check_report(
+    payload: dict | None,
+    stage: str,
+) -> dict[str, object]:
+    """Summarize only actually evaluated, due hard constraints."""
+
+    from scenesmith.scene_expert.memory.evidence import constraint_observation
+
+    evaluated: list[dict] = []
+    relation_results: list[dict] = []
+    constraint_evidence: list[dict] = []
+    for result in (payload or {}).get("results") or []:
+        if not isinstance(result, dict) or not _result_is_due(result, stage):
+            continue
+        tier = str(result.get("scoring_tier") or "core").lower()
+        constraint = _result_intent_constraint(result)
+        # Preserve individual labels, including unknown/degraded, for Memory.
+        # This is additive evidence only; existing scoring and gates below are
+        # unchanged. Unknown auxiliary checks must not disappear beside passes.
+        if constraint.get("constraint_id"):
+            constraint_evidence.append(
+                constraint_observation(result, constraint, stage)
+            )
+        if tier != "core" or (
+            constraint and str(constraint.get("strength") or "hard").lower() != "hard"
+        ):
+            continue
+        label = str(result.get("label") or "").lower()
+        if label not in {"pass", "fail", "degraded"}:
+            continue
+        evaluated.append(result)
+        if constraint or result.get("relation_type"):
+            relation_results.append(result)
+
+    failed = [
+        result
+        for result in evaluated
+        if str(result.get("label") or "").lower() == "fail"
+        or (
+            str(result.get("label") or "").lower() == "degraded"
+            and str(result.get("metric") or "") == "visual_clearance"
+        )
+    ]
+    decided_relations = [
+        result
+        for result in relation_results
+        if str(result.get("label") or "").lower() in {"pass", "fail"}
+    ]
+    passed_relations = [
+        result
+        for result in decided_relations
+        if str(result.get("label") or "").lower() == "pass"
+    ]
+    relation_satisfaction = (
+        len(passed_relations) / len(decided_relations) if decided_relations else None
+    )
+    return {
+        "evaluation_available": bool(evaluated),
+        "hard_passed": not failed if evaluated else None,
+        "evaluated_check_ids": [
+            str(result.get("check_id") or "") for result in evaluated
+        ],
+        "failed_check_ids": [str(result.get("check_id") or "") for result in failed],
+        "evaluated_relation_check_ids": [
+            str(result.get("check_id") or "") for result in decided_relations
+        ],
+        "failed_relation_check_ids": [
+            str(result.get("check_id") or "")
+            for result in decided_relations
+            if str(result.get("label") or "").lower() == "fail"
+        ],
+        "relation_satisfaction": relation_satisfaction,
+        "constraint_satisfaction_rate": relation_satisfaction,
+        "constraint_evidence": constraint_evidence,
+    }
+
+
+def _issue_from_deterministic_result(result: dict) -> VerifyIssue:
+    constraint = _result_intent_constraint(result)
+    relation = str(constraint.get("relation") or result.get("relation_type") or "")
+    diagnostics = result.get("diagnostics")
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    binding_issue = bool(diagnostics.get("binding_issue")) or str(
+        result.get("check_id") or ""
+    ).endswith("__binding")
+    metric = str(result.get("metric") or "")
+    if binding_issue:
+        issue_type = "contract_binding_failure"
+    elif metric == "visual_clearance":
+        issue_type = "visual_clearance_failure"
+    elif metric == "functional_dependency":
+        issue_type = "deterministic_relation_failure"
+    elif metric == "interaction_clearance":
+        issue_type = "interaction_clearance_failure"
+    else:
+        issue_type = "deterministic_core_failure"
+    repair_strategy = ""
+    if relation:
+        try:
+            repair_strategy = relation_spec(relation).repair_strategy or ""
+        except (KeyError, ValueError):
+            repair_strategy = ""
+    primary = str(result.get("primary_object") or result.get("subject_id") or "")
+    related = [
+        str(item)
+        for item in (result.get("related_objects") or result.get("target_ids") or [])
+    ]
+    return VerifyIssue(
+        issue_type=issue_type,
+        object_name=primary,
+        description=str(
+            result.get("reason")
+            or f"Deterministic core check {result.get('check_id')} failed"
+        ),
+        constraint_id=str(constraint.get("constraint_id") or ""),
+        relation=relation,
+        subject_ids=[primary] if primary else [],
+        target_ids=related,
+        metric=metric,
+        scoring_tier=str(result.get("scoring_tier") or "core"),
+        repair_strategy=repair_strategy,
+        diagnostics=dict(diagnostics),
+    )
+
+
 def _check_required_objects(
     task_spec: SceneTaskSpec, stage: str, scene_state_info: dict
 ) -> list[VerifyIssue]:
@@ -275,15 +516,7 @@ def _check_required_objects(
     """
     issues: list[VerifyIssue] = []
 
-    stage_required: list[str] = []
-    if stage == "furniture":
-        stage_required = task_spec.required_large_objects
-    elif stage == "wall_mounted":
-        stage_required = task_spec.required_wall_objects
-    elif stage == "ceiling_mounted":
-        stage_required = task_spec.required_ceiling_objects
-    elif stage == "manipuland":
-        stage_required = task_spec.required_small_objects
+    stage_required = _required_objects_for_stage(task_spec, stage)
 
     if not stage_required:
         return issues
@@ -367,6 +600,88 @@ def _check_required_objects(
     return issues
 
 
+def _required_objects_for_stage(task_spec: SceneTaskSpec, stage: str) -> list[str]:
+    """Return prompt-explicit assets owned by one generated asset stage."""
+    return list(
+        {
+            "furniture": task_spec.required_large_objects,
+            "wall_mounted": task_spec.required_wall_objects,
+            "ceiling_mounted": task_spec.required_ceiling_objects,
+            "manipuland": task_spec.required_small_objects,
+        }.get(stage, [])
+    )
+
+
+def _required_asset_evidence(
+    task_spec: SceneTaskSpec,
+    stage: str,
+    object_issues: list[VerifyIssue],
+) -> dict[str, object]:
+    """Build requirement coverage without conflating it with scene quality."""
+    required = [
+        item
+        for item in _required_objects_for_stage(task_spec, stage)
+        if not (
+            stage == "manipuland"
+            and _normalize_object_label(item) in _VIRTUAL_MANIPULAND_GROUPS
+        )
+    ]
+    if not required:
+        return {
+            "required_objects": [],
+            "required_satisfied_objects": [],
+            "required_missing_objects": [],
+            "required_coverage": None,
+            "requirement_status": "not_applicable",
+        }
+
+    missing = [
+        issue.object_name
+        for issue in object_issues
+        if issue.issue_type == "missing_object" and issue.object_name
+    ]
+    remaining_missing = list(missing)
+    satisfied: list[str] = []
+    for required_object in required:
+        match_index = next(
+            (
+                index
+                for index, missing_object in enumerate(remaining_missing)
+                if _normalize_object_label(required_object)
+                == _normalize_object_label(missing_object)
+            ),
+            None,
+        )
+        if match_index is None:
+            satisfied.append(required_object)
+        else:
+            remaining_missing.pop(match_index)
+    coverage = len(satisfied) / len(required)
+    if not missing:
+        status = "satisfied"
+    elif satisfied:
+        status = "partial"
+    else:
+        status = "unsatisfied"
+    return {
+        "required_objects": required,
+        "required_satisfied_objects": satisfied,
+        "required_missing_objects": missing,
+        "required_coverage": coverage,
+        "requirement_status": status,
+    }
+
+
+def evaluate_required_asset_coverage(
+    task_spec: SceneTaskSpec,
+    stage: str,
+    scene_state_info: dict,
+) -> dict[str, object]:
+    """Public read-only requirement evidence for traces and evaluation."""
+    object_issues = _check_required_objects(task_spec, stage, scene_state_info)
+    return _required_asset_evidence(task_spec, stage, object_issues)
+
+
 # These are prompt-level aggregate concepts, not independently instantiated
 # scene assets. Their concrete components remain required and are consumed
 # above, while SceneBenchmark validates their cardinality and relationship.
@@ -392,12 +707,29 @@ def _object_labels_match(required: str, present: str) -> bool:
     present_label = _normalize_object_label(present)
     if not required_label or not present_label:
         return False
-    if categories_are_equivalent(required_label, present_label):
+    required_components = _object_label_component_categories(required)
+    present_components = _object_label_component_categories(present)
+    if any(
+        categories_are_equivalent(required_category, present_category)
+        or semantic_category_match(required_category, present_category)["matched"]
+        for required_category in required_components
+        for present_category in present_components
+    ):
         return True
     return (
         f" {required_label} " in f" {present_label} "
         or f" {present_label} " in f" {required_label} "
     )
+
+
+def _object_label_component_categories(label: str) -> set[str]:
+    """Return both a label's primary category and compound asset components."""
+    words = re.sub(r"[^a-z0-9]+", " ", str(label).lower()).split()
+    while words and words[-1].isdigit():
+        words.pop()
+    categories = {canonical_object_category(" ".join(words))} if words else set()
+    categories.update(canonical_object_category(word) for word in words)
+    return {category for category in categories if category}
 
 
 def _description_contains_object_label(required: str, description: str) -> bool:
@@ -486,9 +818,11 @@ class StageVerifier:
         self,
         pass_threshold: float = 0.6,
         visual_score_hard_gate: bool = False,
+        critic_bridge_enabled: bool = True,
     ) -> None:
         self._pass_threshold = pass_threshold
         self._visual_score_hard_gate = bool(visual_score_hard_gate)
+        self._critic_bridge_enabled = bool(critic_bridge_enabled)
 
     def verify(
         self,
@@ -497,6 +831,7 @@ class StageVerifier:
         task_spec: SceneTaskSpec,
         stage_brief: StageBrief | None = None,
         scene_state_info: dict | None = None,
+        deterministic_critic_payload: dict | None = None,
     ) -> StageVerifyReport:
         """Run stage verification.
 
@@ -507,6 +842,8 @@ class StageVerifier:
             stage_brief: StageBrief injected for this stage (for constraint checking).
             scene_state_info: Lightweight scene info for rule checks.
                 Expected keys: "object_names" (list[str]).
+            deterministic_critic_payload: Fresh core critic output for hard,
+                geometry-derived stage checks.
 
         Returns:
             StageVerifyReport with pass/fail, scores, issues, and repair suggestions.
@@ -515,18 +852,45 @@ class StageVerifier:
 
         issues: list[VerifyIssue] = []
         repair_suggestions: list[str] = []
+        requirement_evidence: dict[str, object] = {
+            "required_objects": [],
+            "required_satisfied_objects": [],
+            "required_missing_objects": [],
+            "required_coverage": None,
+            "requirement_status": "unknown",
+        }
 
         # --- 1. Load SceneSmith scores ---
-        scores_path = _find_scores_yaml(stage_output_dir, stage=stage)
+        scores_path = (
+            _find_scores_yaml(stage_output_dir, stage=stage)
+            if self._critic_bridge_enabled
+            else None
+        )
         raw_scores, critique_summary = (
             _load_scores_yaml(scores_path) if scores_path else ({}, "")
         )
+        if raw_scores and not _critique_is_final(critique_summary):
+            console_logger.warning(
+                "StageVerifier: ignoring non-final critic payload for stage %s at %s",
+                stage,
+                scores_path,
+            )
+            raw_scores, critique_summary = {}, ""
         mapped_scores = _map_scenesmith_scores(raw_scores)
+        bridged_scores = dict(mapped_scores)
 
         # If no scores available, use conservative defaults
         if not mapped_scores:
-            console_logger.warning(
-                f"No scores.yaml found for stage {stage}, using defaults"
+            reason = (
+                "no scores.yaml was found"
+                if self._critic_bridge_enabled
+                else "the critic bridge is disabled"
+            )
+            console_logger.info(
+                "StageVerifier: %s for stage %s; using neutral deterministic "
+                "verification scores",
+                reason,
+                stage,
             )
             mapped_scores = {
                 "semantic": 0.5,
@@ -561,12 +925,30 @@ class StageVerifier:
                         "Regenerate the floor plan with at least one valid room and positive dimensions"
                     )
             object_issues = _check_required_objects(task_spec, stage, scene_state_info)
+            requirement_evidence = _required_asset_evidence(
+                task_spec,
+                stage,
+                object_issues,
+            )
             issues.extend(object_issues)
             if object_issues:
                 for issue in object_issues:
                     repair_suggestions.append(
                         f"Add missing object '{issue.object_name}' to the scene"
                     )
+        deterministic_failures = _deterministic_core_failures(
+            deterministic_critic_payload, stage
+        )
+        hard_check_report = _deterministic_hard_check_report(
+            deterministic_critic_payload, stage
+        )
+        for failure in deterministic_failures:
+            issue = _issue_from_deterministic_result(failure)
+            _add_issue_once(issues, issue)
+            repair_suggestions.append(
+                "Resolve deterministic core check "
+                f"{failure.get('check_id') or issue.issue_type} and rerun the fresh critic"
+            )
 
         # --- 2b. Optional visual-score ablation gate ---
         # Inventory is already checked from scene state above and physical
@@ -671,9 +1053,21 @@ class StageVerifier:
             stage=stage,
             pass_stage=pass_stage,
             scores=mapped_scores,
+            visual_scores=bridged_scores,
+            rule_scores={"deterministic_issue_free": 1.0 if not issues else 0.0},
             issues=issues,
             repair_suggestions=repair_suggestions,
             critique_summary=critique_summary,
+            score_source=(
+                "scenebenchmark_critic"
+                if self._critic_bridge_enabled and bool(bridged_scores)
+                else "neutral_default"
+            ),
+            vlm_scoring_performed=(
+                self._critic_bridge_enabled and bool(bridged_scores)
+            ),
+            hard_check_report=hard_check_report,
+            **requirement_evidence,
         )
 
 
@@ -692,6 +1086,7 @@ class FullVerifier:
         self,
         stage_reports: list[StageVerifyReport],
         final_scene_path: str = "",
+        deterministic_critic_payload: dict | None = None,
     ) -> FullVerifyReport:
         """Compute final scene quality metrics from stage reports.
 
@@ -705,10 +1100,16 @@ class FullVerifier:
         if not stage_reports:
             return FullVerifyReport()
 
-        # Aggregate scores across stages
+        # Aggregate authoritative visual scores across stages. ``scores`` remains
+        # a backward-compatible field for older callers, but the explicit
+        # neutral default produced while the critic bridge is disabled must not
+        # be treated as critic evidence or flow into memory-quality signals.
         all_scores: dict[str, list[float]] = {}
         for report in stage_reports:
-            for category, score in report.scores.items():
+            report_scores = report.visual_scores
+            if not report_scores and report.score_source == "unknown":
+                report_scores = report.scores
+            for category, score in report_scores.items():
                 all_scores.setdefault(category, []).append(score)
 
         def avg(key: str) -> float:
@@ -744,8 +1145,22 @@ class FullVerifier:
         has_plausibility = "plausibility" in all_scores
         pass_plausibility = not has_plausibility or plausibility >= self._pass_threshold
 
-        deterministic_pass = self._deterministic_stage_passes(stage_reports)
+        final_failures = _deterministic_core_failures(
+            deterministic_critic_payload, "final"
+        )
+        non_degradable_blockers = _non_degradable_blockers(
+            stage_reports, deterministic_critic_payload
+        )
+        deterministic_pass = (
+            self._deterministic_stage_passes(stage_reports) and not final_failures
+        )
         visual_scores_pass = overall >= self._pass_threshold and pass_plausibility
+        requirement_status = self._aggregate_requirement_status(stage_reports)
+        quality_status = (
+            ("passed" if visual_scores_pass else "degraded")
+            if all_scores
+            else "unknown"
+        )
         report = FullVerifyReport(
             semantic_score=semantic,
             aesthetic_score=aesthetic,
@@ -758,11 +1173,14 @@ class FullVerifier:
             support_relation_accuracy=interaction,  # proxy
             overall_score=overall,
             deterministic_pass=deterministic_pass,
+            non_degradable_blockers=non_degradable_blockers,
             pass_scene=(
                 deterministic_pass and visual_scores_pass
                 if self._visual_score_hard_gate
                 else deterministic_pass
             ),
+            requirement_status=requirement_status,
+            quality_status=quality_status,
         )
 
         console_logger.info(
@@ -774,6 +1192,24 @@ class FullVerifier:
             f"visual_gate={self._visual_score_hard_gate}"
         )
         return report
+
+    @staticmethod
+    def _aggregate_requirement_status(
+        stage_reports: list[StageVerifyReport],
+    ) -> str:
+        """Aggregate required-asset fulfillment independently from quality."""
+        statuses = [
+            report.requirement_status
+            for report in stage_reports
+            if report.requirement_status not in {"not_applicable", "unknown"}
+        ]
+        if not statuses:
+            return "not_applicable"
+        if all(status == "satisfied" for status in statuses):
+            return "satisfied"
+        if all(status == "unsatisfied" for status in statuses):
+            return "unsatisfied"
+        return "partial"
 
     @staticmethod
     def _deterministic_stage_passes(stage_reports: list[StageVerifyReport]) -> bool:

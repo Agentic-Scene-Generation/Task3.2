@@ -7,7 +7,8 @@ Qwen3 cannot skip stages, randomly call tools, or exceed budgets.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+
+from dataclasses import dataclass
 
 from omegaconf import DictConfig
 
@@ -61,8 +62,9 @@ class Harness:
     - Tracks repair attempt counts per stage
     """
 
-    def __init__(self, cfg: DictConfig) -> None:
+    def __init__(self, cfg: DictConfig, *, budget_enabled: bool = True) -> None:
         self._cfg = cfg
+        self._budget_enabled = budget_enabled
         self._repair_counts: dict[str, int] = {}  # stage → repair attempts so far
 
     def reset(self) -> None:
@@ -76,6 +78,7 @@ class Harness:
         memory_pack: MemoryPack,
         stage_brief: StageBrief | None = None,
         relation_context: StageRelationContext | None = None,
+        stage_policy: str = "auto",
     ) -> HarnessContext:
         """Assemble the HarnessContext for a stage execution.
 
@@ -90,6 +93,11 @@ class Harness:
         """
         if stage not in STAGE_ORDER:
             raise ValueError(f"Unknown stage: {stage}. Valid stages: {STAGE_ORDER}")
+        if stage_policy not in {"auto", "required_only"}:
+            raise ValueError(
+                "stage_policy must be 'auto' or 'required_only', "
+                f"got {stage_policy!r}"
+            )
 
         budget = self._get_stage_budget(stage)
         return HarnessContext(
@@ -100,6 +108,7 @@ class Harness:
             stage_brief=stage_brief,
             stage_budget=budget,
             allowed_scene_smith_stage=stage,
+            stage_policy=stage_policy,
         )
 
     def decide_repair(
@@ -127,7 +136,7 @@ class Harness:
         budget = self._get_stage_budget(stage)
         attempt = self._repair_counts.get(stage, 0)
 
-        if attempt >= budget.max_repair_steps:
+        if self._budget_enabled and attempt >= budget.max_repair_steps:
             return RepairDecision(
                 should_repair=False,
                 strategy="skip",
@@ -144,8 +153,11 @@ class Harness:
 
         self._repair_counts[stage] = attempt + 1
 
+        budget_label = (
+            str(budget.max_repair_steps) if self._budget_enabled else "unbounded"
+        )
         reason = (
-            f"Attempt {attempt + 1}/{budget.max_repair_steps}: "
+            f"Attempt {attempt + 1}/{budget_label}: "
             f"issues={[i.issue_type for i in verify_report.issues]}"
         )
         console_logger.info(
@@ -156,6 +168,12 @@ class Harness:
 
     def _get_stage_budget(self, stage: str) -> StageBudget:
         """Get per-stage budget from config."""
+        if not self._budget_enabled:
+            # Zero is a sentinel consumed only by SceneExpert prompt formatting.
+            # Repair decisions bypass these limits while disabled and remain
+            # bounded by SceneSmith's existing outer retry guard.
+            return StageBudget(max_designer_iterations=0, max_repair_steps=0)
+
         stage_cfg = getattr(self._cfg, "stage_budget", None)
         if stage_cfg is None:
             return StageBudget()

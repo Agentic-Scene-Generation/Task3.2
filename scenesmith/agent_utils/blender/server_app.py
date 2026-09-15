@@ -396,6 +396,9 @@ class BlenderRenderApp(flask.Flask):
             openings = [ClearanceOpeningData.from_dict(o) for o in openings_raw]
             # Ceiling perspective parameters.
             room_bounds = self._overlay_config.get("room_bounds", None)
+            room_local_footprint_vertices = self._overlay_config.get(
+                "room_local_footprint_vertices", None
+            )
             ceiling_height = self._overlay_config.get("ceiling_height", None)
             # Convert room_bounds list to tuple if provided.
             if room_bounds is not None:
@@ -433,6 +436,7 @@ class BlenderRenderApp(flask.Flask):
                 wall_surfaces=wall_surfaces,
                 wall_surfaces_for_labels=wall_surfaces_for_labels,
                 room_bounds=room_bounds,
+                room_local_footprint_vertices=room_local_footprint_vertices,
                 ceiling_height=ceiling_height,
                 side_view_elevation_degrees=side_view_elevation_degrees,
                 side_view_start_azimuth_degrees=side_view_start_azimuth_degrees,

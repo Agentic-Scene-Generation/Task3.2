@@ -66,6 +66,7 @@ class FloorPlanVisionTools:
         floor_thickness: float = 0.1,
         render_size: int = 1024,
         generate_geometries_callback: Callable[[], None] | None = None,
+        mode: str = "room",
     ):
         """Initialize floor plan vision tools.
 
@@ -87,6 +88,7 @@ class FloorPlanVisionTools:
         self.floor_thickness = floor_thickness
         self.render_size = render_size
         self._generate_geometries_callback = generate_geometries_callback
+        self.mode = mode
 
         # Render counter for unique output directories.
         self._render_counter = 0
@@ -493,7 +495,11 @@ class FloorPlanVisionTools:
         if not self.layout.placed_rooms:
             return [
                 ToolOutputText(
-                    text="No rooms to render. Call generate_room_specs first."
+                    text=(
+                        "No rooms to render. Call generate_polygon_room first."
+                        if self.mode == "polygon"
+                        else "No rooms to render. Call generate_room_specs first."
+                    )
                 )
             ]
 
@@ -701,6 +707,8 @@ class FloorPlanVisionTools:
         """Implementation of render_ascii tool."""
         console_logger.info("Tool called: render_ascii")
         if not self.layout.placed_rooms:
+            if self.mode == "polygon":
+                return "No rooms to render. Call generate_polygon_room first."
             return "No rooms to render. Call generate_room_specs first."
 
         result = generate_ascii_floor_plan(self.layout.placed_rooms)

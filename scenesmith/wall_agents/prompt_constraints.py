@@ -30,8 +30,9 @@ _MEDIA_GROUP_ON_WALL_PATTERN = re.compile(
 )
 _NO_EXPLICIT_WALL_REQUIREMENTS = (
     "- No explicit wall-object obligations were extracted from the prompt. "
-    "Do not create, move, remove, or duplicate wall-mounted objects that the "
-    "TaskCompiler allocated to another stage."
+    "This is not an empty-stage signal: use the room type, style, available wall "
+    "area, openings, and existing furniture to design appropriate optional wall "
+    "objects while preserving objects allocated to other stages."
 )
 
 
@@ -139,10 +140,9 @@ def build_required_wall_object_constraints(
     lower_text = normalized.lower()
     requirements: list[str] = []
 
-    # When SceneExpert has compiled the prompt, that inventory is the sole
-    # authority for stage ownership.  ``room_description`` may already include
-    # a model-authored StageBrief, so re-parsing it can promote an object from a
-    # later stage to a wall obligation.
+    # When SceneExpert has compiled the prompt, its inventory is the sole source
+    # of hard wall obligations. It is a minimum rather than an exhaustive design
+    # list; optional same-stage decoration remains under the designer policy.
     required_wall_objects = _task_spec_values(task_spec, "required_wall_objects")
     if task_spec is not None and not required_wall_objects:
         return _NO_EXPLICIT_WALL_REQUIREMENTS
@@ -183,8 +183,10 @@ def build_required_wall_object_constraints(
         if required_wall_objects:
             return (
                 "- REQUIRED wall objects from the TaskCompiler inventory: "
-                f"{', '.join(required_wall_objects)}. Create only these objects "
-                "and preserve objects allocated to other stages."
+                f"{', '.join(required_wall_objects)}. Complete these first, then "
+                "add capacity-appropriate optional wall objects when allowed by "
+                "the SceneExpert stage policy. Preserve objects allocated to other "
+                "stages."
             )
         return _NO_EXPLICIT_WALL_REQUIREMENTS
 

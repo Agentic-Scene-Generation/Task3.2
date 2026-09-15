@@ -92,6 +92,15 @@ class WallSpec:
     thickness: float
     """Wall thickness (same as bbox dimension in one axis)."""
 
+    yaw: float = 0.0
+    """Rotation around room-local Z; zero preserves the rectangle path."""
+
+    inward_normal: tuple[float, float] | None = None
+    """Exact room-facing normal for arbitrary-yaw polygon walls."""
+
+    wall_id: str | None = None
+    """Stable source wall identity for polygon surfaces."""
+
 
 @dataclass
 class WallDimensions:

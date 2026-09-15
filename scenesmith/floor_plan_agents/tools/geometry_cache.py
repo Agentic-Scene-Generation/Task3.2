@@ -49,6 +49,23 @@ def floor_cache_key(
     return hashlib.sha256(content_json.encode()).hexdigest()[:16]
 
 
+def polygon_floor_cache_key(
+    vertices: list[tuple[float, float]],
+    thickness: float,
+    material: Material | None,
+    texture_scale: float = 0.5,
+) -> str:
+    """Generate a shape-sensitive cache key for polygon floor GLTFs."""
+    state = {
+        "vertices": vertices,
+        "thickness": thickness,
+        "material": str(material.path) if material else None,
+        "texture_scale": texture_scale,
+    }
+    content_json = json.dumps(state, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(content_json.encode()).hexdigest()[:16]
+
+
 def wall_cache_key(
     width: float,
     height: float,

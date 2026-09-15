@@ -132,6 +132,12 @@ def _get_floor_polygon(scene: RoomScene) -> Polygon:
     Keep the dimension fallback for lightweight tests and legacy scenes that
     do not carry an explicit floor object.
     """
+    footprint_vertices = getattr(scene.room_geometry, "footprint_vertices", None)
+    if footprint_vertices is not None:
+        polygon = Polygon(footprint_vertices)
+        if not polygon.is_empty and polygon.area > 0.0:
+            return polygon
+
     floor_object = getattr(scene.room_geometry, "floor", None)
     if (
         floor_object is not None

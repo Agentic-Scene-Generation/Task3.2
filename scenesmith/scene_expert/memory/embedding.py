@@ -6,13 +6,45 @@ import inspect
 import logging
 import os
 
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any, Iterator
 
 import numpy as np
 
 DEFAULT_EMBEDDING_MODEL_ID = "BAAI/bge-m3"
 DEFAULT_EMBEDDING_DIRNAME = "bge-m3"
 console_logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _flag_embedding_transformers_compatibility() -> Iterator[None]:
+    """Translate FlagEmbedding's legacy ``dtype`` loader kwarg locally.
+
+    FlagEmbedding 1.4.0 passes ``dtype`` to ``AutoModel.from_pretrained``.
+    Transformers 4.55.x accepts the kwarg at the loader boundary but can pass
+    it through to model constructors such as ``XLMRobertaModel``, which do not
+    accept it. Keep the project-required Transformers version and adapt only
+    the third-party call while the BGE-M3 model is being constructed.
+    """
+    try:
+        from transformers import AutoModel
+    except ImportError:
+        yield
+        return
+
+    original = AutoModel.from_pretrained
+
+    def compatible_from_pretrained(*args: Any, **kwargs: Any) -> Any:
+        if "dtype" in kwargs and "torch_dtype" not in kwargs:
+            kwargs["torch_dtype"] = kwargs.pop("dtype")
+        return original(*args, **kwargs)
+
+    AutoModel.from_pretrained = compatible_from_pretrained  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        AutoModel.from_pretrained = original  # type: ignore[method-assign]
 
 
 def resolve_memory_embedding_model_dir(model_dir: str | None = None) -> Path:
@@ -51,6 +83,12 @@ def require_local_embedding_model_dir(model_dir: str | None = None) -> Path:
         raise NotADirectoryError(
             f"SceneExpert memory embedding model path is not a directory: {path}"
         )
+    if not any(path.glob("*.safetensors")):
+        raise FileNotFoundError(
+            "SceneExpert memory embedding model has no safetensors checkpoint: "
+            f"{path}. Convert a trusted pytorch_model.bin with "
+            "scripts/convert_embedding_checkpoint.py before using hybrid memory."
+        )
     return path
 
 
@@ -86,10 +124,11 @@ class SceneMemoryEmbedder:
                 "python -m pip install -r requirements-memory.txt"
             ) from e
 
-        self._model = BGEM3FlagModel(
-            str(self.model_dir),
-            **self._flag_embedding_kwargs(BGEM3FlagModel),
-        )
+        with _flag_embedding_transformers_compatibility():
+            self._model = BGEM3FlagModel(
+                str(self.model_dir),
+                **self._flag_embedding_kwargs(BGEM3FlagModel),
+            )
 
     def _flag_embedding_kwargs(self, model_cls: object) -> dict[str, object]:
         """Build version-tolerant FlagEmbedding constructor kwargs.

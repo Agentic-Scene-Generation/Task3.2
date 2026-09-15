@@ -1607,7 +1607,9 @@ class AssetRouter:
         scene_prompt_context: str | None = None,
     ) -> list["HssdRetrievalResult"]:
         """Optionally reorder HSSD candidates using pre-rendered iso images."""
-        if not enabled or len(candidates) <= 1:
+        if not enabled or (
+            len(candidates) <= 1 and not item.forbidden_semantic_components
+        ):
             return candidates
 
         _, _, rendered_assets_dir = self._hssd_rendered_choice_options()
@@ -1630,6 +1632,7 @@ class AssetRouter:
                 if is_floor_covering_request(item.description, item.short_name)
                 else None
             ),
+            forbidden_components=item.forbidden_semantic_components,
         )
         if choice.selected_hssd_id:
             console_logger.info(

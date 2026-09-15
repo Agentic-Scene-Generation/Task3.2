@@ -14,6 +14,7 @@ from typing import Any
 from scenesmith.scenebenchmark_critic.relation_registry import (
     CEILING_MOUNTED_CATEGORIES,
     MANIPULAND_CATEGORIES,
+    STAGE_ORDER,
     WALL_MOUNTED_CATEGORIES,
 )
 
@@ -29,6 +30,8 @@ _CATEGORY_ALIASES = {
     "computer_display": "monitor",
     "computer_monitor": "monitor",
     "display_monitor": "monitor",
+    "display_shelves": "display_shelf",
+    "display_shelving": "display_shelf",
     "water_cooler": "water_dispenser",
     "drinking_water_dispenser": "water_dispenser",
     "storage_cupboard": "storage_cabinet",
@@ -63,6 +66,17 @@ _CATEGORY_ALIASES = {
     "tv": "television",
     "tv_display": "television",
     "television_display": "television",
+    "wall_lamp": "wall_light",
+    "wall_sconce": "wall_light",
+    "sconce": "wall_light",
+    "wall_lights": "wall_light",
+    "bedside_clock": "alarm_clock",
+    "alarm_clocks": "alarm_clock",
+    "cup_of_tea": "cup",
+    "tea_cup": "cup",
+    "trays": "tray",
+    "recliners": "recliner",
+    "wood_sculpture": "sculpture",
     "table_settings": "table_setting",
     "place_settings": "table_setting",
     "place_setting": "table_setting",
@@ -74,7 +88,141 @@ _CATEGORY_ALIASES = {
     "projector_screen": "instructional_surface",
     "teaching_screen": "instructional_surface",
     "presentation_screen": "instructional_surface",
+    "loudspeaker": "speaker",
+    "loudspeakers": "speaker",
 }
+
+# Ordered from specialized to generic so prompt parsing and descriptor
+# stripping resolve the same noun phrase. This is the shared semantic
+# vocabulary for TaskCompiler inventory and intent relation selectors.
+OBJECT_CATEGORY_PHRASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("window", ("window",)),
+    ("door", ("door",)),
+    ("opening", ("opening", "open connection")),
+    (
+        "instructional_surface",
+        (
+            "chalkboard",
+            "blackboard",
+            "whiteboard",
+            "projection screen",
+            "projector screen",
+            "teaching screen",
+        ),
+    ),
+    ("student_desk", ("student desk",)),
+    ("teacher_desk", ("teacher desk", "instructor desk")),
+    ("reception_desk", ("reception desk", "reception counter")),
+    ("office_chair", ("office chair", "desk chair", "task chair")),
+    (
+        "guest_chair",
+        ("guest chair", "visitor chair", "guest armchair", "visitor armchair"),
+    ),
+    ("dining_chair", ("dining chair",)),
+    ("sofa_chair", ("sofa chair",)),
+    ("rocking_chair", ("rocking chair",)),
+    ("armchair", ("armchair", "arm chair")),
+    ("dining_table", ("dining table",)),
+    (
+        "conference_table",
+        ("conference table", "meeting table", "boardroom table"),
+    ),
+    ("coffee_table", ("coffee table",)),
+    ("side_table", ("side table", "end table", "accent table")),
+    (
+        "dressing_table",
+        ("dressing table", "vanity table", "makeup table", "vanity"),
+    ),
+    ("filing_cabinet", ("filing cabinet", "file cabinet")),
+    ("storage_cabinet", ("storage cabinet", "storage cupboard")),
+    (
+        "display_cabinet",
+        ("display cabinet", "display cupboard", "display case"),
+    ),
+    (
+        "display_shelf",
+        ("display shelf", "display shelves", "display shelving"),
+    ),
+    (
+        "water_dispenser",
+        ("water dispenser", "water cooler", "drinking water dispenser"),
+    ),
+    ("tv_stand", ("tv stand", "television stand", "media console")),
+    (
+        "media_cabinet",
+        (
+            "media cabinet",
+            "floating media cabinet",
+            "media unit",
+            "entertainment cabinet",
+        ),
+    ),
+    ("television", ("television", "tv")),
+    (
+        "monitor",
+        (
+            "computer monitor",
+            "computer display",
+            "display monitor",
+            "monitor",
+            "screen",
+        ),
+    ),
+    ("brochure_holder", ("brochure holder", "leaflet holder", "brochure stand")),
+    ("printer", ("printer",)),
+    ("nightstand", ("nightstand", "bedside table")),
+    ("stool", ("stool", "vanity stool", "dressing stool")),
+    ("bookshelf", ("bookshelf", "bookcase", "shelving unit")),
+    ("sideboard", ("sideboard", "buffet")),
+    ("wardrobe", ("wardrobe", "closet", "armoire")),
+    ("dresser", ("dresser", "chest of drawers", "chest of drawer", "bureau")),
+    ("floor_lamp", ("floor lamp",)),
+    (
+        "floor_speaker",
+        ("floor speaker", "floor-standing speaker", "speaker tower"),
+    ),
+    ("speaker", ("speaker", "loudspeaker")),
+    ("table_lamp", ("table lamp", "desk lamp")),
+    ("wall_light", ("wall light", "wall lamp", "wall sconce", "sconce")),
+    ("tray", ("tray", "serving tray", "cafeteria tray")),
+    ("picture_frame", ("picture frame", "frame portrait", "framed portrait")),
+    ("record", ("vinyl record", "record")),
+    ("pillow", ("throw pillow", "bed pillow", "pillow")),
+    ("plush_toy", ("plush toy", "stuffed animal", "stuffed toy")),
+    # Keep specialized clock phrases ahead of the generic family.  The
+    # canonical category map and prompt parser must agree that an alarm clock
+    # is still a clock family member without losing its typed identity.
+    ("alarm_clock", ("alarm clock", "bedside clock")),
+    ("clock", ("clock", "mantel clock")),
+    ("recliner", ("recliner", "reclining chair")),
+    ("sculpture", ("sculpture", "statuette", "statue")),
+    ("vase", ("vase",)),
+    ("flower", ("flower", "flowers")),
+    ("plate", ("plate",)),
+    ("cutlery", ("cutlery", "fork", "knife", "spoon")),
+    ("glass_bowl", ("glass bowl",)),
+    ("glass", ("glass", "drinking glass", "wine glass")),
+    ("coaster", ("coaster",)),
+    ("book", ("book",)),
+    ("wastebasket", ("wastebasket", "waste basket", "trash can", "trash bin")),
+    ("bottle", ("bottle",)),
+    ("bowl", ("bowl",)),
+    ("cup", ("cup",)),
+    ("mug", ("mug",)),
+    ("keyboard", ("keyboard",)),
+    ("laptop", ("laptop",)),
+    ("remote", ("remote", "remote control")),
+    ("rug", ("rug", "carpet", "area rug")),
+    ("mirror", ("mirror",)),
+    ("table_setting", ("table setting", "place setting")),
+    ("plant", ("plant",)),
+    ("bed", ("bed",)),
+    ("sofa", ("sofa", "couch", "settee")),
+    ("desk", ("desk",)),
+    ("chair", ("chair", "seat")),
+    ("table", ("table",)),
+    ("floor", ("floor",)),
+)
 
 # These are equivalence classes, not aliases.  Keeping the concrete category
 # preserves useful role data (for example, a desk lamp is not renamed in the
@@ -83,6 +231,48 @@ _EQUIVALENT_CATEGORY_GROUPS = (
     frozenset({"table_lamp", "desk_lamp", "reading_lamp", "bedside_lamp"}),
     frozenset({"wastebasket", "trash_can", "trash_bin"}),
 )
+
+# Directional taxonomy edges are deliberately explicit. They let a concrete
+# generated label satisfy a requested family without treating arbitrary shared
+# words in IDs or descriptions as semantic evidence. Keep this registry shared
+# by selector binding and SceneExpert inventory verification: using separate
+# parent maps can make a relation bind while the same object is reported absent.
+GENERIC_CATEGORY_PARENTS = {
+    "freestanding_bathtub": "bathtub",
+    "ceiling_light": "lamp",
+    "pendant_light": "lamp",
+    "string_light": "lamp",
+    "wall_light": "lamp",
+    "conference_table": "table",
+    "dining_table": "table",
+    "coffee_table": "table",
+    "side_table": "table",
+    "office_chair": "chair",
+    "guest_chair": "chair",
+    "dining_chair": "chair",
+    "student_chair": "chair",
+    "teacher_chair": "chair",
+    "armchair": "chair",
+    "stool": "chair",
+    "bench": "chair",
+    "student_desk": "desk",
+    "teacher_desk": "desk",
+    "reception_desk": "desk",
+    "storage_cabinet": "cabinet",
+}
+
+_PARENT_CATEGORY_EDGES = {
+    "frame_portrait": "picture_frame",
+    "framed_portrait": "picture_frame",
+    "vinyl_record": "record",
+    "record_album": "record",
+    "throw_pillow": "pillow",
+    "bed_pillow": "pillow",
+    "decorative_pillow": "pillow",
+    "plush_bear": "plush_toy",
+    "stuffed_bear": "plush_toy",
+    **GENERIC_CATEGORY_PARENTS,
+}
 
 # These objects normally stand on the floor unless an explicit support relation
 # says otherwise.  The set is intentionally semantic rather than prompt- or
@@ -109,6 +299,13 @@ _EXECUTION_STAGES = frozenset(
     {"furniture", "wall_mounted", "ceiling_mounted", "manipuland"}
 )
 
+STRUCTURAL_ANCHOR_CATEGORIES = frozenset({"door", "opening", "window"})
+
+
+def is_structural_anchor(category: Any) -> bool:
+    """Return whether a category is generated by the floor-plan stage."""
+    return canonical_object_category(category) in STRUCTURAL_ANCHOR_CATEGORIES
+
 
 def _singularize_category(normalized: str) -> str:
     if normalized.endswith("ies") and len(normalized) > 3:
@@ -120,12 +317,78 @@ def _singularize_category(normalized: str) -> str:
     return normalized
 
 
+def _phrase_category_map() -> dict[str, str]:
+    result: dict[str, str] = {}
+    for category, aliases in OBJECT_CATEGORY_PHRASES:
+        for value in (category, *aliases):
+            normalized = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
+            result[_singularize_category(normalized)] = category
+    return result
+
+
+_PHRASE_CATEGORY_MAP = _phrase_category_map()
+_KNOWN_CATEGORIES = frozenset(
+    set(_CATEGORY_ALIASES.values())
+    | set(_PHRASE_CATEGORY_MAP.values())
+    | set(WALL_MOUNTED_CATEGORIES)
+    | set(CEILING_MOUNTED_CATEGORIES)
+    | set(MANIPULAND_CATEGORIES)
+    | {"door", "opening", "room", "wall", "window"}
+)
+
+
+def is_known_object_category(category: Any) -> bool:
+    """Return whether taxonomy has an intrinsic policy for this category."""
+    return canonical_object_category(category) in _KNOWN_CATEGORIES
+
+
+def _token_is_known_category(token: str) -> bool:
+    singular = _singularize_category(token)
+    return (
+        singular in _CATEGORY_ALIASES
+        or singular in _PHRASE_CATEGORY_MAP
+        or singular in _KNOWN_CATEGORIES
+    )
+
+
 def canonical_object_category(value: Any) -> str:
-    """Normalize prompt, selector, and asset labels to a stable category."""
+    """Resolve a label to the longest known semantic object category."""
     normalized = str(value or "").strip().lower()
     normalized = re.sub(r"(?<=[a-z])['\u2019]s\b", "", normalized)
     normalized = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
-    return _CATEGORY_ALIASES.get(normalized, _singularize_category(normalized))
+    if not normalized:
+        return ""
+    alias = _CATEGORY_ALIASES.get(normalized)
+    if alias is not None:
+        return alias
+
+    singular = _singularize_category(normalized)
+    alias = _CATEGORY_ALIASES.get(singular)
+    if alias is not None:
+        return alias
+    phrase_category = _PHRASE_CATEGORY_MAP.get(singular)
+    if phrase_category is not None:
+        return phrase_category
+    if singular in _KNOWN_CATEGORIES:
+        return singular
+
+    # Descriptor-heavy inventory labels put shape, size, material, or style
+    # before the semantic noun (for example ``circular_ceramic_table``). Match
+    # only a known suffix. Matching arbitrary interior tokens would collapse
+    # real compound categories such as ``wall_cabinet`` or ``vase_flowers``.
+    tokens = singular.split("_")
+    for width in range(len(tokens), 0, -1):
+        start = len(tokens) - width
+        phrase = "_".join(tokens[start:])
+        phrase_category = _PHRASE_CATEGORY_MAP.get(phrase)
+        if phrase_category is None and phrase in _KNOWN_CATEGORIES:
+            phrase_category = phrase
+        if phrase_category is None:
+            continue
+        if any(_token_is_known_category(token) for token in tokens[:start]):
+            continue
+        return phrase_category
+    return singular
 
 
 def categories_are_equivalent(first: Any, second: Any) -> bool:
@@ -142,39 +405,87 @@ def categories_are_equivalent(first: Any, second: Any) -> bool:
     )
 
 
-def execution_owner(
+def semantic_category_match(requested: Any, observed: Any) -> dict[str, Any]:
+    """Match a category through exact or declared taxonomy evidence.
+
+    The returned provenance is intentionally structured so inventory counting,
+    forbidden inventory, and relation binding can explain why an object did or
+    did not satisfy a selector.  This is not a fuzzy text matcher.
+    """
+    requested_category = canonical_object_category(requested)
+    observed_raw = _normalize_category_token(observed)
+    observed_category = canonical_object_category(observed_raw)
+    result = {
+        "requested_category": requested_category,
+        "observed_category": observed_raw or observed_category,
+        "matched": False,
+        "match_kind": "none",
+        "match_path": [],
+    }
+    if not requested_category or not observed_raw:
+        return result
+    if observed_raw == requested_category:
+        result.update(
+            matched=True,
+            match_kind="exact",
+            match_path=[observed_raw, requested_category],
+        )
+        return result
+    parent = _PARENT_CATEGORY_EDGES.get(observed_raw)
+    if parent == requested_category:
+        result.update(
+            matched=True,
+            match_kind="taxonomy_parent",
+            match_path=[observed_raw, parent],
+        )
+        return result
+    if observed_category == requested_category:
+        result.update(
+            matched=True,
+            match_kind="exact",
+            match_path=[observed_raw, requested_category],
+        )
+        return result
+    if categories_are_equivalent(requested_category, observed_category):
+        result.update(
+            matched=True,
+            match_kind="taxonomy_equivalent",
+            match_path=[observed_raw, observed_category, requested_category],
+        )
+    return result
+
+
+def _normalize_category_token(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+def generation_owner(
     category: Any,
     *,
     relation: str = "",
     endpoint: str = "subject",
-    existing_owner: str = "",
+    declared_owner: str = "",
 ) -> str:
-    """Return the pipeline stage that must create an object category.
+    """Return the stage that creates an object, independently of check timing.
 
-    Explicit mounting relations take precedence over category defaults. Surface
-    support only promotes canonical small-object categories to ``manipuland``:
-    a television on a media console is still furniture and must be placed while
-    both furniture endpoints are available. An existing inventory owner is only
-    a fallback; it must not make a normally floor-standing object become a
-    manipuland merely because an upstream model emitted it in the wrong
-    inventory list.
+    Explicit mounting and support relations take precedence over category
+    defaults. Open-vocabulary objects otherwise retain their typed TaskCompiler
+    inventory.
     """
     normalized_category = canonical_object_category(category)
     normalized_relation = str(relation or "").strip().lower().replace("-", "_")
     normalized_endpoint = str(endpoint or "subject").strip().lower()
 
+    if normalized_category in STRUCTURAL_ANCHOR_CATEGORIES:
+        return "floor_plan"
+
     if normalized_endpoint == "subject":
         if normalized_relation in _SURFACE_SUPPORT_RELATIONS:
-            # ``on_top_of`` describes both manipulands on furniture (a lamp on
-            # a desk) and structural furniture support (a television on a TV
-            # stand). The latter must remain at the furniture stage so the
-            # support-pose repair can place it in XYZ, not as a loose floor
-            # object deferred to the manipuland agent.
-            return (
-                "manipuland"
-                if normalized_category in MANIPULAND_CATEGORIES
-                else "furniture"
-            )
+            # Furniture tools are floor-only SE(2): they cannot realize the Z
+            # coordinate required by a support relation. The manipuland stage
+            # owns every explicit surface-supported subject, independently of
+            # its default inventory category.
+            return "manipuland"
         if normalized_relation in _FLOOR_SUPPORT_RELATIONS:
             return "furniture"
         if normalized_relation in _WALL_MOUNT_RELATIONS:
@@ -184,12 +495,42 @@ def execution_owner(
 
     if normalized_category in _FLOOR_STANDING_DEFAULTS:
         return "furniture"
+    # The typed TaskCompiler inventory is direct generation evidence.  Keep it
+    # ahead of broad category defaults so a wall-declared ``screen`` (which is
+    # semantically normalized to ``monitor``) is not silently moved to the
+    # manipuland stage. Explicit support/mount relations above remain stronger.
+    if declared_owner in {"wall_mounted", "ceiling_mounted"}:
+        return declared_owner
     if normalized_category in WALL_MOUNTED_CATEGORIES:
         return "wall_mounted"
     if normalized_category in CEILING_MOUNTED_CATEGORIES:
         return "ceiling_mounted"
     if normalized_category in MANIPULAND_CATEGORIES:
         return "manipuland"
-    if existing_owner in _EXECUTION_STAGES:
-        return existing_owner
+    if declared_owner in _EXECUTION_STAGES:
+        return declared_owner
     return "furniture"
+
+
+def constraint_evaluation_stage(*endpoint_owners: str) -> str:
+    """Return the first stage at which every relation endpoint can exist."""
+    owners = [owner for owner in endpoint_owners if owner in STAGE_ORDER]
+    if not owners:
+        return "furniture"
+    return max(owners, key=STAGE_ORDER.index)
+
+
+def execution_owner(
+    category: Any,
+    *,
+    relation: str = "",
+    endpoint: str = "subject",
+    existing_owner: str = "",
+) -> str:
+    """Compatibility wrapper for the retired combined ownership helper."""
+    return generation_owner(
+        category,
+        relation=relation,
+        endpoint=endpoint,
+        declared_owner=existing_owner,
+    )

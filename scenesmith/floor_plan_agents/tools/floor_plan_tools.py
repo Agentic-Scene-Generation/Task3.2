@@ -15,6 +15,7 @@ from agents import function_tool
 from scenesmith.agent_utils.house import (
     ConnectionType,
     HouseLayout,
+    PlacedRoom,
     RoomMaterials,
     RoomSpec,
     Wall,
@@ -27,6 +28,13 @@ from scenesmith.floor_plan_agents.tools.materials_resolver import (
     MaterialsResolver,
 )
 from scenesmith.floor_plan_agents.tools.open_plan_mixin import OpenPlanMixin
+from scenesmith.floor_plan_agents.tools.polygon_geometry import (
+    PolygonValidationConfig,
+    PolygonValidationError,
+    canonicalize_polygon,
+    polygon_aabb,
+    polygon_edges,
+)
 from scenesmith.floor_plan_agents.tools.room_placement import (
     PlacementConfig,
     PlacementError,
@@ -118,6 +126,7 @@ class ValidationResult:
     future_capacity: str = "ok"
     opening_budget: str = "ok"
     reservation_issues: list[dict[str, Any]] = field(default_factory=list)
+    reservation_advisories: list[dict[str, Any]] = field(default_factory=list)
 
 
 class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
@@ -135,7 +144,7 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
     def __init__(
         self,
         layout: HouseLayout,
-        mode: Literal["room", "house"] = "room",
+        mode: Literal["room", "house", "polygon"] = "room",
         materials_config: MaterialsConfig | None = None,
         min_opening_separation: float = 0.5,
         placement_timeout_seconds: float = 5.0,
@@ -146,6 +155,7 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
         wall_height_max: float = 4.5,
         room_dim_min: float = 1.5,
         room_dim_max: float = 20.0,
+        polygon_config: PolygonValidationConfig | None = None,
         reservation_manifest: (
             FloorPlanReservationManifest | dict[str, Any] | None
         ) = None,
@@ -180,7 +190,13 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
         self.wall_height_max = wall_height_max
         self.room_dim_min = room_dim_min
         self.room_dim_max = room_dim_max
+        self.polygon_config = polygon_config or PolygonValidationConfig(
+            min_dimension_m=room_dim_min, max_dimension_m=room_dim_max
+        )
         self.reservation_manifest = reservation_manifest
+
+        if mode not in {"room", "house", "polygon"}:
+            raise ValueError(f"Unknown floor plan mode: {mode!r}")
 
         # Build tools dictionary using closure pattern.
         # This avoids including 'self' in OpenAI function schemas.
@@ -245,6 +261,37 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
                 RoomSpecsResult with placed rooms and wall segment labels.
             """
             return self._generate_room_specs_impl(room_specs_json)
+
+        @function_tool
+        def generate_polygon_room(polygon_spec_json: str) -> RoomSpecsResult:
+            """Create one irregular room from an ordered simple polygon boundary.
+
+            The vertices may define a convex or concave shape and are interpreted in
+            meters. They must not self-intersect or contain holes.
+
+            Args:
+                polygon_spec_json: JSON object with ``type`` and ``vertices``. Example:
+                    '{"type":"living_room","vertices":[[0,0],[6,0],'
+                    '[6,2],[3,2],[3,5],[0,5]]}'
+
+            Returns:
+                RoomSpecsResult with stable W00/W01/... wall labels.
+            """
+            return self._generate_polygon_room_impl(polygon_spec_json)
+
+        @function_tool
+        def set_room_polygon(vertices_json: str) -> RoomSpecsResult:
+            """Replace the current polygon room boundary while preserving room identity.
+
+            Doors and windows are cleared because edge identities may change.
+
+            Args:
+                vertices_json: JSON array of ordered ``[x, y]`` vertices in meters.
+
+            Returns:
+                RoomSpecsResult with the updated stable wall labels.
+            """
+            return self._set_room_polygon_impl(vertices_json)
 
         @function_tool
         def resize_room(room_id: str, width: float, depth: float) -> Result:
@@ -472,7 +519,7 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
             """
             return self._render_ascii_impl()
 
-        return {
+        tools = {
             "generate_room_specs": generate_room_specs,
             "resize_room": resize_room,
             "add_adjacency": add_adjacency,
@@ -491,6 +538,19 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
             "validate": validate,
             "render_ascii": render_ascii,
         }
+        if self.mode == "polygon":
+            tools.pop("generate_room_specs")
+            for tool_name in (
+                "resize_room",
+                "add_adjacency",
+                "remove_adjacency",
+                "add_open_connection",
+                "remove_open_connection",
+            ):
+                tools.pop(tool_name)
+            tools["generate_polygon_room"] = generate_polygon_room
+            tools["set_room_polygon"] = set_room_polygon
+        return tools
 
     def _generate_room_specs_impl(self, room_specs_json: str) -> RoomSpecsResult:
         """Create rooms with the specified dimensions and adjacencies.
@@ -512,6 +572,12 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
         Returns:
             RoomSpecsResult with placed rooms and wall segment labels.
         """
+        if self.mode == "polygon":
+            return RoomSpecsResult(
+                success=False,
+                message="Polygon mode requires generate_polygon_room.",
+            )
+
         # Format JSON for readable logging.
         try:
             parsed_for_log = json.loads(room_specs_json)
@@ -629,6 +695,7 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
         # Generate ASCII floor plan.
         ascii_result = generate_ascii_floor_plan(placed_rooms)
         self.layout.boundary_labels = ascii_result.boundary_labels
+        self.layout.boundary_wall_ids = {}
 
         # Log ASCII for visibility during runs.
         console_logger.info(
@@ -651,6 +718,119 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
             wall_segment_labels=labels_desc,
         )
 
+    def _generate_polygon_room_impl(self, polygon_spec_json: str) -> RoomSpecsResult:
+        """Create the complete single-room polygon layout."""
+        if self.mode != "polygon":
+            return RoomSpecsResult(
+                success=False,
+                message="generate_polygon_room is only available in polygon mode.",
+            )
+        try:
+            data = json.loads(polygon_spec_json)
+        except json.JSONDecodeError as exc:
+            return RoomSpecsResult(success=False, message=f"Invalid JSON: {exc}")
+        if not isinstance(data, dict):
+            return RoomSpecsResult(
+                success=False, message="polygon_spec_json must be a JSON object."
+            )
+        room_type = data.get("type", "room")
+        if not isinstance(room_type, str) or not room_type.strip():
+            return RoomSpecsResult(
+                success=False, message="type must be a non-empty string."
+            )
+        return self._set_polygon_layout(
+            room_id=room_type.strip(),
+            room_type=room_type.strip(),
+            vertices=data.get("vertices"),
+        )
+
+    def _set_room_polygon_impl(self, vertices_json: str) -> RoomSpecsResult:
+        """Replace a polygon layout boundary after parsing the public JSON input."""
+        if self.mode != "polygon":
+            return RoomSpecsResult(
+                success=False,
+                message="set_room_polygon is only available in polygon mode.",
+            )
+        if len(self.layout.room_specs) != 1:
+            return RoomSpecsResult(
+                success=False,
+                message="Call generate_polygon_room before set_room_polygon.",
+            )
+        try:
+            vertices = json.loads(vertices_json)
+        except json.JSONDecodeError as exc:
+            return RoomSpecsResult(success=False, message=f"Invalid JSON: {exc}")
+        current = self.layout.room_specs[0]
+        return self._set_polygon_layout(
+            room_id=current.room_id,
+            room_type=current.room_type,
+            vertices=vertices,
+        )
+
+    def _set_polygon_layout(
+        self, room_id: str, room_type: str, vertices
+    ) -> RoomSpecsResult:
+        """Validate vertices and atomically replace polygon-derived layout state."""
+        try:
+            canonical = canonicalize_polygon(vertices, self.polygon_config)
+        except PolygonValidationError as exc:
+            return RoomSpecsResult(success=False, message=str(exc))
+
+        min_x, min_y, max_x, max_y = polygon_aabb(canonical)
+        width, depth = max_x - min_x, max_y - min_y
+        walls = [
+            Wall(
+                wall_id=f"{room_id}_edge_{edge.index:03d}",
+                room_id=room_id,
+                direction=None,
+                start_point=edge.start,
+                end_point=edge.end,
+                length=edge.length,
+                is_exterior=True,
+                inward_normal=edge.inward_normal,
+            )
+            for edge in polygon_edges(canonical)
+        ]
+        spec = RoomSpec(
+            room_id=room_id,
+            room_type=room_type,
+            prompt=self.layout.house_prompt,
+            position=(0.0, 0.0),
+            width=depth,
+            length=width,
+            footprint_vertices=canonical,
+        )
+        placed = PlacedRoom(
+            room_id=room_id,
+            position=(0.0, 0.0),
+            width=width,
+            depth=depth,
+            walls=walls,
+            footprint_vertices=canonical,
+        )
+
+        self.layout.room_specs = [spec]
+        self.layout.placed_rooms = [placed]
+        self.layout.placement_valid = True
+        self.layout.connectivity_valid = False
+        self.layout.doors.clear()
+        self.layout.windows.clear()
+        self.layout.invalidate_all_room_geometries()
+
+        ascii_result = generate_ascii_floor_plan([placed])
+        self.layout.boundary_labels = ascii_result.boundary_labels
+        self.layout.boundary_wall_ids = ascii_result.boundary_wall_ids or {}
+        labels = {
+            label: f"Exterior: {room_id} edge {index:03d}"
+            for index, label in enumerate(self.layout.boundary_labels)
+        }
+        return RoomSpecsResult(
+            success=True,
+            message=f"Created polygon room '{room_id}' with {len(walls)} walls.",
+            ascii_floor_plan=ascii_result.ascii_art,
+            wall_segment_labels=labels,
+        )
+
     def _resize_room_impl(self, room_id: str, width: float, depth: float) -> Result:
         """Change a room's dimensions with layout stability.
 
@@ -670,6 +850,8 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
         Returns:
             Result indicating success or failure.
         """
+        if self.mode == "polygon":
+            return self._fail("Polygon mode requires set_room_polygon.")
         console_logger.info(
             f"Tool called: resize_room(room_id={room_id}, width={width}, depth={depth})"
         )
@@ -974,6 +1156,21 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
         Raises:
             ValueError: If wall cannot be found (fail-fast per CLAUDE.md).
         """
+        stable_wall_id = self.layout.boundary_wall_ids.get(wall_label)
+        if stable_wall_id is not None:
+            placed_room = self.layout.get_placed_room(room_id)
+            if placed_room is None:
+                raise ValueError(f"Room '{room_id}' not found in placed_rooms.")
+            wall = next(
+                (wall for wall in placed_room.walls if wall.wall_id == stable_wall_id),
+                None,
+            )
+            if wall is None:
+                raise ValueError(
+                    f"Wall '{stable_wall_id}' for label '{wall_label}' no longer exists."
+                )
+            return wall
+
         # Look up what this boundary label refers to.
         boundary_info = self.layout.boundary_labels.get(wall_label)
         if not boundary_info:
@@ -1012,7 +1209,11 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
         for wall in placed_room.walls:
             if target_room is None:
                 # Exterior wall - match by direction.
-                if wall.is_exterior and wall.direction.value == direction:
+                if (
+                    wall.is_exterior
+                    and wall.direction is not None
+                    and wall.direction.value == direction
+                ):
                     return wall
             else:
                 # Interior wall - check if this wall faces the target room.
@@ -1056,6 +1257,9 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
             Room ID of nearby room if found, None otherwise.
         """
         wall = self._get_wall_by_boundary(wall_label=wall_label, room_id=room_id)
+        if wall.direction is None:
+            # Polygon mode is a single room, so no other room can block this wall.
+            return None
         placed_room = next(
             (r for r in self.layout.placed_rooms if r.room_id == room_id), None
         )
@@ -1282,7 +1486,6 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
         else:
             connectivity_status = "error: no rooms to validate"
 
-        # Log validation result.
         reservation_validation = validate_floor_plan_reservations(
             self.layout, self.reservation_manifest
         )
@@ -1296,6 +1499,11 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
                 "Validation passed: layout=ok, connectivity=ok, "
                 "future_capacity=ok, opening_budget=ok"
             )
+            if reservation_validation.advisories:
+                console_logger.warning(
+                    "Reservation advisories accepted under explicit geometry: %s",
+                    json.dumps(reservation_validation.advisories, sort_keys=True),
+                )
         else:
             console_logger.info(
                 f"Validation failed: layout={layout_status}, "
@@ -1310,6 +1518,7 @@ class FloorPlanTools(DoorWindowMixin, OpenPlanMixin):
             future_capacity=reservation_validation.future_capacity,
             opening_budget=reservation_validation.opening_budget,
             reservation_issues=reservation_validation.issues,
+            reservation_advisories=reservation_validation.advisories,
         )
 
     def _render_ascii_impl(self) -> str:

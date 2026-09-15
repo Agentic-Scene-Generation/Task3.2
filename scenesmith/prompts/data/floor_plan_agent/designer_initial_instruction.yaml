@@ -1,7 +1,7 @@
 name: "floor_plan_designer_initial_instruction"
 version: "1.0"
 description: "Initial instruction for floor plan designer"
-template_variables: []
+template_variables: ["mode"]
 prompt: |
   Create the initial floor plan design based on the house description.
 
@@ -13,7 +13,13 @@ prompt: |
   5. Set materials for each room and exterior
   6. Validate the final design
 
-  Start with generate_room_specs() to create the room layout, then proceed
+  {% if mode == "polygon" %}
+  Start with generate_polygon_room() to create one simple polygon boundary. Use
+  W00/W01/... labels from render_ascii() when adding doors and windows.
+  {% else %}
+  Start with generate_room_specs() to create the room layout.
+  {% endif %}
+  Then proceed
   through each phase. Use render_ascii() to visualize the layout at any point.
 
   When complete, summarize what you created.

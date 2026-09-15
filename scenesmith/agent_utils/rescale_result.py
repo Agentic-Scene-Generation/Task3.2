@@ -18,6 +18,7 @@ class RescaleErrorType(str, Enum):
     OBJECT_NOT_FOUND = "object_not_found"
     IMMUTABLE_OBJECT = "immutable_object"
     NO_SDF = "no_sdf"
+    RESCALING_DISABLED = "rescaling_disabled"
     RESCALE_FAILED = "rescale_failed"
 
 

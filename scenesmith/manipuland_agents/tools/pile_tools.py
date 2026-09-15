@@ -48,6 +48,9 @@ from scenesmith.manipuland_agents.tools.response_dataclasses import (
     PileCreationResult,
 )
 from scenesmith.utils.sdf_utils import extract_base_link_name_from_sdf
+from scenesmith.floor_plan_agents.tools.polygon_geometry import (
+    exact_surface_covers_object,
+)
 
 console_logger = logging.getLogger(__name__)
 
@@ -738,6 +741,28 @@ def create_pile_tool_impl(
             removed_assets=[a.name for a in assets],
             error_type=ManipulandErrorType.INVALID_OPERATION,
         ).to_json()
+
+    # Rectangular simulation ground is only a coarse constraint for concave floors.
+    # Reject settled members outside the exact support polygon.
+    exact_inside_indices = []
+    exact_outside_indices = list(outside_indices)
+    for index in inside_indices:
+        asset = assets[index]
+        candidate = SceneObject(
+            object_id=UniqueID(f"pile_boundary_candidate_{index}"),
+            object_type=ObjectType.MANIPULAND,
+            name=asset.name,
+            description=asset.description,
+            transform=final_transforms[index],
+            bbox_min=asset.bbox_min,
+            bbox_max=asset.bbox_max,
+        )
+        if exact_surface_covers_object(target_surface, candidate):
+            exact_inside_indices.append(index)
+        else:
+            exact_outside_indices.append(index)
+    inside_indices = exact_inside_indices
+    outside_indices = exact_outside_indices
 
     # Check if we have at least 2 objects on surface.
     pile_count = len(inside_indices)

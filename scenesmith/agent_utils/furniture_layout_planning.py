@@ -1,9 +1,9 @@
-"""Deterministic bedroom layout planning and plausibility checks.
+"""Deterministic furniture layout planning and plausibility checks.
 
-This module keeps the first pass deliberately small and dependency-light. It
-does not try to solve arbitrary interior design; it catches the bedroom failure
-mode seen in baseline runs: no stable bed anchor, oversized bed retrieval, and
-critic scores that miss obvious human-layout issues.
+The generic opening-aware reservation pass keeps furniture out of door and open
+connection clearances and exposes continuous wall segments left by doors and
+windows.  The bedroom-specific pass catches missing bed anchors, oversized bed
+retrieval, and critic scores that miss obvious human-layout issues.
 """
 
 from __future__ import annotations
@@ -57,6 +57,126 @@ class BedroomAnchorPlan:
             f"- Avoid bed-head walls: {avoid}.\n"
             f"- Wall opening summary: {wall_status}."
         )
+
+
+@dataclass(frozen=True)
+class OpeningReservationZone:
+    """World-space opening clearance projected into a furniture reservation."""
+
+    zone_id: str
+    opening_type: str
+    wall: str
+    bounds_min: tuple[float, float, float]
+    bounds_max: tuple[float, float, float]
+    severity: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "zone_id": self.zone_id,
+            "opening_type": self.opening_type,
+            "wall": self.wall,
+            "bounds_xyz": [*self.bounds_min, *self.bounds_max],
+            "severity": self.severity,
+        }
+
+
+@dataclass(frozen=True)
+class OpeningFreeWallSegment:
+    """Continuous wall interval not occupied by a door or window span."""
+
+    wall: str
+    axis: str
+    start: float
+    end: float
+
+    @property
+    def length_m(self) -> float:
+        return max(0.0, self.end - self.start)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "wall": self.wall,
+            "axis": self.axis,
+            "start": self.start,
+            "end": self.end,
+            "length_m": self.length_m,
+        }
+
+
+@dataclass(frozen=True)
+class OpeningAwareReservationPlan:
+    """Resolved floor-plan reservations consumed by furniture placement."""
+
+    zones: list[OpeningReservationZone] = field(default_factory=list)
+    usable_wall_segments: list[OpeningFreeWallSegment] = field(default_factory=list)
+    fully_opening_free_walls: list[str] = field(default_factory=list)
+    opening_margin_m: float = 0.15
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": "scenesmith.opening_aware_reservations.v1",
+            "opening_margin_m": self.opening_margin_m,
+            "zones": [zone.to_dict() for zone in self.zones],
+            "usable_wall_segments": [
+                segment.to_dict() for segment in self.usable_wall_segments
+            ],
+            "fully_opening_free_walls": list(self.fully_opening_free_walls),
+        }
+
+    def to_guidance_text(self) -> str:
+        if not self.zones:
+            return ""
+        hard_zones = [zone for zone in self.zones if zone.severity == "hard"]
+        window_zones = [zone for zone in self.zones if zone.opening_type == "window"]
+        lines = [
+            "Opening-aware floor reservations (deterministic geometry; plan around "
+            "these before placing furniture):"
+        ]
+        if hard_zones:
+            lines.append(
+                "- Hard door/open-connection clearances: "
+                + "; ".join(
+                    f"{zone.zone_id} on {zone.wall}_wall bounds_xyz="
+                    f"{[round(value, 3) for value in (*zone.bounds_min, *zone.bounds_max)]}"
+                    for zone in hard_zones
+                )
+                + ". No furniture footprint may overlap these volumes."
+            )
+        if window_zones:
+            lines.append(
+                "- Window access/visibility clearances: "
+                + "; ".join(
+                    f"{zone.zone_id} on {zone.wall}_wall bounds_xyz="
+                    f"{[round(value, 3) for value in (*zone.bounds_min, *zone.bounds_max)]}"
+                    for zone in window_zones
+                )
+                + ". Do not put tall or wall-backed focal furniture through the "
+                "window volume; furniture fully below the sill may remain valid."
+            )
+        if self.fully_opening_free_walls:
+            lines.append(
+                "- Fully opening-free anchor walls: "
+                + ", ".join(f"{wall}_wall" for wall in self.fully_opening_free_walls)
+                + ". Prefer these for primary wall-backed or focal groups."
+            )
+        if self.usable_wall_segments:
+            lines.append(
+                f"- Continuous usable wall segments after a {self.opening_margin_m:.2f}m "
+                "lateral opening margin: "
+                + "; ".join(
+                    f"{segment.wall}_wall {segment.axis}="
+                    f"[{segment.start:.2f},{segment.end:.2f}] "
+                    f"({segment.length_m:.2f}m)"
+                    for segment in self.usable_wall_segments
+                )
+                + "."
+            )
+        lines.append(
+            "- Reserve each connected wall-backed furniture group on one compatible "
+            "usable segment. Do not move it onto a door/window wall when a solid "
+            "opening-free wall satisfies the same task relation."
+        )
+        return "\n".join(lines)
 
 
 @dataclass(frozen=True)
@@ -153,6 +273,234 @@ def _opening_type(opening: Any) -> str:
         raw = getattr(opening, "opening_type", None)
     raw = getattr(raw, "value", raw)
     return str(raw).lower() if raw else "opening"
+
+
+def _opening_value(opening: Any, name: str, default: Any = None) -> Any:
+    if isinstance(opening, dict):
+        return opening.get(name, default)
+    return getattr(opening, name, default)
+
+
+def _opening_id(opening: Any, index: int) -> str:
+    return str(_opening_value(opening, "opening_id", "") or f"opening_{index}")
+
+
+def _opening_clearance_bounds(
+    opening: Any,
+) -> tuple[tuple[float, float, float], tuple[float, float, float]] | None:
+    opening_type = _opening_type(opening)
+    if opening_type == "door" and not isinstance(opening, dict):
+        try:
+            from scenesmith.agent_utils.clearance_zones import (
+                door_swing_clearance_bounds,
+            )
+
+            bounds = door_swing_clearance_bounds(opening)
+            if bounds is not None:
+                return tuple(float(v) for v in bounds[0]), tuple(
+                    float(v) for v in bounds[1]
+                )
+        except (AttributeError, TypeError, ValueError):
+            pass
+    if opening_type == "open":
+        center = _opening_value(opening, "center_world")
+        wall = _opening_wall(opening)
+        try:
+            center_x = float(center[0])
+            center_y = float(center[1])
+            half_width = max(0.4, float(_opening_value(opening, "width", 0.0)) / 2.0)
+        except (TypeError, ValueError, IndexError):
+            return None
+        depth = 1.0
+        if wall == "north":
+            return (
+                (center_x - half_width, center_y - depth, 0.0),
+                (center_x + half_width, center_y, 2.5),
+            )
+        if wall == "south":
+            return (
+                (center_x - half_width, center_y, 0.0),
+                (center_x + half_width, center_y + depth, 2.5),
+            )
+        if wall == "east":
+            return (
+                (center_x - depth, center_y - half_width, 0.0),
+                (center_x, center_y + half_width, 2.5),
+            )
+        if wall == "west":
+            return (
+                (center_x, center_y - half_width, 0.0),
+                (center_x + depth, center_y + half_width, 2.5),
+            )
+        return None
+    lower = _opening_value(opening, "clearance_bbox_min")
+    upper = _opening_value(opening, "clearance_bbox_max")
+    try:
+        lower_values = tuple(float(v) for v in lower)
+        upper_values = tuple(float(v) for v in upper)
+    except (TypeError, ValueError):
+        return None
+    if len(lower_values) < 3 or len(upper_values) < 3:
+        return None
+    return lower_values[:3], upper_values[:3]
+
+
+def _opening_tangent_center(opening: Any, wall: str) -> float | None:
+    center = _opening_value(opening, "center_world")
+    try:
+        return float(center[0] if wall in {"north", "south"} else center[1])
+    except (TypeError, ValueError, IndexError):
+        bounds = _opening_clearance_bounds(opening)
+        if bounds is None:
+            return None
+        axis = 0 if wall in {"north", "south"} else 1
+        return (bounds[0][axis] + bounds[1][axis]) / 2.0
+
+
+def _subtract_intervals(
+    start: float,
+    end: float,
+    blocked: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    merged: list[list[float]] = []
+    for lower, upper in sorted(blocked):
+        lower = max(start, lower)
+        upper = min(end, upper)
+        if upper <= lower:
+            continue
+        if not merged or lower > merged[-1][1]:
+            merged.append([lower, upper])
+        else:
+            merged[-1][1] = max(merged[-1][1], upper)
+    free: list[tuple[float, float]] = []
+    cursor = start
+    for lower, upper in merged:
+        if lower > cursor:
+            free.append((cursor, lower))
+        cursor = max(cursor, upper)
+    if cursor < end:
+        free.append((cursor, end))
+    return free
+
+
+def build_opening_aware_reservation_plan(
+    scene: Any,
+    *,
+    opening_margin_m: float = 0.15,
+) -> OpeningAwareReservationPlan:
+    """Resolve door/window geometry into usable furniture reservation regions."""
+    size = _room_size(scene)
+    room_geometry = getattr(scene, "room_geometry", None)
+    raw_openings = getattr(room_geometry, "openings", None) if room_geometry else None
+    try:
+        openings = list(raw_openings or [])
+    except TypeError:
+        openings = []
+    if size is None:
+        return OpeningAwareReservationPlan(opening_margin_m=opening_margin_m)
+
+    zones: list[OpeningReservationZone] = []
+    openings_by_wall: dict[str, list[Any]] = {wall: [] for wall in WALLS}
+    for index, opening in enumerate(openings):
+        wall = _opening_wall(opening)
+        if wall not in openings_by_wall:
+            continue
+        openings_by_wall[wall].append(opening)
+        bounds = _opening_clearance_bounds(opening)
+        if bounds is None:
+            continue
+        opening_type = _opening_type(opening)
+        zones.append(
+            OpeningReservationZone(
+                zone_id=_opening_id(opening, index),
+                opening_type=opening_type,
+                wall=wall,
+                bounds_min=bounds[0],
+                bounds_max=bounds[1],
+                severity="hard" if opening_type in {"door", "open"} else "advisory",
+            )
+        )
+
+    room_length, room_width = size
+    segments: list[OpeningFreeWallSegment] = []
+    free_walls: list[str] = []
+    for wall in WALLS:
+        axis = "x" if wall in {"north", "south"} else "y"
+        half_length = _wall_length(room_length, room_width, wall) / 2.0
+        wall_openings = openings_by_wall[wall]
+        if not wall_openings:
+            free_walls.append(wall)
+        blocked: list[tuple[float, float]] = []
+        for opening in wall_openings:
+            center = _opening_tangent_center(opening, wall)
+            try:
+                width = max(0.0, float(_opening_value(opening, "width", 0.0)))
+            except (TypeError, ValueError):
+                width = 0.0
+            if center is None or width <= 0.0:
+                continue
+            blocked.append(
+                (
+                    center - width / 2.0 - opening_margin_m,
+                    center + width / 2.0 + opening_margin_m,
+                )
+            )
+        segments.extend(
+            OpeningFreeWallSegment(wall=wall, axis=axis, start=start, end=end)
+            for start, end in _subtract_intervals(-half_length, half_length, blocked)
+            if end - start > 1e-6
+        )
+    return OpeningAwareReservationPlan(
+        zones=zones,
+        usable_wall_segments=segments,
+        fully_opening_free_walls=free_walls,
+        opening_margin_m=opening_margin_m,
+    )
+
+
+def format_opening_aware_reservation_guidance(scene: Any) -> str:
+    """Return concrete opening-aware reservation guidance for initial design."""
+    return build_opening_aware_reservation_plan(scene).to_guidance_text()
+
+
+def opening_clearance_conflict_for_transform(
+    *,
+    scene: Any,
+    scene_obj: Any,
+    transform: Any,
+) -> OpeningReservationZone | None:
+    """Return a hard opening zone intersected by a candidate furniture pose."""
+    metadata = getattr(scene_obj, "metadata", {}) or {}
+    if metadata.get("asset_source") == "thin_covering":
+        return None
+    bbox_min = getattr(scene_obj, "bbox_min", None)
+    bbox_max = getattr(scene_obj, "bbox_max", None)
+    if bbox_min is None or bbox_max is None:
+        return None
+    try:
+        corners = np.array(
+            [
+                transform @ np.array([x, y, z], dtype=float)
+                for x in (float(bbox_min[0]), float(bbox_max[0]))
+                for y in (float(bbox_min[1]), float(bbox_max[1]))
+                for z in (float(bbox_min[2]), float(bbox_max[2]))
+            ]
+        )
+    except (TypeError, ValueError, IndexError):
+        return None
+    world_min = np.min(corners, axis=0)
+    world_max = np.max(corners, axis=0)
+    for zone in build_opening_aware_reservation_plan(scene).zones:
+        if zone.severity != "hard":
+            continue
+        overlap = [
+            min(float(world_max[axis]), zone.bounds_max[axis])
+            - max(float(world_min[axis]), zone.bounds_min[axis])
+            for axis in range(3)
+        ]
+        if all(value > 1e-5 for value in overlap):
+            return zone
+    return None
 
 
 def _room_size(scene: Any) -> tuple[float, float] | None:

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from scenesmith.scenebenchmark_critic.config import CriticConfig, critic_config_from_any
+from scenesmith.scenebenchmark_critic.result_identity import deduplicate_results
 
 LABEL_TO_SCORE = {"pass": 1.0, "degraded": 0.5, "fail": 0.0}
 
@@ -28,6 +29,8 @@ class _RuleRunConfig:
     accessibility_agent_profiles: list[dict[str, Any]] | None = None
     fd_relation_proposer_mode: str = "template"
     max_fd_relation_proposals: int = 8
+    window_clearance_advisory_occlusion_ratio: float = 0.02
+    window_clearance_core_occlusion_ratio: float = 0.15
 
 
 def aggregate_results(
@@ -46,6 +49,7 @@ def aggregate_results(
             if isinstance(results_or_case_pack, dict)
             else case_pack
         )
+    results = deduplicate_results(results)
     checks_by_id = _checks_by_id(case_pack)
     object_acc: dict[str, dict[str, Any]] = {}
     by_metric: dict[str, dict[str, Any]] = {}
@@ -230,6 +234,12 @@ def _to_rule_config(config: CriticConfig) -> _RuleConfig:
                 _get("fd_relation_proposer_mode", "template")
             ),
             max_fd_relation_proposals=int(_get("max_fd_relation_proposals", 8)),
+            window_clearance_advisory_occlusion_ratio=float(
+                _get("window_clearance_advisory_occlusion_ratio", 0.02)
+            ),
+            window_clearance_core_occlusion_ratio=float(
+                _get("window_clearance_core_occlusion_ratio", 0.15)
+            ),
         ),
     )
 

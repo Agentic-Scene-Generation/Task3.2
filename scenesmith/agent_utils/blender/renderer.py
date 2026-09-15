@@ -673,6 +673,126 @@ class BlenderRenderer(
         )
         return image_paths
 
+    def render_named_views_for_embedding(
+        self,
+        mesh_path: Path,
+        output_dir: Path,
+        view_names: list[str],
+        width: int = 224,
+        height: int = 224,
+        light_energy: float | None = None,
+    ) -> list[Path]:
+        """Render a clean named-view set for multimodal embedding.
+
+        The mesh must already be aligned so Blender +Y is the semantic front.
+        Supported views are top, bottom, front, back, left, right, and iso.
+        """
+        start_time = time.time()
+        console_logger.info(
+            f"Rendering {len(view_names)} named views for embedding "
+            f"({width}x{height}px): {view_names}"
+        )
+
+        direction_by_name = {
+            "top": Vector((0, 0, 1)),
+            "bottom": Vector((0, 0, -1)),
+            "front": Vector((0, 1, 0)),
+            "back": Vector((0, -1, 0)),
+            "left": Vector((-1, 0, 0)),
+            "right": Vector((1, 0, 0)),
+            "iso": Vector((1, 1, 1)),
+        }
+        unknown_views = [name for name in view_names if name not in direction_by_name]
+        if unknown_views:
+            raise ValueError(f"Unsupported named views: {unknown_views}")
+
+        with suppress_stdout_stderr():
+            bpy.ops.wm.read_factory_settings(use_empty=True)
+
+            scene = bpy.context.scene
+            scene.render.engine = "CYCLES"
+            scene.cycles.samples = CYCLES_CLIP_SAMPLES
+            scene.render.resolution_x = width
+            scene.render.resolution_y = height
+            scene.render.film_transparent = True
+            scene.render.image_settings.color_mode = "RGBA"
+
+            world = bpy.data.worlds.new("NamedViewWorld")
+            scene.world = world
+            world.use_nodes = True
+            bg_node = world.node_tree.nodes["Background"]
+            bg_node.inputs["Color"].default_value = (0.0, 0.0, 0.0, 1.0)
+
+            light = bpy.data.lights.new(name="Light", type="POINT")
+            light.energy = (
+                light_energy if light_energy is not None else VLM_ANALYSIS_LIGHT_ENERGY
+            )
+            light_obj = bpy.data.objects.new("Light", light)
+            scene.collection.objects.link(light_obj)
+
+            mesh_path_str = str(mesh_path)
+            if mesh_path_str.lower().endswith(".obj"):
+                bpy.ops.wm.obj_import(filepath=mesh_path_str)
+            else:
+                bpy.ops.import_scene.gltf(filepath=mesh_path_str)
+
+            bpy.ops.object.select_all(action="SELECT")
+            bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+            disable_backface_culling(list(bpy.context.selected_objects))
+
+            mesh_objs = [
+                obj for obj in bpy.context.selected_objects if obj.type == "MESH"
+            ]
+            bbox_min = Vector((float("inf"),) * 3)
+            bbox_max = Vector((float("-inf"),) * 3)
+            for obj in mesh_objs:
+                for corner in obj.bound_box:
+                    world_corner = obj.matrix_world @ Vector(corner)
+                    bbox_min = Vector(map(min, bbox_min, world_corner))
+                    bbox_max = Vector(map(max, bbox_max, world_corner))
+
+            bbox_center = (bbox_min + bbox_max) / 2
+            bbox_size = bbox_max - bbox_min
+            max_dim = max(bbox_size)
+
+            camera = bpy.data.cameras.new(name="Camera")
+            camera_obj = bpy.data.objects.new("Camera", camera)
+            scene.collection.objects.link(camera_obj)
+            scene.camera = camera_obj
+            camera.type = "PERSP"
+            camera.lens = DEFAULT_CAMERA_LENS_MM
+            camera.sensor_width = DEFAULT_CAMERA_SENSOR_WIDTH_MM
+            camera.clip_start = DEFAULT_CAMERA_CLIP_START
+            camera.clip_end = DEFAULT_CAMERA_CLIP_END
+
+            fov = 2 * math.atan((camera.sensor_width / 2) / camera.lens)
+            base_distance = (max_dim / 2) / math.tan(fov / 2)
+            camera_distance = base_distance * CAMERA_DISTANCE_MARGIN_MULTIPLIER
+
+            image_paths = []
+            output_dir.mkdir(parents=True, exist_ok=True)
+            for view_name in view_names:
+                direction = direction_by_name[view_name].normalized()
+                camera_obj.location = bbox_center + direction * camera_distance
+                look_at_target(camera_obj, bbox_center)
+                light_obj.location = camera_obj.location + direction * (
+                    camera_distance * LIGHT_DISTANCE_RATIO
+                )
+
+                output_path = output_dir / f"{view_name}.png"
+                scene.render.filepath = str(output_path)
+                bpy.ops.render.render(write_still=True)
+                image_paths.append(output_path)
+
+        for img_path in image_paths:
+            _composite_onto_grey(img_path)
+
+        console_logger.info(
+            f"Rendered {len(image_paths)} named views to {output_dir} in "
+            f"{time.time()-start_time:.2f}s"
+        )
+        return image_paths
+
     def render_floor_plan(
         self,
         mesh_path: Path,
@@ -1351,6 +1471,7 @@ class BlenderRenderer(
         wall_surfaces: list[dict] | None = None,
         wall_surfaces_for_labels: list[dict] | None = None,
         room_bounds: tuple[float, float, float, float] | None = None,
+        room_local_footprint_vertices: list[list[float]] | None = None,
         ceiling_height: float | None = None,
         side_view_elevation_degrees: float | None = None,
         side_view_start_azimuth_degrees: float | None = None,
@@ -1398,6 +1519,8 @@ class BlenderRenderer(
                 Each dict contains wall_id, direction, length, height, transform,
                 and excluded_regions.
             room_bounds: Room XY bounds (min_x, min_y, max_x, max_y) for ceiling mode.
+            room_local_footprint_vertices: Ordered room-local XY floor boundary used
+                to filter coordinate markers, including concave cutouts.
             ceiling_height: Ceiling height in meters for ceiling mode.
 
         Returns:
@@ -1418,6 +1541,7 @@ class BlenderRenderer(
         self._wall_normals = wall_normals or {}
         self._show_support_surface = show_support_surface
         self._wall_surfaces_for_labels = wall_surfaces_for_labels
+        self._room_local_footprint_vertices = room_local_footprint_vertices
 
         # Process support surfaces if provided.
         if support_surfaces is not None and len(support_surfaces) > 0:
@@ -1891,6 +2015,7 @@ class BlenderRenderer(
                 wall_length=wall_length,
                 wall_height=wall_height,
                 wall_direction=wall_direction,
+                wall_transform=transform,
             )
 
             return  # Skip standard camera positioning for wall orthographic views.
@@ -2529,6 +2654,7 @@ class BlenderRenderer(
         self._show_support_surface = False
         self._scene_objects = None
         self._current_convex_hull = None
+        self._room_local_footprint_vertices = None
         self._current_surface_id = None
         self._overlay_mesh_objects = []
         self._surface_mesh_objects = []
@@ -2622,7 +2748,9 @@ class BlenderRenderer(
                     ]
                 )
             else:
-                continue
+                # Generic polygon wall: local +Y is outward, so the camera is
+                # placed on local -Y inside the room.
+                camera_pos = wall_center_world - rotation_matrix[:, 1] * camera_offset
 
             # Log positions for debugging.
             console_logger.info(
@@ -2729,6 +2857,27 @@ class BlenderRenderer(
         wall_origin = np.array(transform[:3])
         wall_dir = wall_direction.lower()
 
+        qw, qx, qy, qz = transform[3], transform[4], transform[5], transform[6]
+        rotation_matrix = np.array(
+            [
+                [
+                    1 - 2 * (qy**2 + qz**2),
+                    2 * (qx * qy - qw * qz),
+                    2 * (qx * qz + qw * qy),
+                ],
+                [
+                    2 * (qx * qy + qw * qz),
+                    1 - 2 * (qx**2 + qz**2),
+                    2 * (qy * qz - qw * qx),
+                ],
+                [
+                    2 * (qx * qz - qw * qy),
+                    2 * (qy * qz + qw * qx),
+                    1 - 2 * (qx**2 + qy**2),
+                ],
+            ]
+        )
+
         # Camera offset from wall center (inside room, looking at wall).
         # Use room_depth if available to avoid placing camera outside small rooms.
         room_depth = wall_surface.get("room_depth")
@@ -2777,14 +2926,9 @@ class BlenderRenderer(
             )
             look_dir = Vector((-1, 0, 0))
         else:
-            camera_pos = np.array(
-                [
-                    wall_center_world[0],
-                    wall_center_world[1] - camera_offset,
-                    wall_center_world[2],
-                ]
-            )
-            look_dir = Vector((0, 1, 0))
+            outward = rotation_matrix[:, 1]
+            camera_pos = wall_center_world - outward * camera_offset
+            look_dir = Vector(outward.tolist())
 
         # Debug logging.
         console_logger.info(
@@ -2815,8 +2959,7 @@ class BlenderRenderer(
             # Looking toward -X.
             camera_obj.rotation_euler = (math.pi / 2, 0, math.pi / 2)
         else:
-            # Fallback to north.
-            camera_obj.rotation_euler = (math.pi / 2, 0, math.pi)
+            look_at_target(camera_obj, Vector(wall_center_world.tolist()))
 
     def save_blend_file(self, params: RenderParams, output_path: Path) -> Path:
         """Save the scene as a .blend file.

@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from scenesmith.agent_utils.base_stateful_agent import BaseStatefulAgent
 from scenesmith.agent_utils.furniture_safety import HardStateEvaluation
@@ -92,6 +92,7 @@ class TestFinalizeSceneReset(unittest.TestCase):
         mock_cfg.reset_total_sum_threshold = 6
         mock_cfg.max_critique_rounds = 1
         mock_cfg.planner_context_limits = {}
+        mock_cfg.auto_score_after_design_attempts = False
 
         # Set up action_log_path as a real path for the action logger decorator.
         mock_scene.action_log_path = self.temp_dir / "action_log.json"
@@ -137,6 +138,133 @@ class TestFinalizeSceneReset(unittest.TestCase):
         tool_names = {getattr(tool, "name", "") for tool in tools}
 
         self.assertIn("finish_stage", tool_names)
+
+    def test_finish_stage_consumes_pending_hard_repair_after_score_budget(self):
+        agent = self._create_testable_agent(MagicMock(), MagicMock())
+        agent.stage_working_memory = MagicMock()
+        agent._planner_orchestration_calls = 0
+        agent._request_design_change_impl = AsyncMock(return_value="repair applied")
+        tools = {tool.name: tool for tool in agent._create_planner_tools()}
+        agent._planner_budget_exhausted = True
+        agent._pending_hard_repair_hint = "separate the remaining collision"
+
+        result = asyncio.run(
+            tools["finish_stage"].on_invoke_tool(
+                MagicMock(), '{"summary": "score budget complete"}'
+            )
+        )
+
+        self.assertIn("HARD_REPAIR_CONSUMED", result)
+        self.assertTrue(agent._planner_terminal_stop)
+        self.assertEqual(agent._hard_repair_design_change_calls, 1)
+        instruction = agent._request_design_change_impl.await_args.args[0]
+        self.assertIn("separate the remaining collision", instruction)
+        final = agent._planner_tools_to_final_output(
+            MagicMock(), [SimpleNamespace(output=result)]
+        )
+        self.assertTrue(final.is_final_output)
+        self.assertEqual(final.final_output, result)
+
+    def test_blocked_score_cycle_is_not_a_terminal_runner_result(self):
+        agent = self._create_testable_agent(MagicMock(), MagicMock())
+        agent._create_planner_tools()
+        agent._planner_budget_exhausted = True
+
+        result = agent._planner_tools_to_final_output(
+            MagicMock(), [SimpleNamespace(output="critique budget exhausted")]
+        )
+
+        self.assertFalse(result.is_final_output)
+
+    def test_initial_designer_timeout_stops_planner_and_records_root_failure(self):
+        mock_scene = MagicMock()
+        mock_rendering_manager = MagicMock()
+        agent = self._create_testable_agent(mock_scene, mock_rendering_manager)
+        agent.stage_working_memory = MagicMock()
+        agent._planner_orchestration_calls = 0
+        agent._request_initial_design_impl = AsyncMock(
+            side_effect=TimeoutError("designer deadline exceeded")
+        )
+
+        tools = {tool.name: tool for tool in agent._create_planner_tools()}
+        result = asyncio.run(
+            tools["request_initial_design"].on_invoke_tool(MagicMock(), "{}")
+        )
+
+        self.assertIn("STOP: Initial designer failed with TimeoutError", result)
+        self.assertTrue(agent._planner_budget_exhausted)
+        self.assertEqual(
+            agent._planner_terminal_failure,
+            {
+                "operation": "request_initial_design",
+                "child_agent": "designer",
+                "error_type": "TimeoutError",
+                "error": "designer deadline exceeded",
+                "recovered": False,
+            },
+        )
+        statuses = [
+            call.kwargs["status"]
+            for call in agent.stage_working_memory.record_planner_orchestration.mock_calls
+        ]
+        self.assertEqual(statuses, ["started", "failed"])
+
+        repeated = asyncio.run(
+            tools["request_initial_design"].on_invoke_tool(MagicMock(), "{}")
+        )
+        self.assertIn("already been marked complete or failed", repeated)
+        agent._request_initial_design_impl.assert_awaited_once_with()
+
+    def test_terminal_delegation_failure_records_deterministic_recovery(self):
+        mock_scene = MagicMock()
+        mock_rendering_manager = MagicMock()
+        agent = self._create_testable_agent(mock_scene, mock_rendering_manager)
+        agent.stage_working_memory = MagicMock()
+        agent._planner_terminal_failure = {
+            "operation": "request_critique",
+            "child_agent": "critic",
+            "error_type": "TimeoutError",
+            "error": "critic deadline exceeded",
+            "recovered": False,
+        }
+
+        agent._mark_planner_terminal_failure_recovered()
+
+        self.assertTrue(agent._planner_terminal_failure["recovered"])
+        event = agent.stage_working_memory.record_planner_orchestration.call_args.kwargs
+        self.assertEqual(event["status"], "recovered")
+        self.assertEqual(event["operation"], "request_critique")
+        self.assertEqual(event["child_agent"], "critic")
+
+    def test_design_change_timeout_stops_planner_and_preserves_instruction(self):
+        mock_scene = MagicMock()
+        mock_rendering_manager = MagicMock()
+        agent = self._create_testable_agent(mock_scene, mock_rendering_manager)
+        agent.stage_working_memory = MagicMock()
+        agent._planner_orchestration_calls = 0
+        agent._request_design_change_impl = AsyncMock(
+            side_effect=TimeoutError("designer change deadline exceeded")
+        )
+
+        tools = {tool.name: tool for tool in agent._create_planner_tools()}
+        result = asyncio.run(
+            tools["request_design_change"].on_invoke_tool(
+                MagicMock(), '{"instruction": "move the sofa away from the door"}'
+            )
+        )
+
+        self.assertIn("STOP: Designer change failed with TimeoutError", result)
+        self.assertTrue(agent._planner_budget_exhausted)
+        self.assertEqual(
+            agent._planner_terminal_failure["operation"], "request_design_change"
+        )
+        dispatch = agent.stage_working_memory.record_planner_orchestration.mock_calls[
+            0
+        ].kwargs
+        self.assertEqual(
+            dispatch["detail"],
+            {"instruction": "move the sofa away from the door"},
+        )
 
     def test_finalize_resets_to_n1_not_n2_when_scores_degrade(self):
         """When final scores are worse than N-1, reset should use N-1 state (not N-2).

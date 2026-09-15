@@ -10,12 +10,83 @@ from pydrake.all import RigidTransform
 
 from scenesmith.agent_utils.clearance_zones import (
     compute_door_clearance_violations,
+    compute_openings_data,
     compute_open_connection_blocked_violations,
     compute_wall_height_violations,
     compute_window_clearance_violations,
+    door_swing_clearance_bounds,
 )
-from scenesmith.agent_utils.house import ClearanceOpeningData, RoomGeometry
+from scenesmith.agent_utils.house import (
+    ClearanceOpeningData,
+    Opening,
+    OpeningType,
+    PlacedRoom,
+    RoomGeometry,
+    Wall,
+)
 from scenesmith.agent_utils.room import ObjectType, RoomScene, SceneObject, UniqueID
+
+
+def test_polygon_opening_clearance_uses_wall_inward_normal() -> None:
+    opening = Opening(
+        opening_id="door_polygon",
+        opening_type=OpeningType.DOOR,
+        position_along_wall=0.2,
+        width=0.9,
+        height=2.1,
+    )
+    wall = Wall(
+        wall_id="bathroom_edge_001",
+        room_id="bathroom",
+        direction=None,
+        start_point=(1.08, 0.0),
+        end_point=(3.05, 0.0),
+        length=1.97,
+        openings=[opening],
+        inward_normal=(0.0, 1.0),
+    )
+    placed_room = PlacedRoom(
+        room_id="bathroom",
+        position=(0.0, 0.0),
+        width=3.05,
+        depth=2.93,
+        walls=[wall],
+        footprint_vertices=[
+            (0.0, 1.84),
+            (1.08, 1.84),
+            (1.08, 0.0),
+            (3.05, 0.0),
+            (3.05, 2.93),
+            (0.0, 2.93),
+        ],
+    )
+
+    result = compute_openings_data(
+        placed_room=placed_room,
+        wall_height=2.5,
+        door_clearance_distance=0.6,
+        window_clearance_distance=0.3,
+    )
+
+    assert len(result) == 1
+    clearance = result[0]
+    assert clearance.wall_id == "bathroom_edge_001"
+    assert clearance.wall_direction is None
+    assert clearance.wall_inward_normal == [0.0, 1.0]
+    assert clearance.clearance_polygon is not None
+    assert np.allclose(
+        clearance.clearance_polygon,
+        [
+            [-0.245, -1.465],
+            [0.655, -1.465],
+            [0.655, -0.865],
+            [-0.245, -0.865],
+        ],
+    )
+    swing_bounds = door_swing_clearance_bounds(clearance)
+    assert swing_bounds is not None
+    assert np.allclose(swing_bounds[0], [-0.245, -1.465, 0.0])
+    assert np.allclose(swing_bounds[1], [0.655, -0.565, 2.1])
 
 
 class TestClearanceZonesWallFiltering(unittest.TestCase):

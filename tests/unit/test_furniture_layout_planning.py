@@ -9,7 +9,9 @@ import numpy as np
 from scenesmith.agent_utils.furniture_layout_planning import (
     apply_bedroom_asset_size_policy,
     build_bedroom_anchor_plan,
+    build_opening_aware_reservation_plan,
     evaluate_bedroom_layout_plausibility,
+    format_opening_aware_reservation_guidance,
     is_bedroom_scene,
 )
 
@@ -100,6 +102,87 @@ def make_bedroom_scene() -> DummyScene:
 
 
 class FurnitureLayoutPlanningTest(unittest.TestCase):
+    def test_opening_reservations_expose_safe_walls_and_split_opening_walls(
+        self,
+    ) -> None:
+        scene = DummyScene(
+            room_geometry=DummyRoomGeometry(
+                length=6.0,
+                width=5.0,
+                openings=[
+                    {
+                        "opening_id": "door_1",
+                        "opening_type": "door",
+                        "wall_direction": "west",
+                        "center_world": [-3.0, 0.75, 1.05],
+                        "width": 0.9,
+                        "clearance_bbox_min": [-3.0, 0.30, 0.0],
+                        "clearance_bbox_max": [-2.1, 1.20, 2.1],
+                    },
+                    {
+                        "opening_id": "window_1",
+                        "opening_type": "window",
+                        "wall_direction": "east",
+                        "center_world": [3.0, 0.0, 1.5],
+                        "width": 1.5,
+                        "clearance_bbox_min": [2.5, -0.75, 0.9],
+                        "clearance_bbox_max": [3.0, 0.75, 2.1],
+                    },
+                ],
+            ),
+            room_type="living_room",
+            text_description="A living room with a media area.",
+        )
+
+        plan = build_opening_aware_reservation_plan(scene)
+
+        self.assertEqual(plan.fully_opening_free_walls, ["north", "south"])
+        self.assertEqual(
+            {zone.zone_id: zone.severity for zone in plan.zones},
+            {"door_1": "hard", "window_1": "advisory"},
+        )
+        west_segments = [
+            segment for segment in plan.usable_wall_segments if segment.wall == "west"
+        ]
+        self.assertEqual(len(west_segments), 2)
+        self.assertTrue(
+            all(not (segment.start <= 0.75 <= segment.end) for segment in west_segments)
+        )
+        guidance = format_opening_aware_reservation_guidance(scene)
+        self.assertIn(
+            "Fully opening-free anchor walls: north_wall, south_wall", guidance
+        )
+        self.assertIn("door_1 on west_wall", guidance)
+        self.assertIn("window_1 on east_wall", guidance)
+
+    def test_open_connection_without_stored_bbox_gets_hard_clearance(self) -> None:
+        scene = DummyScene(
+            room_geometry=DummyRoomGeometry(
+                length=6.0,
+                width=5.0,
+                openings=[
+                    {
+                        "opening_id": "open_1",
+                        "opening_type": "open",
+                        "wall_direction": "south",
+                        "center_world": [0.5, -2.5, 1.25],
+                        "width": 1.4,
+                        "clearance_bbox_min": None,
+                        "clearance_bbox_max": None,
+                    }
+                ],
+            ),
+            room_type="living_room",
+            text_description="An open-plan living room.",
+        )
+
+        plan = build_opening_aware_reservation_plan(scene)
+
+        self.assertEqual(len(plan.zones), 1)
+        self.assertEqual(plan.zones[0].severity, "hard")
+        np.testing.assert_allclose(plan.zones[0].bounds_min, (-0.2, -2.5, 0.0))
+        np.testing.assert_allclose(plan.zones[0].bounds_max, (1.2, -1.5, 2.5))
+
     def test_injected_memory_cannot_turn_living_room_into_bedroom(self) -> None:
         scene = DummyScene(
             room_geometry=DummyRoomGeometry(),

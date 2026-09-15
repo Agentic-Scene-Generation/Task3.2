@@ -12,6 +12,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from shapely.geometry import Polygon
+
 from scenesmith.agent_utils.house import (
     ClearanceOpeningData,
     OpeningType,
@@ -230,6 +232,40 @@ def _compute_clearance_bbox(
     return [min_x, min_y, min_z], [max_x, max_y, max_z]
 
 
+def _compute_oriented_clearance(
+    wall: Wall,
+    position_along_wall: float,
+    width: float,
+    clearance_height: float,
+    clearance_distance: float,
+) -> tuple[list[float], list[float], list[list[float]]]:
+    """Compute AABB compatibility data and exact XY clearance for a polygon wall."""
+    if wall.inward_normal is None:
+        raise ValueError(f"Polygon wall {wall.wall_id} has no inward normal.")
+    if wall.length <= 0.0:
+        raise ValueError(f"Polygon wall {wall.wall_id} has non-positive length.")
+    dx = (wall.end_point[0] - wall.start_point[0]) / wall.length
+    dy = (wall.end_point[1] - wall.start_point[1]) / wall.length
+    nx, ny = wall.inward_normal
+    start = position_along_wall
+    end = position_along_wall + width
+    p0 = [wall.start_point[0] + dx * start, wall.start_point[1] + dy * start]
+    p1 = [wall.start_point[0] + dx * end, wall.start_point[1] + dy * end]
+    polygon = [
+        p0,
+        p1,
+        [p1[0] + nx * clearance_distance, p1[1] + ny * clearance_distance],
+        [p0[0] + nx * clearance_distance, p0[1] + ny * clearance_distance],
+    ]
+    xs = [point[0] for point in polygon]
+    ys = [point[1] for point in polygon]
+    return (
+        [min(xs), min(ys), 0.0],
+        [max(xs), max(ys), clearance_height],
+        polygon,
+    )
+
+
 def compute_openings_data(
     placed_room: PlacedRoom,
     wall_height: float,
@@ -290,17 +326,29 @@ def compute_openings_data(
             # Compute clearance zone (None for OPEN type).
             clearance_bbox_min = None
             clearance_bbox_max = None
+            clearance_polygon = None
 
             if opening.opening_type == OpeningType.DOOR:
                 # Use door height, not wall height. Objects above door height
                 # (e.g., wall clocks) don't block passage through the door.
-                bbox_min_house, bbox_max_house = _compute_clearance_bbox(
-                    wall=wall,
-                    position_along_wall=opening.position_along_wall,
-                    width=opening.width,
-                    clearance_height=opening.height,
-                    clearance_distance=door_clearance_distance,
-                )
+                if wall.direction is None:
+                    bbox_min_house, bbox_max_house, clearance_polygon = (
+                        _compute_oriented_clearance(
+                            wall=wall,
+                            position_along_wall=opening.position_along_wall,
+                            width=opening.width,
+                            clearance_height=opening.height,
+                            clearance_distance=door_clearance_distance,
+                        )
+                    )
+                else:
+                    bbox_min_house, bbox_max_house = _compute_clearance_bbox(
+                        wall=wall,
+                        position_along_wall=opening.position_along_wall,
+                        width=opening.width,
+                        clearance_height=opening.height,
+                        clearance_distance=door_clearance_distance,
+                    )
                 # Transform clearance bbox to room-local coordinates.
                 clearance_bbox_min = [
                     bbox_min_house[0] - offset_x,
@@ -315,13 +363,24 @@ def compute_openings_data(
             elif opening.opening_type == OpeningType.WINDOW:
                 # Use window height, not wall height. Objects above windows
                 # shouldn't be flagged as blocking the window.
-                bbox_min_house, bbox_max_house = _compute_clearance_bbox(
-                    wall=wall,
-                    position_along_wall=opening.position_along_wall,
-                    width=opening.width,
-                    clearance_height=opening.sill_height + opening.height,
-                    clearance_distance=window_clearance_distance,
-                )
+                if wall.direction is None:
+                    bbox_min_house, bbox_max_house, clearance_polygon = (
+                        _compute_oriented_clearance(
+                            wall=wall,
+                            position_along_wall=opening.position_along_wall,
+                            width=opening.width,
+                            clearance_height=opening.sill_height + opening.height,
+                            clearance_distance=window_clearance_distance,
+                        )
+                    )
+                else:
+                    bbox_min_house, bbox_max_house = _compute_clearance_bbox(
+                        wall=wall,
+                        position_along_wall=opening.position_along_wall,
+                        width=opening.width,
+                        clearance_height=opening.sill_height + opening.height,
+                        clearance_distance=window_clearance_distance,
+                    )
                 # Transform clearance bbox to room-local coordinates.
                 clearance_bbox_min = [
                     bbox_min_house[0] - offset_x,
@@ -344,11 +403,20 @@ def compute_openings_data(
                 wall.end_point[0] - offset_x,
                 wall.end_point[1] - offset_y,
             ]
+            clearance_polygon_local = (
+                [
+                    [point[0] - offset_x, point[1] - offset_y]
+                    for point in clearance_polygon
+                ]
+                if clearance_polygon is not None
+                else None
+            )
 
             opening_data = ClearanceOpeningData(
                 opening_id=opening.opening_id,
+                wall_id=wall.wall_id,
                 opening_type=opening.opening_type.value,
-                wall_direction=wall.direction.value,
+                wall_direction=(wall.direction.value if wall.direction else None),
                 center_world=center,
                 width=opening.width,
                 sill_height=opening.sill_height,
@@ -358,6 +426,10 @@ def compute_openings_data(
                 wall_start=wall_start_local,
                 wall_end=wall_end_local,
                 position_along_wall=opening.position_along_wall,
+                wall_inward_normal=(
+                    list(wall.inward_normal) if wall.inward_normal is not None else None
+                ),
+                clearance_polygon=clearance_polygon_local,
             )
             openings_data.append(opening_data)
 
@@ -419,6 +491,63 @@ def _compute_penetration_depth(
     return min(aabb_overlap_depths(obj_min, obj_max, zone_min, zone_max))
 
 
+def _polygon_door_swing_clearance(
+    opening: Any,
+) -> list[list[float]] | None:
+    """Return an oriented polygon clearance enlarged to one door width."""
+    polygon = getattr(opening, "clearance_polygon", None)
+    inward_normal = getattr(opening, "wall_inward_normal", None)
+    if not polygon or len(polygon) != 4 or not inward_normal:
+        return None
+    try:
+        p0 = [float(value) for value in polygon[0][:2]]
+        p1 = [float(value) for value in polygon[1][:2]]
+        current_far = [float(value) for value in polygon[2][:2]]
+        nx, ny = (float(inward_normal[0]), float(inward_normal[1]))
+        width = float(opening.width)
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return None
+    normal_length = (nx**2 + ny**2) ** 0.5
+    if normal_length <= 0.0 or width <= 0.0:
+        return None
+    nx, ny = nx / normal_length, ny / normal_length
+    current_depth = max(
+        0.0,
+        (current_far[0] - p1[0]) * nx + (current_far[1] - p1[1]) * ny,
+    )
+    depth = max(current_depth, width)
+    return [
+        p0,
+        p1,
+        [p1[0] + nx * depth, p1[1] + ny * depth],
+        [p0[0] + nx * depth, p0[1] + ny * depth],
+    ]
+
+
+def _intersects_clearance_xy(
+    obj: Any,
+    opening: ClearanceOpeningData,
+    *,
+    clearance_polygon: list[list[float]] | None = None,
+) -> bool:
+    """Use exact oriented clearance for polygon walls when available."""
+    polygon = clearance_polygon or opening.clearance_polygon
+    if polygon is None:
+        return True
+    if obj.bbox_min is None or obj.bbox_max is None:
+        return False
+    # Keep the agent-utils module importable while BaseStatefulAgent is being
+    # initialized; importing the floor-plan package at module load is circular.
+    from scenesmith.floor_plan_agents.tools.polygon_geometry import (
+        transformed_bbox_footprint,
+    )
+
+    object_polygon = Polygon(
+        transformed_bbox_footprint(obj.bbox_min, obj.bbox_max, obj.transform)
+    )
+    return object_polygon.intersection(Polygon(polygon)).area > 1e-9
+
+
 def door_swing_clearance_bounds(
     opening: Any,
 ) -> tuple[list[float], list[float]] | None:
@@ -457,7 +586,13 @@ def door_swing_clearance_bounds(
     elif direction == "west":
         upper[0] = max(upper[0], lower[0] + width)
     else:
-        return None
+        polygon = _polygon_door_swing_clearance(opening)
+        if polygon is None:
+            return None
+        xs = [point[0] for point in polygon]
+        ys = [point[1] for point in polygon]
+        lower[0], lower[1] = min(xs), min(ys)
+        upper[0], upper[1] = max(xs), max(ys)
     return lower, upper
 
 
@@ -502,6 +637,10 @@ def compute_door_clearance_violations(
                 obj_max=obj_max,
                 zone_min=zone_min,
                 zone_max=zone_max,
+            ) and _intersects_clearance_xy(
+                obj,
+                opening,
+                clearance_polygon=_polygon_door_swing_clearance(opening),
             ):
                 penetration = _compute_penetration_depth(
                     obj_min=obj_min,
@@ -572,6 +711,7 @@ def compute_window_clearance_violations(
                 and obj_max[1] > zone_min[1]
                 and obj_min[2] < opening_max_z
                 and obj_max[2] > opening_min_z
+                and _intersects_clearance_xy(obj, opening)
             ):
                 violations.append(
                     WindowClearanceViolation(

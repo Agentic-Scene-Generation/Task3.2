@@ -74,7 +74,7 @@ fi
 #   ablation_4a_qwen3_lexical_memory  lexical memory ablation, no vector index
 #   ablation_4b_qwen3_vector_memory   BGE-M3 vector memory, requires index
 #   ablation_4c_qwen3_hybrid_memory   recommended hybrid memory, requires index
-#   ablation_5_qwen3_full             full/LoRA model, only after LoRA merge exists
+#   ablation_5_qwen3_full             exact 4c runtime + offline DPO capture
 ACP_EXPERIMENT="ablation_3_qwen3_harness"
 
 # TODO: Match ACP requested GPU count. Leave ACP_CUDA_VISIBLE_DEVICES empty on
@@ -301,6 +301,13 @@ prepare_memory_index_if_needed() {
 
     local embedding_model_dir="${SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR:-${SCENEEXPERT_MODELS_DIR:-$PROJECT_DIR/models}/bge-m3}"
     local index_device="${SCENEEXPERT_MEMORY_EMBEDDING_INDEX_DEVICE:-cpu}"
+
+    if [ ! -f "$embedding_model_dir/model.safetensors" ] \
+        && [ -f "$embedding_model_dir/pytorch_model.bin" ]; then
+        echo "========== CONVERT BGE-M3 CHECKPOINT =========="
+        python scripts/convert_embedding_checkpoint.py \
+            --model-dir "$embedding_model_dir"
+    fi
 
     echo "========== BUILD SCENEEXPERT MEMORY INDEX =========="
     echo "Memory bank: $memory_bank_dir"

@@ -25,6 +25,9 @@ class AssetItem:
     strategies: list[str]
     """Strategy chain to try, e.g. ["articulated", "generated"]."""
 
+    forbidden_semantic_components: list[str] = field(default_factory=list)
+    """Components that must not be bundled into this physical asset."""
+
     thin_covering_type: str | None = None
     """Type of thin covering texture: "tileable" or "single_image".
     Only set when strategies includes "thin_covering".

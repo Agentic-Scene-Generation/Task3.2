@@ -44,6 +44,9 @@ class HssdZvecConfig:
     retry_sleep_seconds: float = 1.0
     """Base retry backoff for embedding requests."""
 
+    all_assets_manifest_path: Path | None = None
+    """Shared all-assets JSONL manifest carrying per-asset unit metadata."""
+
     def __post_init__(self) -> None:
         """Validate config values."""
         self.collection_path = Path(self.collection_path)
@@ -58,6 +61,14 @@ class HssdZvecConfig:
 
         if self.top_k_factor <= 0:
             raise ValueError("top_k_factor must be positive")
+
+        if self.all_assets_manifest_path is not None:
+            self.all_assets_manifest_path = Path(self.all_assets_manifest_path)
+            if not self.all_assets_manifest_path.is_file():
+                raise FileNotFoundError(
+                    "All-assets manifest does not exist: "
+                    f"{self.all_assets_manifest_path}"
+                )
 
 
 @dataclass

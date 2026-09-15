@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from copy import deepcopy
 from types import SimpleNamespace
@@ -195,6 +196,230 @@ def test_floor_plan_manifest_projects_media_zones_and_explicit_windows() -> None
     )
 
 
+def test_functional_seating_and_media_zones_reserve_opening_free_axis() -> None:
+    context = StageRelationProjector(
+        floor_plan_reservation_gate_enabled=True,
+    ).project(
+        stage="floor_plan",
+        task_spec=_task_spec(
+            room_type="living_room",
+            functional_zones=["seating_zone", "entertainment_zone"],
+        ),
+        intent_contract=None,
+    )
+
+    manifest = context.floor_plan_manifest
+    assert manifest is not None
+    pairs = [
+        item for item in manifest.reservations if item.kind == "opposed_anchor_pair"
+    ]
+    assert len(pairs) == 1
+    assert pairs[0].subject_categories == ["seating_zone"]
+    assert pairs[0].target_categories == ["entertainment_zone"]
+
+
+def test_furniture_projection_resolves_current_opening_reservations() -> None:
+    scene = SimpleNamespace(
+        room_geometry=SimpleNamespace(
+            length=6.0,
+            width=5.0,
+            openings=[
+                {
+                    "opening_id": "door_1",
+                    "opening_type": "door",
+                    "wall_direction": "west",
+                    "center_world": [-3.0, 0.75, 1.05],
+                    "width": 0.9,
+                    "clearance_bbox_min": [-3.0, 0.3, 0.0],
+                    "clearance_bbox_max": [-2.1, 1.2, 2.1],
+                }
+            ],
+        )
+    )
+
+    context = StageRelationProjector().project(
+        stage="furniture",
+        task_spec=_task_spec(room_type="living_room"),
+        intent_contract=None,
+        scene=scene,
+    )
+
+    resolved = context.resolved_opening_reservations
+    assert resolved["fully_opening_free_walls"] == ["north", "south", "east"]
+    assert resolved["zones"][0]["zone_id"] == "door_1"
+    injected = _format_stage_relation_context(context)
+    assert "Resolved Floor Plan Opening Reservations" in injected
+    assert "door_1" in injected
+
+
+def test_strict_window_adjacency_projects_v2_capacity_and_window_count() -> None:
+    context = StageRelationProjector(
+        floor_plan_reservation_gate_enabled=True,
+    ).project(
+        stage="floor_plan",
+        task_spec=_task_spec(required_large_objects=["table"]),
+        intent_contract={
+            "constraints": [
+                {
+                    "constraint_id": "table-window",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "relation": "next_to",
+                    "subjects": {"category": "table", "count": 1},
+                    "targets": {"category": "window", "count": 2},
+                }
+            ]
+        },
+    )
+
+    manifest = context.floor_plan_manifest
+    assert manifest is not None
+    assert manifest.schema_version == "scenesmith.floor_plan_reservations.v3"
+    assert manifest.explicit_window_count == 2
+    assert manifest.explicit_window_required
+    reservations = [
+        item for item in manifest.reservations if item.kind == "opening_adjacency"
+    ]
+    assert len(reservations) == 1
+    assert reservations[0].subject_categories == ["table"]
+    assert reservations[0].target_categories == ["window"]
+
+    brief = _add_floor_plan_reservation_guidance(
+        StageBrief(
+            stage="floor_plan",
+            stage_objective="Create an office.",
+        ),
+        HarnessContext(
+            stage="floor_plan",
+            task_spec=_task_spec(required_large_objects=["table"]),
+            memory_pack=MemoryPack(),
+            relation_context=context,
+        ),
+    )
+    guidance = "\n".join(
+        [*brief.constraints_for_designer, *brief.checks_for_critic]
+    ).lower()
+    assert "table next to a window" in guidance
+    assert "window-side segment" in guidance
+
+
+def test_exact_rectangular_prompt_enables_area_advisory() -> None:
+    context = StageRelationProjector(
+        floor_plan_reservation_gate_enabled=True,
+        prompt=(
+            "Use a rectangular room with the exact interior dimensions "
+            "Width=3.40m and Length=5.06m."
+        ),
+    ).project(
+        stage="floor_plan",
+        task_spec=_task_spec(functional_zones=["sleeping_zone", "storage_zone"]),
+        intent_contract=None,
+    )
+
+    manifest = context.floor_plan_manifest
+    assert manifest is not None
+    assert manifest.explicit_geometry.detected
+    assert manifest.explicit_geometry.mode == "room"
+    assert manifest.explicit_geometry.expected_area_m2 == 17.204
+    assert manifest.explicit_geometry.functional_zone_area_policy == "advisory"
+
+
+def test_exact_polygon_prompt_enables_advisory_guidance() -> None:
+    prompt = (
+        "Create exactly one irregular bedroom using these ordered floor-boundary "
+        "vertices in meters: [[0,0],[3.19,0],[3.19,3.19],[0,3.19]]. "
+        "This polygon has an area of approximately 10.18 m². The vertices define "
+        "the exact boundary and must be used as-is."
+    )
+    context = StageRelationProjector(
+        floor_plan_reservation_gate_enabled=True,
+        prompt=prompt,
+    ).project(
+        stage="floor_plan",
+        task_spec=_task_spec(functional_zones=["sleeping_zone", "storage_zone"]),
+        intent_contract=None,
+    )
+
+    manifest = context.floor_plan_manifest
+    assert manifest is not None
+    assert manifest.explicit_geometry.detected
+    assert manifest.explicit_geometry.mode == "polygon"
+    assert manifest.explicit_geometry.expected_area_m2 == 10.1761
+
+    brief = _add_floor_plan_reservation_guidance(
+        StageBrief(stage="floor_plan", stage_objective="Create a bedroom."),
+        HarnessContext(
+            stage="floor_plan",
+            task_spec=_task_spec(functional_zones=["sleeping_zone", "storage_zone"]),
+            memory_pack=MemoryPack(),
+            relation_context=context,
+        ),
+    )
+    guidance = "\n".join(brief.constraints_for_designer).lower()
+    assert "immutable" in guidance
+    assert "at least 9 m2 total usable area" not in guidance
+
+
+def test_shape_without_exact_dimensions_does_not_enable_advisory() -> None:
+    context = StageRelationProjector(
+        floor_plan_reservation_gate_enabled=True,
+        prompt="Create a rectangular bedroom with a compact working area.",
+    ).project(
+        stage="floor_plan",
+        task_spec=_task_spec(functional_zones=["sleeping_zone"]),
+        intent_contract=None,
+    )
+
+    manifest = context.floor_plan_manifest
+    assert manifest is not None
+    assert not manifest.explicit_geometry.detected
+
+
+def test_loose_window_near_requires_window_without_adjacency_capacity() -> None:
+    context = StageRelationProjector(
+        floor_plan_reservation_gate_enabled=True,
+    ).project(
+        stage="floor_plan",
+        task_spec=_task_spec(required_large_objects=["bed"]),
+        intent_contract={
+            "constraints": [
+                {
+                    "constraint_id": "bed-window-near",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "relation": "near",
+                    "subjects": {"category": "bed", "count": 1},
+                    "targets": {"category": "window", "count": 1},
+                }
+            ]
+        },
+    )
+
+    manifest = context.floor_plan_manifest
+    assert manifest is not None
+    assert manifest.explicit_window_count == 1
+    assert not any(item.kind == "opening_adjacency" for item in manifest.reservations)
+
+
+def test_floor_plan_manifest_scopes_multi_room_capacity_to_all_rooms() -> None:
+    task_spec = _task_spec(
+        room_type="living room, dining room, kitchen",
+        functional_zones=["seating_zone", "dining_zone", "kitchen_zone"],
+    )
+
+    context = StageRelationProjector(
+        floor_plan_reservation_gate_enabled=True,
+    ).project(
+        stage="floor_plan",
+        task_spec=task_spec,
+        intent_contract=None,
+    )
+
+    manifest = context.floor_plan_manifest
+    assert manifest is not None
+    assert {reservation.room_type for reservation in manifest.reservations} == {""}
+
+
 def test_floor_plan_brief_reserves_opening_free_wall_segments() -> None:
     context = HarnessContext(
         stage="floor_plan",
@@ -284,6 +509,38 @@ def test_designer_gets_stage_only_json_and_critic_keeps_full_contract() -> None:
     assert case_pack["intent_contract"] == contract
 
 
+def test_case_pack_attachment_does_not_reparse_compiled_prompt_semantics() -> None:
+    prompt = "A sideboard against the wall behind the chairs."
+    contract = validate_intent_contract(
+        {
+            "schema_version": "scenesmith.intent_contract.v7",
+            "prompt": prompt,
+            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "constraints": [
+                {
+                    "relation": "behind",
+                    "subjects": {"category": "sideboard", "count": 1},
+                    "targets": {"category": "dining_chair", "count": 1},
+                    "source": "explicit_prompt",
+                    "evidence_span": prompt,
+                }
+            ],
+        },
+        validate_prompt_semantics=False,
+    )
+    scene = SimpleNamespace(
+        text_description=prompt,
+        scene_expert_original_description=prompt,
+        scenebenchmark_intent_contract=contract,
+        metadata={},
+    )
+    case_pack: dict = {}
+
+    attached = attach_intent_contract_to_case_pack(scene, case_pack)
+
+    assert attached["constraints"][0]["relation"] == "behind"
+
+
 def test_global_planner_sees_relations_and_retries_strict_schema() -> None:
     invalid = json.dumps(
         {
@@ -345,13 +602,23 @@ def test_global_planner_sees_relations_and_retries_strict_schema() -> None:
     assert calls[0]["response_format"]["json_schema"]["strict"] is True
 
 
-def test_empty_stage_only_opens_for_hard_constraint() -> None:
+def test_empty_stage_runs_native_planner_without_hard_constraint() -> None:
     planner = object.__new__(GlobalPlanner)
     planner._model = "test"
     planner._max_tokens = 512
     planner._temperature = 0.0
     planner.last_trace = {}
-    client, calls = _client_with_responses([])
+    valid_empty_stage = json.dumps(
+        {
+            "stage": "wall_mounted",
+            "stage_objective": "Execute the native wall stage",
+            "recommended_skills": [],
+            "constraints_for_designer": [],
+            "checks_for_critic": [],
+            "failure_patterns_to_avoid": [],
+        }
+    )
+    client, calls = _client_with_responses([_response(valid_empty_stage)])
     planner._client = client
     empty_spec = _task_spec(required_wall_objects=[])
     context = HarnessContext(
@@ -361,9 +628,9 @@ def test_empty_stage_only_opens_for_hard_constraint() -> None:
         relation_context=StageRelationContext(stage="wall_mounted"),
     )
 
-    fallback = planner.generate_stage_brief(context)
-    assert "empty wall_mounted stage" in fallback.stage_objective
-    assert not calls
+    brief = planner.generate_stage_brief(context)
+    assert brief.stage == "wall_mounted"
+    assert len(calls) == 1
 
     valid = json.dumps(
         {

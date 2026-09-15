@@ -206,6 +206,12 @@ class SupportSurface:
     None for non-articulated objects or if link association failed.
     """
 
+    exact_boundary_vertices: list[tuple[float, float]] | None = None
+    """Exact concave boundary in surface-local XY for polygon floors."""
+
+    open_above: bool = False
+    """Whether extraction proved that no geometry bounds the space above."""
+
     @property
     def area(self) -> float:
         """Compute surface area from XY bounding box dimensions.
@@ -213,6 +219,10 @@ class SupportSurface:
         Returns:
             Surface area in square meters.
         """
+        if self.exact_boundary_vertices is not None:
+            from shapely.geometry import Polygon
+
+            return float(Polygon(self.exact_boundary_vertices).area)
         width = self.bounding_box_max[0] - self.bounding_box_min[0]
         depth = self.bounding_box_max[1] - self.bounding_box_min[1]
         return float(width * depth)
@@ -232,6 +242,8 @@ class SupportSurface:
                 float(self.bounding_box_max[2]),
             ],
             "transform": serialize_rigid_transform(self.transform),
+            "exact_boundary_vertices": self.exact_boundary_vertices,
+            "open_above": self.open_above,
         }
 
         # Convert to JSON string with sorted keys for determinism.
@@ -318,6 +330,15 @@ class SupportSurface:
             2,
         ), f"Expected 2D position, got shape {position_2d.shape}"
 
+        if self.exact_boundary_vertices is not None:
+            from shapely.geometry import Point, Polygon
+
+            return bool(
+                Polygon(self.exact_boundary_vertices).covers(
+                    Point(float(position_2d[0]), float(position_2d[1]))
+                )
+            )
+
         # Fallback to AABB bounds check if no mesh geometry available.
         # This is the case for HSSD pre-validated surfaces.
         if self.mesh is None:
@@ -401,6 +422,18 @@ class SupportSurface:
         R = self.transform.rotation().matrix()
         t = self.transform.translation()
 
+        if self.exact_boundary_vertices is not None:
+            boundary_local = np.array(
+                [[x, y, 0.0] for x, y in self.exact_boundary_vertices]
+            )
+            boundary_world = (R @ boundary_local.T).T + t
+            hull, processed_vertices = safe_convex_hull_2d(boundary_world[:, :2])
+            if hull is None:
+                lb = boundary_world[:, :2].min(axis=0)
+                ub = boundary_world[:, :2].max(axis=0)
+                return VPolytope.MakeBox(lb=lb, ub=ub)
+            return VPolytope(vertices=processed_vertices[hull.vertices].T)
+
         if self.mesh is None:
             # No mesh - use axis-aligned bounding box corners in local frame.
             bbox_min = self.bounding_box_min
@@ -482,7 +515,7 @@ class SceneObject:
     placed directly on the floor, this is None.
     """
 
-    metadata: dict[str, str | float | bool] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
     """Additional metadata for the object (e.g., dimensions, material)."""
 
     bbox_min: np.ndarray | None = None
@@ -628,6 +661,12 @@ class SceneObject:
                 "bounding_box_max": surf.bounding_box_max.tolist(),
                 "transform": serialize_rigid_transform(surf.transform),
                 "link_name": surf.link_name,  # For articulated FK transforms.
+                "exact_boundary_vertices": (
+                    [list(vertex) for vertex in surf.exact_boundary_vertices]
+                    if surf.exact_boundary_vertices is not None
+                    else None
+                ),
+                "open_above": surf.open_above,
             }
             # Serialize mesh data if present.
             if surf.mesh is not None:
@@ -727,6 +766,12 @@ class SceneObject:
                 transform=surf_transform,
                 mesh=mesh,
                 link_name=surf_data.get("link_name"),  # For articulated FK transforms.
+                exact_boundary_vertices=(
+                    [tuple(vertex) for vertex in surf_data["exact_boundary_vertices"]]
+                    if surf_data.get("exact_boundary_vertices") is not None
+                    else None
+                ),
+                open_above=bool(surf_data.get("open_above", False)),
             )
             support_surfaces.append(support_surface)
 
@@ -816,6 +861,12 @@ class RoomScene:
 
     action_log_path: Path | None = None
     """Path to action log file for scene replication/replay."""
+
+    floor_plan_mode: str = "room"
+    """Trajectory mode discriminator (room, house, or polygon)."""
+
+    tool_schema_version: int = 1
+    """Version of the mode-specific agent tool contract."""
 
     _surface_id_counter: int = field(default=0, init=False, repr=False)
     """Counter for generating sequential surface IDs (S_0, S_1, etc.)."""
@@ -1595,6 +1646,8 @@ class RoomScene:
             "objects": objects_dict,
             "text_description": self.text_description,
             "metadata": self.metadata,
+            "floor_plan_mode": self.floor_plan_mode,
+            "tool_schema_version": self.tool_schema_version,
         }
 
     def restore_from_state_dict(self, state_dict: dict[str, Any]) -> None:
@@ -1631,6 +1684,10 @@ class RoomScene:
                 "scenebenchmark_intent_contract",
                 self.metadata["scenebenchmark_intent_contract"],
             )
+        if "floor_plan_mode" in state_dict:
+            self.floor_plan_mode = state_dict["floor_plan_mode"]
+        if "tool_schema_version" in state_dict:
+            self.tool_schema_version = state_dict["tool_schema_version"]
 
         # Restore objects.
         for obj_data in state_dict["objects"].values():
@@ -1661,6 +1718,8 @@ def extract_and_propagate_support_surfaces(
     scene: "RoomScene",
     furniture_object: SceneObject,
     config: SupportSurfaceExtractionConfig | None = None,
+    *,
+    surface_policy: str = "general",
 ) -> list[SupportSurface]:
     """Extract all support surfaces using HSM algorithm and propagate to identical furniture.
 
@@ -1673,6 +1732,8 @@ def extract_and_propagate_support_surfaces(
         scene: The scene containing all furniture objects.
         furniture_object: The furniture object to extract support surfaces from.
         config: HSM algorithm configuration (uses defaults if None).
+        surface_policy: HSSD filtering policy. ``upholstered_seat`` is used only
+            for prompt-required objects placed on upholstered seating.
 
     Returns:
         List of SupportSurface objects for the selected furniture, sorted by area
@@ -1712,16 +1773,30 @@ def extract_and_propagate_support_surfaces(
             config=config,
             scene=scene,
             data_dir=config.hssd_data_dir,
+            surface_policy=surface_policy,
+            furniture_bbox_min=(
+                np.asarray(furniture_object.bbox_min, dtype=float)
+                / float(furniture_object.scale_factor)
+                if furniture_object.bbox_min is not None
+                and float(furniture_object.scale_factor) > 0.0
+                else None
+            ),
+            furniture_bbox_max=(
+                np.asarray(furniture_object.bbox_max, dtype=float)
+                / float(furniture_object.scale_factor)
+                if furniture_object.bbox_max is not None
+                and float(furniture_object.scale_factor) > 0.0
+                else None
+            ),
+            furniture_scale_factor=float(furniture_object.scale_factor),
         )
         source = "HSSD"
 
+        if surfaces is not None:
+            furniture_object.metadata["support_surface_policy"] = surface_policy
+
         if surfaces is None:
-            # A missing or unreadable annotation has no information to preserve,
-            # so recompute it from geometry. An explicit empty annotation is
-            # intentionally returned to the manipuland stage: that stage can
-            # decide whether a hard prompt-owned support target is eligible for
-            # a tightly bounded fallback without inventing surfaces for general
-            # furniture.
+            # Fallback to HSM algorithm.
             console_logger.info(
                 f"Falling back to HSM algorithm for {furniture_object.object_id}"
             )
@@ -1807,6 +1882,7 @@ def extract_and_propagate_support_surfaces(
             transform=world_transform,
             mesh=scaled_mesh,  # Scaled mesh for convex hull computation.
             link_name=surface.link_name,  # Preserve link for FK transforms.
+            open_above=surface.open_above,
         )
         world_surfaces.append(world_surface)
 
@@ -1816,6 +1892,11 @@ def extract_and_propagate_support_surfaces(
         f"Extracted {len(world_surfaces)} support surfaces for "
         f"{furniture_object.object_id}"
     )
+
+    # A relaxed, prompt-owned surface policy must not leak to optional
+    # identical furniture elsewhere in the room.
+    if surface_policy != "general":
+        return world_surfaces
 
     # Propagate to all identical furniture (same geometry_path).
     target_geometry_path = furniture_object.geometry_path
@@ -1859,6 +1940,7 @@ def extract_and_propagate_support_surfaces(
                 transform=obj_world_transform,
                 mesh=obj_scaled_mesh,  # Scaled mesh for convex hull computation.
                 link_name=surface.link_name,  # Preserve link for FK transforms.
+                open_above=surface.open_above,
             )
             obj_surfaces.append(obj_surface)
 

@@ -66,7 +66,8 @@ if [ -z "$MEMORY_EMBEDDING_MODEL_DIR" ]; then
     done
 fi
 if [ "$EXPERIMENT" = "ablation_4b_qwen3_vector_memory" ] \
-    || [ "$EXPERIMENT" = "ablation_4c_qwen3_hybrid_memory" ]; then
+    || [ "$EXPERIMENT" = "ablation_4c_qwen3_hybrid_memory" ] \
+    || [ "$EXPERIMENT" = "ablation_5_qwen3_full" ]; then
     if [ -z "$MEMORY_EMBEDDING_MODEL_DIR" ] || [ ! -d "$MEMORY_EMBEDDING_MODEL_DIR" ]; then
         echo "ERROR: local BGE-M3 directory is required for $EXPERIMENT" >&2
         echo "       Set SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR to a valid bge-m3 directory." >&2
@@ -80,6 +81,10 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_ROOT/outputs/critic_probe/$RUN_ID}"
 CASE_SET="${CASE_SET:-new3}"
 SCENE_SELECTION="${SCENE_SELECTION:-all}"
 SCENE_SELECTION_EXPLICIT="false"
+SCENEEVAL_SIZE="${SCENEEVAL_SIZE:-100}"
+SCENEEVAL_ANNOTATIONS="${SCENEEVAL_ANNOTATIONS:-$SCRIPT_DIR/assets/annotations.csv}"
+DIFFICULTY_SELECTION="${DIFFICULTY_SELECTION:-all}"
+CLI_PARALLELISM=""
 REPLAY_FROM_PATH="${REPLAY_FROM_PATH:-}"
 REPLAY_MODE="${REPLAY_MODE:-floor_plan}"
 RESUME_FURNITURE_RENDER_MODE=""
@@ -89,7 +94,11 @@ usage() {
 Usage: bash scripts/run_parallel_critic_on.sh [options]
 
 Options:
-  --case-set <set>         case registry: new3 (default) or legacy8 (old8 alias)
+  --case-set <set>         new3 (default), legacy8, sceneeval100, or sceneeval500
+  --scene-eval <size>      run SceneEval-100 or SceneEval-500 (size: 100 or 500)
+  --difficulty <levels>    SceneEval difficulty: all (default), easy, medium, hard,
+                           or a comma-separated combination
+  --parallelism <count>    number of scene batches to run concurrently (default: 1)
   --scenes <selection>     all, or a comma-separated list chosen from:
                            the selected case registry
   --output-root <dir>      write probe output below <dir>
@@ -105,6 +114,13 @@ Case registries:
             default_rustic_bedroom, meeting_room_mixed_edge_seating,
             study_desk_access_crunch, bedroom_bedside_blockage,
             dining_room_service_squeeze
+  sceneeval100  IDs 0-99 from scripts/assets/annotations.csv
+  sceneeval500  IDs 0-499 from scripts/assets/annotations.csv
+
+Examples:
+  bash scripts/run_parallel_critic_on.sh --scene-eval 100 --parallelism 4
+  bash scripts/run_parallel_critic_on.sh --scene-eval 500 --difficulty hard --parallelism 2
+  bash scripts/run_parallel_critic_on.sh --case-set sceneeval100 --difficulty easy,medium
 
 CASE_FILTER remains available for legacy substring filtering when --scenes is
 not supplied. An explicit --scenes selection takes precedence. A reusable
@@ -153,7 +169,7 @@ if [ "${1:-}" != "--internal-run-batch" ]; then
                 ;;
             --case-set)
                 if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
-                    echo "ERROR: --case-set requires new3 or legacy8" >&2
+                    echo "ERROR: --case-set requires new3, legacy8, sceneeval100, or sceneeval500" >&2
                     exit 2
                 fi
                 CASE_SET="$2"
@@ -162,7 +178,57 @@ if [ "${1:-}" != "--internal-run-batch" ]; then
             --case-set=*)
                 CASE_SET="${1#*=}"
                 if [ -z "$CASE_SET" ]; then
-                    echo "ERROR: --case-set requires new3 or legacy8" >&2
+                    echo "ERROR: --case-set requires new3, legacy8, sceneeval100, or sceneeval500" >&2
+                    exit 2
+                fi
+                shift
+                ;;
+            --scene-eval)
+                if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+                    echo "ERROR: --scene-eval requires 100 or 500" >&2
+                    exit 2
+                fi
+                CASE_SET="sceneeval"
+                SCENEEVAL_SIZE="$2"
+                shift 2
+                ;;
+            --scene-eval=*)
+                CASE_SET="sceneeval"
+                SCENEEVAL_SIZE="${1#*=}"
+                if [ -z "$SCENEEVAL_SIZE" ]; then
+                    echo "ERROR: --scene-eval requires 100 or 500" >&2
+                    exit 2
+                fi
+                shift
+                ;;
+            --difficulty|--difficulties)
+                if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+                    echo "ERROR: $1 requires all, easy, medium, hard, or a comma-separated combination" >&2
+                    exit 2
+                fi
+                DIFFICULTY_SELECTION="$2"
+                shift 2
+                ;;
+            --difficulty=*|--difficulties=*)
+                DIFFICULTY_SELECTION="${1#*=}"
+                if [ -z "$DIFFICULTY_SELECTION" ]; then
+                    echo "ERROR: --difficulty requires all, easy, medium, hard, or a comma-separated combination" >&2
+                    exit 2
+                fi
+                shift
+                ;;
+            --parallelism|--concurrency)
+                if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+                    echo "ERROR: $1 requires a positive integer" >&2
+                    exit 2
+                fi
+                CLI_PARALLELISM="$2"
+                shift 2
+                ;;
+            --parallelism=*|--concurrency=*)
+                CLI_PARALLELISM="${1#*=}"
+                if [ -z "$CLI_PARALLELISM" ]; then
+                    echo "ERROR: --parallelism requires a positive integer" >&2
                     exit 2
                 fi
                 shift
@@ -212,20 +278,32 @@ if [ "${1:-}" != "--internal-run-batch" ]; then
     done
 fi
 
-case "$CASE_SET" in
+case "${CASE_SET,,}" in
     old8) CASE_SET="legacy8" ;;
-    new3|legacy8) ;;
+    new3|legacy8) CASE_SET="${CASE_SET,,}" ;;
+    sceneeval|scene-eval) CASE_SET="sceneeval${SCENEEVAL_SIZE}" ;;
+    sceneeval100|sceneeval-100|sceneeval_100) CASE_SET="sceneeval100"; SCENEEVAL_SIZE=100 ;;
+    sceneeval500|sceneeval-500|sceneeval_500) CASE_SET="sceneeval500"; SCENEEVAL_SIZE=500 ;;
     *)
-        echo "ERROR: CASE_SET must be new3 or legacy8, got '$CASE_SET'" >&2
+        echo "ERROR: CASE_SET must be new3, legacy8, sceneeval100, or sceneeval500; got '$CASE_SET'" >&2
         exit 2
         ;;
 esac
+if [[ "$SCENEEVAL_SIZE" != "100" && "$SCENEEVAL_SIZE" != "500" ]]; then
+    echo "ERROR: SceneEval size must be 100 or 500, got '$SCENEEVAL_SIZE'" >&2
+    exit 2
+fi
 
 SCENE_BATCH_SIZE="${SCENE_BATCH_SIZE:-1}"
 SCENE_WORKERS_PER_PROCESS="${SCENE_WORKERS_PER_PROCESS:-1}"
 # Native Drake/solver crashes cannot be caught in-process.  Keep two clean
 # process retries by default; only failures classified as transient retry.
 SCENE_RETRY_ATTEMPTS="${SCENE_RETRY_ATTEMPTS:-2}"
+# A complete shared base is required before critic branches can start.  Native
+# rendering services occasionally disconnect near floor-plan export, so retry
+# only failed shared-base scenes once in fresh, serialized batch processes.
+SHARED_BASE_BATCH_RETRIES="${SHARED_BASE_BATCH_RETRIES:-1}"
+SHARED_BASE_RETRY_PARALLELISM="${SHARED_BASE_RETRY_PARALLELISM:-1}"
 CRITIC_PROBE_PARALLEL="${CRITIC_PROBE_PARALLEL:-true}"
 # A Qwen llama-server already reserves tens of GiB in the ACP cgroup.  Keep
 # one Python scene process by default; callers can opt into more concurrency
@@ -240,6 +318,14 @@ CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS="${CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS:-30}"
 # after all batches finish if any batch failed. Set false for fail-fast mode.
 CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE="${CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE:-true}"
 
+if [ -n "$CLI_PARALLELISM" ]; then
+    CRITIC_PROBE_INNER_PARALLELISM="$CLI_PARALLELISM"
+    CRITIC_PROBE_PARALLEL="true"
+    # A command-line concurrency value is an explicit resource opt-in. The
+    # environment-only path retains the conservative safety ceiling below.
+    CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM="true"
+fi
+
 PIPELINE_STOP_STAGE="${PIPELINE_STOP_STAGE:-manipuland}"
 # Keep strict furniture-stage validation by default. Set this to false only
 # when intentionally allowing unresolved furniture hard constraints through.
@@ -248,6 +334,13 @@ FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS="${FAIL_STAGE_ON_UNRESOLVED_HARD_CONST
 # Preserve failed quality trajectories and final renders by default in probes.
 # Production experiments keep their base-config default of "strict".
 QUALITY_FAILURE_POLICY="${QUALITY_FAILURE_POLICY:-degraded}"
+# A typed scene-local failure remains visible in artifacts and metrics but does
+# not block critic-probe batches. Shared-base generation overrides this to strict.
+SCENE_FAILURE_POLICY="${SCENE_FAILURE_POLICY:-record}"
+# Stream active Chat Completions so the HTTP read timeout measures idle time,
+# not the total duration of a long llama.cpp generation. The client wrapper
+# assembles the chunks back into the standard non-streaming response contract.
+SCENEEXPERT_CHAT_COMPLETIONS_STREAM="${SCENEEXPERT_CHAT_COMPLETIONS_STREAM:-true}"
 BRANCH_FROM_SHARED_BASE="${BRANCH_FROM_SHARED_BASE:-false}"
 SHARED_BASE_STOP_STAGE="${SHARED_BASE_STOP_STAGE:-floor_plan}"
 SHARED_BASE_ROOT="${SHARED_BASE_ROOT:-}"
@@ -256,6 +349,7 @@ MAX_CASES="${MAX_CASES:-0}"
 CASE_FILTER="${CASE_FILTER:-}"
 INCLUDE_HOLDOUT_CASES="${INCLUDE_HOLDOUT_CASES:-false}"
 DRY_RUN="${DRY_RUN:-false}"
+SCENEEVAL_AFTER_RUN="${SCENEEVAL_AFTER_RUN:-auto}"
 CRITIC_PROBE_RENDER_FINAL_VIEWS="${CRITIC_PROBE_RENDER_FINAL_VIEWS:-false}"
 CRITIC_PROBE_FINAL_VIEW_PARALLELISM="${CRITIC_PROBE_FINAL_VIEW_PARALLELISM:-1}"
 FINAL_VIEW_PYTHON_BIN="${FINAL_VIEW_PYTHON_BIN:-$PYTHON_BIN}"
@@ -267,6 +361,8 @@ DISABLE_BWRAP="${SCENEEXPERT_DISABLE_BWRAP:-false}"
 SKIP_MAIN_BPY_IMPORT="${SCENEEXPERT_SKIP_MAIN_BPY_IMPORT:-true}"
 HSSD_RETRIEVAL_BACKEND="${HSSD_RETRIEVAL_BACKEND:-clip}"
 HSSD_RENDERED_ASSET_CHOICE="${HSSD_RENDERED_ASSET_CHOICE:-false}"
+HSSD_ZVEC_COLLECTION_PATH="${HSSD_ZVEC_COLLECTION_PATH:-}"
+HSSD_ALL_ASSETS_MANIFEST_PATH="${HSSD_ALL_ASSETS_MANIFEST_PATH:-}"
 # A directory check alone is insufficient for BGE-M3: recent Transformers
 # releases reject pickle checkpoints when the active Torch is too old. Load it
 # once in the controller before any batch starts so an incompatible runtime
@@ -325,6 +421,35 @@ normalize_bool() {
         0|false|no|n|off|'') printf 'false' ;;
         *) return 1 ;;
     esac
+}
+
+normalize_difficulty_selection() {
+    local raw="${1,,}" level seen="," normalized=""
+    raw="${raw//[[:space:]]/}"
+    if [ -z "$raw" ] || [[ "$raw" == ,* || "$raw" == *, || "$raw" == *,,* ]]; then
+        return 1
+    fi
+    IFS=',' read -r -a difficulty_levels <<< "$raw"
+    for level in "${difficulty_levels[@]}"; do
+        case "$level" in
+            all)
+                if [ "${#difficulty_levels[@]}" -ne 1 ]; then
+                    return 1
+                fi
+                printf 'all'
+                return 0
+                ;;
+            easy|medium|hard) ;;
+            *) return 1 ;;
+        esac
+        if [[ "$seen" == *",$level,"* ]]; then
+            return 1
+        fi
+        seen+="$level,"
+        if [ -n "$normalized" ]; then normalized+=","; fi
+        normalized+="$level"
+    done
+    printf '%s' "$normalized"
 }
 
 require_positive_integer() {
@@ -400,6 +525,11 @@ if [[ ! "$SCENE_RETRY_ATTEMPTS" =~ ^[0-9]+$ ]]; then
     echo "ERROR: SCENE_RETRY_ATTEMPTS must be a non-negative integer, got '$SCENE_RETRY_ATTEMPTS'" >&2
     exit 1
 fi
+if [[ ! "$SHARED_BASE_BATCH_RETRIES" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: SHARED_BASE_BATCH_RETRIES must be a non-negative integer, got '$SHARED_BASE_BATCH_RETRIES'" >&2
+    exit 1
+fi
+require_positive_integer SHARED_BASE_RETRY_PARALLELISM "$SHARED_BASE_RETRY_PARALLELISM"
 require_positive_integer CRITIC_PROBE_INNER_PARALLELISM "$CRITIC_PROBE_INNER_PARALLELISM"
 require_positive_integer CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM "$CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM"
 require_positive_integer CRITIC_PROBE_PORT_BASE "$CRITIC_PROBE_PORT_BASE"
@@ -410,6 +540,41 @@ if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
     require_positive_integer SCENEEXPERT_CONVEX_MAX_OMP_THREADS "$CONVEX_MAX_OMP_THREADS"
 fi
 require_positive_integer SCENEEXPERT_OMP_NUM_THREADS "$SCENEEXPERT_OMP_NUM_THREADS"
+
+if ! DIFFICULTY_SELECTION="$(normalize_difficulty_selection "$DIFFICULTY_SELECTION")"; then
+    echo "ERROR: DIFFICULTY_SELECTION/--difficulty must be all or a unique comma-separated selection of easy, medium, hard" >&2
+    exit 2
+fi
+if [[ "$CASE_SET" != sceneeval* && "$DIFFICULTY_SELECTION" != "all" ]]; then
+    echo "ERROR: --difficulty is supported only with SceneEval case sets" >&2
+    exit 2
+fi
+case "${SCENEEVAL_AFTER_RUN,,}" in
+    auto)
+        if [[ "$CASE_SET" == sceneeval* ]]; then
+            SCENEEVAL_AFTER_RUN=true
+        else
+            SCENEEVAL_AFTER_RUN=false
+        fi
+        ;;
+    true|false) ;;
+    *)
+        echo "ERROR: SCENEEVAL_AFTER_RUN must be auto, true, or false" >&2
+        exit 2
+        ;;
+esac
+
+if [ $((CRITIC_PROBE_PORT_BASE + 374)) -gt 65535 ]; then
+    echo "ERROR: CRITIC_PROBE_PORT_BASE leaves no room for one 375-port service block: $CRITIC_PROBE_PORT_BASE" >&2
+    exit 2
+fi
+max_port_slot=$(((65535 - CRITIC_PROBE_PORT_BASE - 374) / CRITIC_PROBE_PORT_BLOCK_SIZE + 1))
+if [ "$max_port_slot" -lt 1 ] \
+    || [ "$CRITIC_PROBE_INNER_PARALLELISM" -gt "$max_port_slot" ]; then
+    echo "ERROR: parallelism $CRITIC_PROBE_INNER_PARALLELISM does not fit the configured service-port range" >&2
+    echo "       base=$CRITIC_PROBE_PORT_BASE block=$CRITIC_PROBE_PORT_BLOCK_SIZE max_parallelism=$max_port_slot" >&2
+    exit 2
+fi
 
 if ! CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM="$(normalize_bool "$CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM")"; then
     echo "ERROR: CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM must be true or false" >&2
@@ -491,8 +656,8 @@ if ! SKIP_MAIN_BPY_IMPORT="$(normalize_bool "$SKIP_MAIN_BPY_IMPORT")"; then
     echo "ERROR: SCENEEXPERT_SKIP_MAIN_BPY_IMPORT must be true or false" >&2
     exit 1
 fi
-if [[ "$HSSD_RETRIEVAL_BACKEND" != "clip" && "$HSSD_RETRIEVAL_BACKEND" != "embedding" ]]; then
-    echo "ERROR: HSSD_RETRIEVAL_BACKEND must be clip or embedding" >&2
+if [[ "$HSSD_RETRIEVAL_BACKEND" != "clip" && "$HSSD_RETRIEVAL_BACKEND" != "embedding" && "$HSSD_RETRIEVAL_BACKEND" != "all_assets_embedding" ]]; then
+    echo "ERROR: HSSD_RETRIEVAL_BACKEND must be clip, embedding, or all_assets_embedding" >&2
     exit 1
 fi
 if ! HSSD_RENDERED_ASSET_CHOICE="$(normalize_bool "$HSSD_RENDERED_ASSET_CHOICE")"; then
@@ -509,6 +674,14 @@ if ! FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS="$(normalize_bool "$FAIL_STAGE_ON
 fi
 if [[ "$QUALITY_FAILURE_POLICY" != "strict" && "$QUALITY_FAILURE_POLICY" != "degraded" ]]; then
     echo "ERROR: QUALITY_FAILURE_POLICY must be strict or degraded" >&2
+    exit 1
+fi
+if [[ "$SCENE_FAILURE_POLICY" != "strict" && "$SCENE_FAILURE_POLICY" != "record" ]]; then
+    echo "ERROR: SCENE_FAILURE_POLICY must be strict or record" >&2
+    exit 1
+fi
+if ! SCENEEXPERT_CHAT_COMPLETIONS_STREAM="$(normalize_bool "$SCENEEXPERT_CHAT_COMPLETIONS_STREAM")"; then
+    echo "ERROR: SCENEEXPERT_CHAT_COMPLETIONS_STREAM must be true or false" >&2
     exit 1
 fi
 if ! CRITIC_PROBE_RENDER_FINAL_VIEWS="$(normalize_bool "$CRITIC_PROBE_RENDER_FINAL_VIEWS")"; then
@@ -619,6 +792,11 @@ validate_scene_selection() {
             echo "       Or use --scenes all." >&2
             exit 2
         fi
+        if [ "${CASE_SCOPE_BY_ID[$scene_id]:-single_room}" = "multi_room" ]; then
+            echo "ERROR: scene ID '$scene_id' is marked multi_room in $SCENEEVAL_ANNOTATIONS" >&2
+            echo "       This runner supports only SceneEval single_room cases." >&2
+            exit 2
+        fi
         if [[ "$seen" == *",$scene_id,"* ]]; then
             echo "ERROR: duplicate scene ID in --scenes: $scene_id" >&2
             exit 2
@@ -644,6 +822,80 @@ case_registry_contains() {
     return 1
 }
 
+load_sceneeval_registry() {
+    local expected_count="$SCENEEVAL_SIZE"
+    if [ ! -f "$SCENEEVAL_ANNOTATIONS" ]; then
+        echo "ERROR: SceneEval annotations file not found: $SCENEEVAL_ANNOTATIONS" >&2
+        exit 2
+    fi
+
+    # NUL-delimited records preserve commas and shell metacharacters in scene
+    # descriptions. The script's internal record separator is rejected below.
+    mapfile -d '' -t CASES < <(
+        "$PYTHON_BIN" - "$SCENEEVAL_ANNOTATIONS" "$SCENEEVAL_SIZE" <<'PY'
+import csv
+import sys
+
+path = sys.argv[1]
+limit = int(sys.argv[2])
+with open(path, newline="", encoding="utf-8-sig") as handle:
+    rows = list(csv.DictReader(handle))
+
+required = {"ID", "Description", "Difficulty", "SceneScope"}
+if not rows or not required.issubset(rows[0]):
+    raise SystemExit(
+        f"ERROR: SceneEval CSV must contain columns {sorted(required)}: {path}"
+    )
+if len(rows) < limit:
+    raise SystemExit(
+        f"ERROR: SceneEval-{limit} requires {limit} rows, but {path} has {len(rows)}"
+    )
+
+for expected_id, row in enumerate(rows[:limit]):
+    try:
+        scene_id = int(row["ID"])
+    except (TypeError, ValueError):
+        raise SystemExit(f"ERROR: invalid SceneEval ID at CSV row {expected_id + 2}")
+    if scene_id != expected_id:
+        raise SystemExit(
+            f"ERROR: expected SceneEval ID {expected_id}, got {scene_id} "
+            f"at CSV row {expected_id + 2}"
+        )
+    description = (row["Description"] or "").strip()
+    difficulty = (row["Difficulty"] or "").strip().lower()
+    scene_scope = (row["SceneScope"] or "").strip().lower()
+    if not description:
+        raise SystemExit(f"ERROR: SceneEval ID {scene_id} has an empty Description")
+    if difficulty not in {"easy", "medium", "hard"}:
+        raise SystemExit(
+            f"ERROR: SceneEval ID {scene_id} has invalid Difficulty {difficulty!r}"
+        )
+    if scene_scope not in {"single_room", "multi_room"}:
+        raise SystemExit(
+            f"ERROR: SceneEval ID {scene_id} has invalid SceneScope {scene_scope!r}"
+        )
+    if "|" in description or "\x00" in description or "\n" in description or "\r" in description:
+        raise SystemExit(
+            f"ERROR: SceneEval ID {scene_id} contains an unsupported record separator"
+        )
+    record = (
+        f"{scene_id}|SceneEval {difficulty}|{description}|{scene_scope}"
+    ).encode("utf-8")
+    sys.stdout.buffer.write(record + b"\x00")
+PY
+    )
+    if [ "${#CASES[@]}" -ne "$expected_count" ]; then
+        echo "ERROR: failed to load all SceneEval-$SCENEEVAL_SIZE entries from $SCENEEVAL_ANNOTATIONS" >&2
+        exit 2
+    fi
+}
+
+declare -A CASE_DIFFICULTY_BY_ID=()
+declare -A CASE_SCOPE_BY_ID=()
+SCENEEVAL_SINGLE_ROOM_COUNT=0
+SCENEEVAL_MULTI_ROOM_COUNT=0
+SCENEEVAL_MULTI_ROOM_IDS=""
+
 select_case_registry() {
     case "$CASE_SET" in
         legacy8)
@@ -667,21 +919,43 @@ select_case_registry() {
                 "long_living_room|living-media alignment, five-seat dining edge distribution, wall storage, and distinct-corner plants|A long rectangular living room with separate living and dining areas. In the living area, place one sofa against a wall facing one TV stand on the opposite side, with one television supported on top of the TV stand. Center one coffee table between the sofa and the TV stand. In the dining area, place one rectangular dining table with five complete table settings, each including a plate, cutlery, and a drinking glass. Arrange five dining chairs around the table: two evenly spaced along each long side and one centered on one short side, all facing the table; keep the opposite short side free of chairs. Place one storage cabinet against a wall without blocking circulation. Place four large floor plants in four distinct room corners, exactly one plant per corner. Keep a clear route between the entrance, living area, dining area, and storage cabinet."
             )
             ;;
+        sceneeval100|sceneeval500)
+            load_sceneeval_registry
+            ;;
         *)
-            echo "ERROR: CASE_SET must be new3 or legacy8, got '$CASE_SET'" >&2
+            echo "ERROR: unsupported case set '$CASE_SET'" >&2
             exit 2
             ;;
     esac
 
-    local case_entry case_id
+    local case_entry case_id critic_goal prompt scene_scope difficulty
     CASE_SET_IDS=""
     for case_entry in "${CASES[@]}"; do
-        IFS='|' read -r case_id _ <<< "$case_entry"
+        IFS='|' read -r case_id critic_goal prompt scene_scope <<< "$case_entry"
+        scene_scope="${scene_scope:-single_room}"
+        CASE_SCOPE_BY_ID["$case_id"]="$scene_scope"
+        if [[ "$CASE_SET" == sceneeval* ]]; then
+            difficulty="${critic_goal#SceneEval }"
+            CASE_DIFFICULTY_BY_ID["$case_id"]="$difficulty"
+            if [ "$scene_scope" = "multi_room" ]; then
+                SCENEEVAL_MULTI_ROOM_COUNT=$((SCENEEVAL_MULTI_ROOM_COUNT + 1))
+                if [ -n "$SCENEEVAL_MULTI_ROOM_IDS" ]; then
+                    SCENEEVAL_MULTI_ROOM_IDS+=","
+                fi
+                SCENEEVAL_MULTI_ROOM_IDS+="$case_id"
+            else
+                SCENEEVAL_SINGLE_ROOM_COUNT=$((SCENEEVAL_SINGLE_ROOM_COUNT + 1))
+            fi
+            continue
+        fi
         if [ -n "$CASE_SET_IDS" ]; then
             CASE_SET_IDS+=", "
         fi
         CASE_SET_IDS+="$case_id"
     done
+    if [[ "$CASE_SET" == sceneeval* ]]; then
+        CASE_SET_IDS="0-$((SCENEEVAL_SIZE - 1))"
+    fi
 }
 
 select_case_registry
@@ -715,7 +989,9 @@ fi
 # the same run configuration as the parent.
 export SCENEEXPERT_EXPERIMENT="$EXPERIMENT"
 export PYTHON_BIN MODEL_NAME RUN_ID OUTPUT_ROOT CASE_SET CASE_SET_IDS
+export SCENEEVAL_SIZE SCENEEVAL_ANNOTATIONS DIFFICULTY_SELECTION
 export SCENE_BATCH_SIZE SCENE_WORKERS_PER_PROCESS SCENE_RETRY_ATTEMPTS
+export SHARED_BASE_BATCH_RETRIES SHARED_BASE_RETRY_PARALLELISM
 export CRITIC_PROBE_PARALLEL CRITIC_PROBE_INNER_PARALLELISM
 export CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM
 export CRITIC_PROBE_PORT_BASE CRITIC_PROBE_PORT_BLOCK_SIZE
@@ -727,13 +1003,18 @@ export FINAL_VIEW_PYTHON_BIN
 export PIPELINE_STOP_STAGE BRANCH_FROM_SHARED_BASE SHARED_BASE_STOP_STAGE
 export SHARED_BASE_ROOT GENERATE_SHARED_BASE MAX_CASES CASE_FILTER
 export INCLUDE_HOLDOUT_CASES DRY_RUN SCENE_SELECTION SCENE_SELECTION_EXPLICIT
+export SCENEEVAL_AFTER_RUN
 export REPLAY_FROM_PATH REPLAY_MODE RESUME_FURNITURE_RENDER_MODE
 export SCENEEXPERT_DISABLE_ARTICULATED="$DISABLE_ARTICULATED"
 export SCENEEXPERT_DISABLE_MATERIALS="$DISABLE_MATERIALS"
 export SCENEEXPERT_DISABLE_BWRAP="$DISABLE_BWRAP"
 export SCENEEXPERT_SKIP_MAIN_BPY_IMPORT="$SKIP_MAIN_BPY_IMPORT"
 export FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS
+export QUALITY_FAILURE_POLICY SCENE_FAILURE_POLICY
+export SCENEEXPERT_CHAT_COMPLETIONS_STREAM
 export HSSD_RETRIEVAL_BACKEND HSSD_RENDERED_ASSET_CHOICE
+export HSSD_ZVEC_COLLECTION_PATH
+export HSSD_ALL_ASSETS_MANIFEST_PATH
 export CONVEX_MAX_OMP_THREADS SCENEEXPERT_OMP_NUM_THREADS
 export FLOOR_PLAN_DESIGNER_THINKING FLOOR_PLAN_CRITIC_THINKING
 export FURNITURE_DESIGNER_THINKING FURNITURE_CRITIC_THINKING
@@ -808,6 +1089,12 @@ echo "experiment: $EXPERIMENT"
 echo "run id: $RUN_ID"
 echo "output root: $OUTPUT_ROOT"
 echo "case set: $CASE_SET"
+if [[ "$CASE_SET" == sceneeval* ]]; then
+    echo "SceneEval annotations: $SCENEEVAL_ANNOTATIONS"
+    echo "SceneEval difficulty: $DIFFICULTY_SELECTION"
+    echo "SceneEval scope: single_room only ($SCENEEVAL_SINGLE_ROOM_COUNT supported, $SCENEEVAL_MULTI_ROOM_COUNT filtered)"
+    echo "SceneEval filtered multi_room IDs: ${SCENEEVAL_MULTI_ROOM_IDS:-none}"
+fi
 echo "model: $MODEL_NAME"
 echo "OpenAI base URL: $OPENAI_BASE_URL"
 if [ -n "${SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR:-}" ]; then
@@ -816,12 +1103,33 @@ fi
 echo "batch size: $SCENE_BATCH_SIZE"
 echo "parallel batches: $CRITIC_PROBE_PARALLEL ($CRITIC_PROBE_INNER_PARALLELISM)"
 echo "scene retries after transient/native failure: $SCENE_RETRY_ATTEMPTS"
+echo "shared-base failed-batch recovery attempts: $SHARED_BASE_BATCH_RETRIES (parallelism $SHARED_BASE_RETRY_PARALLELISM)"
 echo "port allocation: base=$CRITIC_PROBE_PORT_BASE block=$CRITIC_PROBE_PORT_BLOCK_SIZE"
 echo "continue after batch failure: $CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE"
 echo "final-view parallelism: $CRITIC_PROBE_FINAL_VIEW_PARALLELISM"
 echo "fail unresolved furniture hard constraints: $FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS"
 echo "quality failure policy: $QUALITY_FAILURE_POLICY"
+echo "critic-on scene failure policy: $SCENE_FAILURE_POLICY (shared-base: strict)"
+echo "Chat Completions streaming: $SCENEEXPERT_CHAT_COMPLETIONS_STREAM"
 echo "HSSD retrieval: backend=$HSSD_RETRIEVAL_BACKEND rendered_asset_choice=$HSSD_RENDERED_ASSET_CHOICE"
+if [ "$HSSD_RETRIEVAL_BACKEND" = "embedding" ] || [ "$HSSD_RETRIEVAL_BACKEND" = "all_assets_embedding" ]; then
+    if [ -z "$HSSD_ZVEC_COLLECTION_PATH" ]; then
+        echo "ERROR: HSSD_ZVEC_COLLECTION_PATH is required for embedding retrieval" >&2
+        exit 1
+    fi
+    if ! compgen -G "$HSSD_ZVEC_COLLECTION_PATH/0/embedding.index.*.proxima" > /dev/null; then
+        echo "ERROR: Zvec index is missing or unreadable: $HSSD_ZVEC_COLLECTION_PATH" >&2
+        exit 1
+    fi
+    echo "HSSD zvec collection: $HSSD_ZVEC_COLLECTION_PATH"
+    if [ "$HSSD_RETRIEVAL_BACKEND" = "all_assets_embedding" ]; then
+        if [ -z "$HSSD_ALL_ASSETS_MANIFEST_PATH" ] || [ ! -f "$HSSD_ALL_ASSETS_MANIFEST_PATH" ]; then
+            echo "ERROR: HSSD_ALL_ASSETS_MANIFEST_PATH must name the shared all-assets JSONL manifest" >&2
+            exit 1
+        fi
+        echo "HSSD all-assets manifest: $HSSD_ALL_ASSETS_MANIFEST_PATH"
+    fi
+fi
 echo "skip controller bpy import: $SKIP_MAIN_BPY_IMPORT"
 if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
     echo "convex decomposition max OMP threads: $CONVEX_MAX_OMP_THREADS"
@@ -836,12 +1144,33 @@ echo "thinking profile: floor_plan=${FLOOR_PLAN_DESIGNER_THINKING}/${FLOOR_PLAN_
 echo "shared base: $BRANCH_FROM_SHARED_BASE (generate=$GENERATE_SHARED_BASE)"
 echo "replay source: ${REPLAY_FROM_PATH:-none} (mode=$REPLAY_MODE)"
 echo "holdout cases: $INCLUDE_HOLDOUT_CASES"
+echo "SceneEval no-VLM geometry after run: $SCENEEVAL_AFTER_RUN"
 echo "scene selection: $SCENE_SELECTION"
 echo "==============================================="
+
+difficulty_selected() {
+    local case_id="$1" level
+    if [[ "$CASE_SET" != sceneeval* ]] || [ "$DIFFICULTY_SELECTION" = "all" ]; then
+        return 0
+    fi
+    IFS=',' read -r -a difficulty_levels <<< "$DIFFICULTY_SELECTION"
+    for level in "${difficulty_levels[@]}"; do
+        if [ "${CASE_DIFFICULTY_BY_ID[$case_id]:-}" = "$level" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
 
 case_selected() {
     local case_id="$1"
     local filter
+    if [ "${CASE_SCOPE_BY_ID[$case_id]:-single_room}" != "single_room" ]; then
+        return 1
+    fi
+    if ! difficulty_selected "$case_id"; then
+        return 1
+    fi
     if [ "$SCENE_SELECTION_EXPLICIT" = "true" ] || [ "$SCENE_SELECTION" != "all" ]; then
         if [ "$SCENE_SELECTION" = "all" ]; then
             return 0
@@ -866,8 +1195,22 @@ case_selected() {
     return 1
 }
 
+validate_nonempty_case_selection() {
+    local entry case_id
+    for entry in "${CASES[@]}"; do
+        IFS='|' read -r case_id _ <<< "$entry"
+        if case_selected "$case_id"; then
+            return 0
+        fi
+    done
+    echo "ERROR: the scene and difficulty filters select no cases from '$CASE_SET'" >&2
+    exit 2
+}
+
+validate_nonempty_case_selection
+
 validate_shared_base_case_mapping() {
-    local index entry case_id _critic_goal _prompt batch_index batch_csv selected=0
+    local index entry case_id _critic_goal _prompt _scene_scope batch_index batch_csv selected=0
 
     if [ "$BRANCH_FROM_SHARED_BASE" != "true" ] \
         || [ "$GENERATE_SHARED_BASE" = "true" ]; then
@@ -876,7 +1219,7 @@ validate_shared_base_case_mapping() {
 
     for index in "${!CASES[@]}"; do
         entry="${CASES[$index]}"
-        IFS='|' read -r case_id _critic_goal _prompt <<< "$entry"
+        IFS='|' read -r case_id _critic_goal _prompt _scene_scope <<< "$entry"
         if ! case_selected "$case_id"; then
             continue
         fi
@@ -934,6 +1277,58 @@ COMMON_ARGS=(
     "manipuland_agent.asset_manager.hssd.rendered_asset_choice.enabled=${HSSD_RENDERED_ASSET_CHOICE}"
 )
 
+# Optional SceneExpert ablation controls. An unset variable adds no Hydra
+# override, preserving the selected experiment and main's existing defaults.
+# ``++`` supports both keys inherited from the root SceneExpert config and keys
+# absent from an experiment-specific override block.
+append_sceneexpert_component_override() {
+    local env_name="$1" component="$2" raw normalized
+    raw="${!env_name:-}"
+    if [ -z "$raw" ]; then
+        return 0
+    fi
+    case "${raw,,}" in
+        1|true|yes|on) normalized="true" ;;
+        0|false|no|off) normalized="false" ;;
+        *)
+            echo "ERROR: $env_name must be a boolean, got '$raw'" >&2
+            exit 2
+            ;;
+    esac
+    COMMON_ARGS+=(
+        "++experiment.scene_expert.components.${component}.enabled=${normalized}"
+    )
+    echo "SceneExpert component override: ${component}=${normalized}"
+}
+
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_TASK_COMPILER_ENABLED task_compiler
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_HARNESS_ENABLED harness
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_HARNESS_BUDGET_ENABLED harness_budget
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_GLOBAL_PLANNER_ENABLED global_planner
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_PROMPT_INJECTION_ENABLED prompt_injection
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_FAST_MEMORY_RETRIEVAL_ENABLED fast_memory_retrieval
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_MEMORY_WRITER_ENABLED memory_writer
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_STAGE_WORKING_MEMORY_ENABLED stage_working_memory
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_VERIFIER_ENABLED verifier
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_REPAIR_ENABLED repair
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_CRITIC_BRIDGE_ENABLED critic_bridge
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_TRACE_ENABLED trace
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_STRUCTURED_LLM_ENABLED structured_llm
+append_sceneexpert_component_override SCENEEXPERT_COMPONENT_SLOW_MEMORY_CAPTURE_ENABLED slow_memory_capture
+
+if [ "$HSSD_RETRIEVAL_BACKEND" = "embedding" ] || [ "$HSSD_RETRIEVAL_BACKEND" = "all_assets_embedding" ]; then
+    # Do not rely on paths.hssd_data_dir for the zvec index: on ACP hosts it
+    # resolves through the protected /mnt/afs FUSE mount. Explicitly override
+    # every agent so the override survives internal batch re-entry and Hydra
+    # composes the same writable local collection in each scene process.
+    COMMON_ARGS+=(
+        "furniture_agent.asset_manager.hssd.zvec.collection_path=${HSSD_ZVEC_COLLECTION_PATH}"
+        "wall_agent.asset_manager.hssd.zvec.collection_path=${HSSD_ZVEC_COLLECTION_PATH}"
+        "ceiling_agent.asset_manager.hssd.zvec.collection_path=${HSSD_ZVEC_COLLECTION_PATH}"
+        "manipuland_agent.asset_manager.hssd.zvec.collection_path=${HSSD_ZVEC_COLLECTION_PATH}"
+    )
+fi
+
 if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
     COMMON_ARGS+=(
         "furniture_agent.collision_geometry.max_omp_threads=${CONVEX_MAX_OMP_THREADS}"
@@ -975,10 +1370,10 @@ fi
 
 port_args=()
 build_port_args() {
-    local batch_index="$1"
-    local block_base=$((CRITIC_PROBE_PORT_BASE + (batch_index - 1) * CRITIC_PROBE_PORT_BLOCK_SIZE))
+    local port_slot="$1"
+    local block_base=$((CRITIC_PROBE_PORT_BASE + (port_slot - 1) * CRITIC_PROBE_PORT_BLOCK_SIZE))
     if [ $((block_base + 374)) -gt 65535 ]; then
-        echo "ERROR: batch $batch_index port block exceeds 65535" >&2
+        echo "ERROR: concurrency slot $port_slot port block exceeds 65535" >&2
         exit 1
     fi
     port_args=(
@@ -1002,7 +1397,8 @@ build_port_args() {
 run_batch() {
     local run_kind="$1"
     local batch_index="$2"
-    shift 2
+    local port_slot="$3"
+    shift 3
     local batch_entries=("$@")
     local batch_label
     batch_label=$(printf 'batch_%03d' "$batch_index")
@@ -1010,12 +1406,13 @@ run_batch() {
     local batch_csv="$run_root/batch_cases.csv"
     local stop_stage="$PIPELINE_STOP_STAGE"
     local critic_enabled=true
+    local scene_failure_policy="$SCENE_FAILURE_POLICY"
     local start_stage=""
     local resume_from=""
     local shared_base_batch_root=""
     local asset_choice_audit_path="$run_root/hydra/asset_choice_audit.jsonl"
 
-    build_port_args "$batch_index"
+    build_port_args "$port_slot"
     mkdir -p "$run_root"
     printf 'scene_index,prompt,case_id,critic_goal\n' > "$batch_csv"
     for entry in "${batch_entries[@]}"; do
@@ -1026,6 +1423,7 @@ run_batch() {
     if [ "$run_kind" = "shared_base" ]; then
         stop_stage="$SHARED_BASE_STOP_STAGE"
         critic_enabled=false
+        scene_failure_policy="strict"
     elif [ "$BRANCH_FROM_SHARED_BASE" = "true" ]; then
         start_stage="$BRANCH_START_STAGE"
         shared_base_batch_root="$SHARED_BASE_ROOT/$batch_label"
@@ -1059,6 +1457,7 @@ run_batch() {
         "+name=critic_on_${batch_label}"
         "${COMMON_ARGS[@]}" "${port_args[@]}"
         "experiment.tasks=[generate_scenes]"
+        "experiment.scene_failure_policy=${scene_failure_policy}"
         "experiment.pipeline.stop_stage=${stop_stage}"
         "experiment.scenebenchmark_critic.enabled=${critic_enabled}"
         "hydra.run.dir=${run_root}/hydra"
@@ -1071,7 +1470,7 @@ run_batch() {
         fi
     fi
 
-    echo "[$run_kind/$batch_label] ${cmd[*]}"
+    echo "[$run_kind/$batch_label slot=$port_slot] ${cmd[*]}"
     if [ "$DRY_RUN" = "true" ]; then
         return 0
     fi
@@ -1112,6 +1511,7 @@ run_batches() {
     local run_kind="$1"
     local active_pids=()
     local active_labels=()
+    local active_slots=()
     local batch_index=0
     local source_batch_index=0
     local selected=0
@@ -1190,6 +1590,7 @@ run_batches() {
         done
         active_pids=()
         active_labels=()
+        active_slots=()
     }
 
     on_batch_signal() {
@@ -1231,9 +1632,10 @@ run_batches() {
         for i in "${!active_pids[@]}"; do
             if [ "${active_pids[$i]}" = "$finished_pid" ]; then
                 label="${active_labels[$i]}"
-                unset 'active_pids[i]' 'active_labels[i]'
+                unset 'active_pids[i]' 'active_labels[i]' 'active_slots[i]'
                 active_pids=("${active_pids[@]}")
                 active_labels=("${active_labels[@]}")
+                active_slots=("${active_slots[@]}")
                 break
             fi
         done
@@ -1250,6 +1652,7 @@ run_batches() {
             # in its process group. Keep that group in cleanup's input.
             active_pids+=("$finished_pid")
             active_labels+=("$label")
+            active_slots+=("0")
             # Fail fast. Waiting for unrelated scenes after one batch crashes
             # can keep an ACP allocation alive indefinitely if one of them is
             # also stuck in native or server shutdown code.
@@ -1261,19 +1664,37 @@ run_batches() {
     }
 
     launch() {
-        local label
+        local label port_slot=0 used_slot candidate active_slot
         label=$(printf 'batch_%03d' "$batch_index")
         if [ "$CRITIC_PROBE_PARALLEL" = "true" ]; then
+            for ((candidate = 1; candidate <= CRITIC_PROBE_INNER_PARALLELISM; candidate++)); do
+                used_slot=false
+                for active_slot in "${active_slots[@]}"; do
+                    if [ "$active_slot" -eq "$candidate" ]; then
+                        used_slot=true
+                        break
+                    fi
+                done
+                if [ "$used_slot" = "false" ]; then
+                    port_slot="$candidate"
+                    break
+                fi
+            done
+            if [ "$port_slot" -eq 0 ]; then
+                echo "ERROR: no free service-port slot for $run_kind/$label" >&2
+                return 1
+            fi
             # A distinct process group makes cleanup include all descendants.
             # Re-entering this script avoids exporting shell functions/arrays.
-            setsid bash "$0" --internal-run-batch "$run_kind" "$batch_index" "${batch_entries[@]}" \
+            setsid bash "$0" --internal-run-batch "$run_kind" "$batch_index" "$port_slot" "${batch_entries[@]}" \
                 > "$OUTPUT_ROOT/$run_kind/${label}.log" 2>&1 &
             active_pids+=("$!")
             active_labels+=("$label")
+            active_slots+=("$port_slot")
             while [ "${#active_pids[@]}" -ge "$CRITIC_PROBE_INNER_PARALLELISM" ]; do wait_one; done
         else
             local rc=0
-            if run_batch "$run_kind" "$batch_index" "${batch_entries[@]}"; then
+            if run_batch "$run_kind" "$batch_index" 1 "${batch_entries[@]}"; then
                 :
             else
                 rc=$?
@@ -1289,7 +1710,7 @@ run_batches() {
     }
 
     for index in "${!CASES[@]}"; do
-        IFS='|' read -r case_id critic_goal prompt <<< "${CASES[$index]}"
+        IFS='|' read -r case_id critic_goal prompt _scene_scope <<< "${CASES[$index]}"
         if ! case_selected "$case_id"; then continue; fi
         if [ "$MAX_CASES" -gt 0 ] && [ "$selected" -ge "$MAX_CASES" ]; then break; fi
         source_batch_index=$((index / SCENE_BATCH_SIZE + 1))
@@ -1313,18 +1734,157 @@ run_batches() {
     fi
 }
 
+shared_base_incomplete_scene_ids() {
+    local index case_id critic_goal prompt batch_index status_path status
+    local selected=0 ids=""
+
+    for index in "${!CASES[@]}"; do
+        IFS='|' read -r case_id critic_goal prompt _scene_scope <<< "${CASES[$index]}"
+        if ! case_selected "$case_id"; then continue; fi
+        if [ "$MAX_CASES" -gt 0 ] && [ "$selected" -ge "$MAX_CASES" ]; then break; fi
+        selected=$((selected + 1))
+        batch_index=$((index / SCENE_BATCH_SIZE + 1))
+        status_path="$OUTPUT_ROOT/shared_base/$(printf 'batch_%03d' "$batch_index")/hydra/scene_$(printf '%03d' "$index")/scene_status.json"
+        status=""
+        if [ -f "$status_path" ]; then
+            status=$(sed -n 's/^[[:space:]]*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$status_path" | head -n 1)
+        fi
+        case "$status" in
+            completed|completed_with_quality_issues) ;;
+            *)
+                if [ -n "$ids" ]; then ids+=","; fi
+                ids+="$case_id"
+                ;;
+        esac
+    done
+    printf '%s' "$ids"
+}
+
+run_shared_base_with_recovery() {
+    local attempt failed_scene_ids=""
+    local saved_scene_selection="$SCENE_SELECTION"
+    local saved_scene_selection_explicit="$SCENE_SELECTION_EXPLICIT"
+    local saved_max_cases="$MAX_CASES"
+    local saved_parallelism="$CRITIC_PROBE_INNER_PARALLELISM"
+    local saved_parallel="$CRITIC_PROBE_PARALLEL"
+
+    if run_batches shared_base; then
+        return 0
+    fi
+
+    for ((attempt = 1; attempt <= SHARED_BASE_BATCH_RETRIES; attempt++)); do
+        failed_scene_ids=$(shared_base_incomplete_scene_ids)
+        if [ -z "$failed_scene_ids" ]; then
+            echo "shared-base batches reported an error but every selected scene has a completion marker; continuing"
+            return 0
+        fi
+        echo "WARNING: retrying incomplete shared-base scenes (attempt $attempt/$SHARED_BASE_BATCH_RETRIES) with parallelism $SHARED_BASE_RETRY_PARALLELISM: $failed_scene_ids" >&2
+        SCENE_SELECTION="$failed_scene_ids"
+        SCENE_SELECTION_EXPLICIT="true"
+        MAX_CASES=0
+        CRITIC_PROBE_INNER_PARALLELISM="$SHARED_BASE_RETRY_PARALLELISM"
+        CRITIC_PROBE_PARALLEL="true"
+        if run_batches shared_base; then
+            :
+        fi
+        failed_scene_ids=$(shared_base_incomplete_scene_ids)
+        if [ -z "$failed_scene_ids" ]; then
+            SCENE_SELECTION="$saved_scene_selection"
+            SCENE_SELECTION_EXPLICIT="$saved_scene_selection_explicit"
+            MAX_CASES="$saved_max_cases"
+            CRITIC_PROBE_INNER_PARALLELISM="$saved_parallelism"
+            CRITIC_PROBE_PARALLEL="$saved_parallel"
+            return 0
+        fi
+    done
+
+    SCENE_SELECTION="$saved_scene_selection"
+    SCENE_SELECTION_EXPLICIT="$saved_scene_selection_explicit"
+    MAX_CASES="$saved_max_cases"
+    CRITIC_PROBE_INNER_PARALLELISM="$saved_parallelism"
+    CRITIC_PROBE_PARALLEL="$saved_parallel"
+    echo "ERROR: shared-base recovery exhausted; incomplete scene IDs: $failed_scene_ids" >&2
+    return 1
+}
+
 if [ "${1:-}" = "--internal-run-batch" ]; then
     shift
     run_batch "$@"
     exit $?
 fi
 
-if [ "$GENERATE_SHARED_BASE" = "true" ]; then
-    run_batches shared_base
+# Evaluation-only inventory: write the whole assignment before workers launch.
+# Per-batch manifests alone omit cases never started after an early failure.
+if [ "$DRY_RUN" = "false" ]; then
+    mkdir -p "$OUTPUT_ROOT"
+    printf 'batch_id,scene_index,prompt,case_id,critic_goal\n' > "$OUTPUT_ROOT/assigned_cases.csv"
+    assigned_count=0
+    for index in "${!CASES[@]}"; do
+        IFS='|' read -r case_id critic_goal prompt _scene_scope <<< "${CASES[$index]}"
+        if ! case_selected "$case_id"; then continue; fi
+        if [ "$MAX_CASES" -gt 0 ] && [ "$assigned_count" -ge "$MAX_CASES" ]; then break; fi
+        batch_index=$((index / SCENE_BATCH_SIZE + 1))
+        printf 'batch_%03d,%s,%s,%s,%s\n' "$batch_index" "$index" \
+            "$(csv_quote "$prompt")" "$(csv_quote "$case_id")" "$(csv_quote "$critic_goal")" \
+            >> "$OUTPUT_ROOT/assigned_cases.csv"
+        assigned_count=$((assigned_count + 1))
+    done
 fi
-run_batches critic_on
+
+run_exit_code=0
+if [ "$GENERATE_SHARED_BASE" = "true" ]; then
+    if run_shared_base_with_recovery; then
+        :
+    else
+        run_exit_code=$?
+    fi
+fi
+if [ "$run_exit_code" -eq 0 ]; then
+    if run_batches critic_on; then
+        :
+    else
+        run_exit_code=$?
+    fi
+fi
+
+# Metrics are generated for successful and failed probes alike. A metrics write
+# failure is a probe failure, but it never replaces an earlier generation code.
+if [ "$DRY_RUN" = "false" ]; then
+    echo "collecting independent run metrics: $OUTPUT_ROOT/metrics"
+    metrics_exit_code=0
+    if "$PYTHON_BIN" -m scenesmith.scene_expert.run_metrics \
+        --output-root "$OUTPUT_ROOT" \
+        --run-id "$RUN_ID" \
+        --process-exit-code "$run_exit_code"; then
+        :
+    else
+        metrics_exit_code=$?
+        echo "ERROR: run metrics collection failed with exit code $metrics_exit_code; generation artifacts are unchanged" >&2
+        if [ "$run_exit_code" -eq 0 ]; then
+            run_exit_code="$metrics_exit_code"
+        fi
+    fi
+    if [ "$SCENEEVAL_AFTER_RUN" = "true" ]; then
+        echo "collecting SceneEval no-VLM geometry metrics: $OUTPUT_ROOT/sceneeval"
+        sceneeval_exit_code=0
+        if "$PYTHON_BIN" -m scenesmith.scene_expert.sceneeval_geometry \
+            --output-root "$OUTPUT_ROOT"; then
+            :
+        else
+            sceneeval_exit_code=$?
+            echo "ERROR: SceneEval geometry collection failed with exit code $sceneeval_exit_code; generation artifacts are unchanged" >&2
+            if [ "$run_exit_code" -eq 0 ]; then
+                run_exit_code="$sceneeval_exit_code"
+            fi
+        fi
+    fi
+fi
 if [ "$CRITIC_PROBE_RENDER_FINAL_VIEWS" = "true" ] \
     && [ "$PIPELINE_STOP_STAGE" != "manipuland" ]; then
     echo "skipping final combined-house views: pipeline stops at $PIPELINE_STOP_STAGE"
+fi
+if [ "$run_exit_code" -ne 0 ]; then
+    echo "critic-on probe failed with exit code $run_exit_code: $OUTPUT_ROOT" >&2
+    exit "$run_exit_code"
 fi
 echo "critic-on probe complete: $OUTPUT_ROOT"

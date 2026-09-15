@@ -158,7 +158,7 @@ def test_rejected_candidate_restores_pose_without_copying_mesh(
         fake_evaluate,
     )
 
-    candidate = _best_candidate(
+    candidate, evaluated = _best_candidate(
         scene,
         storage,
         current_score=(1, 0, 0.0),
@@ -169,6 +169,7 @@ def test_rejected_candidate_restores_pose_without_copying_mesh(
     )
 
     assert candidate is None
+    assert evaluated <= 2
     np.testing.assert_allclose(storage.transform.GetAsMatrix4(), old_storage)
     np.testing.assert_allclose(child.transform.GetAsMatrix4(), old_child)
     np.testing.assert_allclose(surface.transform.GetAsMatrix4(), old_surface)

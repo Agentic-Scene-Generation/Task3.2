@@ -284,6 +284,7 @@ collision_geometry:
 openai:
   model: ${llm.model_id}
   service_tier: ${openai.service_tier}
+  reasoning_provider: ${openai.reasoning_provider}
   # Vision detail level for image processing
   vision_detail: "low"
   # How much computational effort to spend on reasoning for different tasks.
@@ -300,6 +301,10 @@ openai:
     mesh_analysis: "none"  # For mesh physics analysis
     asset_analysis: "none"  # For asset router request analysis
     asset_validation: "none"  # For asset router mesh validation
+  max_output_tokens:
+    planner: 1536
+    designer: 24576
+    critic: 12288
   # How verbose the model's output should be.
   # Options: "low", "medium", "high".
   # Lower verbosity = faster and cheaper but may omit details.
@@ -335,9 +340,10 @@ context_furniture:
 # OpenAI API timeout configuration (seconds).
 api_timeout:
   connect: 10.0  # Connection establishment
-  read: 300  # 5 minutes
-  write: 300  # 5 minutes
-  pool: 300  # 5 minutes
+  read: 600  # 10 minutes
+  write: 600  # 10 minutes
+  pool: 600  # 10 minutes
+  max_retries: 0  # Scene-level typed retry owns transient recovery.
 
 # Loop detection configuration for function tools
 loop_detection:
@@ -348,9 +354,15 @@ loop_detection:
 # Maximum number of critique-and-improve rounds before stopping
 max_critique_rounds: 1
 
-# Process only the most valuable support surfaces by default. The previous
-# per-furniture loop could spend hours on every bed/wardrobe/nightstand.
+# Process only the most valuable furniture targets by default. Each selected
+# target may expose more than one extracted support surface to its agent run.
+# The previous loop could spend hours on every bed/wardrobe/nightstand.
 max_target_furniture: 2
+
+# Deterministic semantic repairs (for example, monitor orientation and dining
+# place-setting alignment) are separate from physical post-processing.
+code_level_auto_repair:
+  enabled: true
 
 # Optional exact-ID allowlist for targeted checkpoint replays. Empty keeps the
 # normal analyzer-selected behavior.
@@ -427,7 +439,7 @@ support_surface_extraction:
 
   # Surface filtering parameters
   filtering:
-    min_surface_area_m2: 0.1  # 10 cm² minimum area (filters tiny surfaces)
+    min_surface_area_m2: 0.003  # 30 cm² minimum area (HSM default)
     min_area_ratio: 0.20  # Minimum mesh area / bbox area ratio (filters artifacts)
     min_inscribed_radius_m: 0.10  # 10 cm minimum inscribed radius (filters slivers)
 

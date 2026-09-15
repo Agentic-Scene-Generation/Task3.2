@@ -4,6 +4,8 @@ import json
 import random
 import unittest
 
+from types import SimpleNamespace
+
 from scenesmith.agent_utils.house import (
     HouseLayout,
     Opening,
@@ -17,9 +19,13 @@ from scenesmith.floor_plan_agents.reservation_validator import (
     opening_free_spans,
     validate_floor_plan_reservations,
 )
+from scenesmith.floor_plan_agents.stateful_floor_plan_agent import (
+    StatefulFloorPlanAgent,
+)
 from scenesmith.floor_plan_agents.tools.floor_plan_tools import FloorPlanTools
 from scenesmith.floor_plan_agents.tools.room_placement import get_shared_edge
 from scenesmith.scene_expert.schemas import (
+    ExplicitFloorGeometryPolicy,
     FloorPlanReservation,
     FloorPlanReservationManifest,
 )
@@ -30,6 +36,13 @@ class _CapturingFloorPlanAgent:
         self.cfg = cfg
         self.logger = logger
         self.render_gpu_id = render_gpu_id
+
+
+def test_floor_plan_mutation_accounting_hashes_layout_without_room_scene():
+    agent = object.__new__(StatefulFloorPlanAgent)
+    agent.layout = SimpleNamespace(content_hash=lambda: "floor-plan-hash")
+
+    assert agent._planner_scene_hash() == "floor-plan-hash"
 
 
 def test_floor_plan_agent_receives_experiment_materials_endpoint():
@@ -65,6 +78,139 @@ def test_adaptive_implicit_window_budget_thresholds():
     assert adaptive_implicit_window_budget(50.01) == 3
 
 
+def test_explicit_polygon_geometry_makes_functional_area_advisory() -> None:
+    layout = HouseLayout()
+    tools = FloorPlanTools(layout=layout, mode="polygon")
+    result = tools._generate_polygon_room_impl(
+        json.dumps(
+            {
+                "type": "bedroom",
+                "vertices": [[0.0, 0.0], [3.19, 0.0], [3.19, 3.19], [0.0, 3.19]],
+            }
+        )
+    )
+    assert result.success
+    manifest = FloorPlanReservationManifest(
+        enabled=True,
+        preserve_entrance_route=False,
+        adaptive_window_budget=False,
+        explicit_geometry=ExplicitFloorGeometryPolicy(
+            detected=True,
+            source="explicit_prompt",
+            mode="polygon",
+            expected_area_m2=10.1761,
+            expected_vertices=[(0.0, 0.0), (3.19, 0.0), (3.19, 3.19), (0.0, 3.19)],
+            functional_zone_area_policy="advisory",
+        ),
+        reservations=[
+            FloorPlanReservation(
+                reservation_id="bedroom-zones",
+                kind="functional_zone",
+                room_type="bedroom",
+                min_zone_area_m2=13.0,
+            )
+        ],
+    )
+
+    validation = validate_floor_plan_reservations(layout, manifest)
+
+    assert validation.passed
+    assert not validation.issues
+    assert validation.advisories == [
+        {
+            "room_type": "bedroom",
+            "required_m2": 13.0,
+            "available_m2": 10.1761,
+            "issue_type": "functional_zone_area_below_advisory_minimum",
+            "policy": "explicit_geometry_advisory",
+            "blocking": False,
+        }
+    ]
+
+
+def test_explicit_geometry_keeps_window_failures_hard() -> None:
+    layout = HouseLayout()
+    tools = FloorPlanTools(layout=layout, mode="polygon")
+    result = tools._generate_polygon_room_impl(
+        json.dumps(
+            {
+                "type": "bedroom",
+                "vertices": [[0.0, 0.0], [3.19, 0.0], [3.19, 3.19], [0.0, 3.19]],
+            }
+        )
+    )
+    assert result.success
+    manifest = FloorPlanReservationManifest(
+        enabled=True,
+        preserve_entrance_route=False,
+        adaptive_window_budget=False,
+        explicit_window_count=1,
+        explicit_window_required=True,
+        explicit_geometry=ExplicitFloorGeometryPolicy(
+            detected=True,
+            source="explicit_prompt",
+            mode="polygon",
+            expected_area_m2=10.1761,
+            expected_vertices=[(0.0, 0.0), (3.19, 0.0), (3.19, 3.19), (0.0, 3.19)],
+            functional_zone_area_policy="advisory",
+        ),
+        reservations=[
+            FloorPlanReservation(
+                reservation_id="bedroom-zones",
+                kind="functional_zone",
+                room_type="bedroom",
+                min_zone_area_m2=13.0,
+            )
+        ],
+    )
+
+    validation = validate_floor_plan_reservations(layout, manifest)
+
+    assert not validation.passed
+    assert any(
+        issue["issue_type"] == "missing_explicit_windows" for issue in validation.issues
+    )
+    assert any(
+        advisory["issue_type"] == "functional_zone_area_below_advisory_minimum"
+        for advisory in validation.advisories
+    )
+
+
+def test_explicit_polygon_mismatch_is_hard_failure() -> None:
+    layout = HouseLayout()
+    tools = FloorPlanTools(layout=layout, mode="polygon")
+    result = tools._generate_polygon_room_impl(
+        json.dumps(
+            {
+                "type": "bedroom",
+                "vertices": [[0.0, 0.0], [4.0, 0.0], [4.0, 3.0], [0.0, 3.0]],
+            }
+        )
+    )
+    assert result.success
+    manifest = FloorPlanReservationManifest(
+        enabled=True,
+        preserve_entrance_route=False,
+        adaptive_window_budget=False,
+        explicit_geometry=ExplicitFloorGeometryPolicy(
+            detected=True,
+            source="explicit_prompt",
+            mode="polygon",
+            expected_area_m2=10.1761,
+            expected_vertices=[(0.0, 0.0), (3.19, 0.0), (3.19, 3.19), (0.0, 3.19)],
+            functional_zone_area_policy="advisory",
+        ),
+    )
+
+    validation = validate_floor_plan_reservations(layout, manifest)
+
+    assert not validation.passed
+    assert any(
+        issue["issue_type"] == "explicit_geometry_mismatch"
+        for issue in validation.issues
+    )
+
+
 def test_opening_free_spans_treats_position_as_left_edge():
     layout = HouseLayout()
     tools = FloorPlanTools(layout=layout, mode="house")
@@ -91,6 +237,244 @@ def test_opening_free_spans_treats_position_as_left_edge():
     )
 
     assert opening_free_spans(wall) == [(0.0, 0.85), (2.15, 5.0)]
+
+
+def test_opposed_anchor_pair_uses_an_alternative_opening_free_axis() -> None:
+    layout = HouseLayout()
+    tools = FloorPlanTools(layout=layout, mode="house")
+    result = tools._generate_room_specs_impl(
+        room_specs_json=json.dumps(
+            [
+                {
+                    "type": "living_room",
+                    "prompt": "Living room",
+                    "width": 6.0,
+                    "depth": 5.0,
+                }
+            ]
+        )
+    )
+    assert result.success
+    room = layout.placed_rooms[0]
+    walls = {wall.direction: wall for wall in room.walls}
+    for direction in (WallDirection.EAST, WallDirection.WEST):
+        wall = walls[direction]
+        wall.openings.append(
+            Opening(
+                opening_id=f"blocked_{direction.value}",
+                opening_type=OpeningType.DOOR,
+                position_along_wall=0.0,
+                width=wall.length,
+                height=2.1,
+            )
+        )
+    manifest = FloorPlanReservationManifest(
+        enabled=True,
+        preserve_entrance_route=False,
+        adaptive_window_budget=False,
+        reservations=[
+            FloorPlanReservation(
+                reservation_id="seating-media-axis",
+                kind="opposed_anchor_pair",
+                room_type="living_room",
+                subject_categories=["seating_zone"],
+                target_categories=["entertainment_zone"],
+                min_wall_width_m=2.6,
+            )
+        ],
+    )
+
+    assert validate_floor_plan_reservations(layout, manifest).passed
+
+    for direction in (WallDirection.NORTH, WallDirection.SOUTH):
+        wall = walls[direction]
+        wall.openings.append(
+            Opening(
+                opening_id=f"blocked_{direction.value}",
+                opening_type=OpeningType.WINDOW,
+                position_along_wall=0.0,
+                width=wall.length,
+                height=1.2,
+                sill_height=0.9,
+            )
+        )
+    blocked = validate_floor_plan_reservations(layout, manifest)
+    assert any(
+        issue["issue_type"] == "missing_opposed_opening_free_media_axis"
+        for issue in blocked.issues
+    )
+
+
+def _opening_adjacency_layout() -> tuple[HouseLayout, object]:
+    layout = HouseLayout()
+    tools = FloorPlanTools(layout=layout, mode="house")
+    result = tools._generate_room_specs_impl(
+        room_specs_json=json.dumps(
+            [{"type": "office", "prompt": "Office", "width": 5.0, "depth": 4.0}]
+        )
+    )
+    assert result.success
+    wall = next(
+        wall
+        for wall in layout.placed_rooms[0].walls
+        if wall.direction == WallDirection.NORTH
+    )
+    return layout, wall
+
+
+def _opening_adjacency_manifest(*, count: int, width: float):
+    return FloorPlanReservationManifest(
+        enabled=True,
+        preserve_entrance_route=False,
+        adaptive_window_budget=False,
+        reservations=[
+            FloorPlanReservation(
+                reservation_id="table-window",
+                kind="opening_adjacency",
+                room_type="office",
+                subject_categories=["table"],
+                target_categories=["window"],
+                min_wall_width_m=width,
+                count=count,
+            )
+        ],
+    )
+
+
+def test_opening_adjacency_requires_a_matching_window() -> None:
+    layout, _wall = _opening_adjacency_layout()
+
+    validation = validate_floor_plan_reservations(
+        layout,
+        _opening_adjacency_manifest(count=1, width=1.0),
+    )
+
+    assert any(
+        issue["issue_type"] == "missing_matching_window_for_opening_adjacency"
+        for issue in validation.issues
+    )
+
+
+def test_opening_adjacency_consumes_each_window_side_capacity_once() -> None:
+    layout, wall = _opening_adjacency_layout()
+    wall.openings.append(
+        Opening(
+            opening_id="window_1",
+            opening_type=OpeningType.WINDOW,
+            position_along_wall=1.5,
+            width=1.0,
+            height=1.2,
+            sill_height=0.9,
+        )
+    )
+
+    one = validate_floor_plan_reservations(
+        layout,
+        _opening_adjacency_manifest(count=1, width=2.0),
+    )
+    two = validate_floor_plan_reservations(
+        layout,
+        _opening_adjacency_manifest(count=2, width=2.0),
+    )
+
+    assert one.passed
+    assert any(
+        issue["issue_type"] == "insufficient_window_side_capacity"
+        for issue in two.issues
+    )
+
+
+def test_opening_adjacency_treats_doors_as_window_side_blockers() -> None:
+    layout, wall = _opening_adjacency_layout()
+    wall.openings.extend(
+        [
+            Opening(
+                opening_id="door_left",
+                opening_type=OpeningType.DOOR,
+                position_along_wall=0.0,
+                width=1.4,
+                height=2.1,
+            ),
+            Opening(
+                opening_id="window_1",
+                opening_type=OpeningType.WINDOW,
+                position_along_wall=1.5,
+                width=1.0,
+                height=1.2,
+                sill_height=0.9,
+            ),
+            Opening(
+                opening_id="door_right",
+                opening_type=OpeningType.DOOR,
+                position_along_wall=2.6,
+                width=2.4,
+                height=2.1,
+            ),
+        ]
+    )
+
+    validation = validate_floor_plan_reservations(
+        layout,
+        _opening_adjacency_manifest(count=1, width=0.5),
+    )
+
+    assert any(
+        issue["issue_type"] == "insufficient_window_side_capacity"
+        for issue in validation.issues
+    )
+
+
+def test_opening_adjacency_and_wall_anchor_share_capacity_pool() -> None:
+    layout, wall = _opening_adjacency_layout()
+    wall.openings.append(
+        Opening(
+            opening_id="window_1",
+            opening_type=OpeningType.WINDOW,
+            position_along_wall=1.5,
+            width=1.0,
+            height=1.2,
+            sill_height=0.9,
+        )
+    )
+    manifest = _opening_adjacency_manifest(count=1, width=2.0)
+    manifest.reservations.append(
+        FloorPlanReservation(
+            reservation_id="north-wall-anchor",
+            kind="wall_anchor",
+            room_type="office",
+            wall_role="north",
+            min_wall_width_m=1.5,
+        )
+    )
+
+    validation = validate_floor_plan_reservations(layout, manifest)
+
+    assert any(
+        issue["issue_type"] == "insufficient_opening_free_wall_capacity"
+        and issue["reservation_id"] == "north-wall-anchor"
+        for issue in validation.issues
+    )
+
+
+def test_v1_reservation_manifest_remains_readable() -> None:
+    manifest = FloorPlanReservationManifest.model_validate(
+        {
+            "schema_version": "scenesmith.floor_plan_reservations.v1",
+            "enabled": True,
+            "preserve_entrance_route": False,
+            "adaptive_window_budget": False,
+            "reservations": [
+                {
+                    "reservation_id": "legacy-wall",
+                    "kind": "wall_anchor",
+                    "min_wall_width_m": 1.0,
+                }
+            ],
+        }
+    )
+
+    assert manifest.schema_version == "scenesmith.floor_plan_reservations.v1"
+    assert manifest.reservations[0].kind == "wall_anchor"
 
 
 def test_floor_plan_validation_enforces_implicit_window_budget():

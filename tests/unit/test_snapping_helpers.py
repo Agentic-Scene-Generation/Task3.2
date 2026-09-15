@@ -8,6 +8,7 @@ from pydrake.math import RigidTransform
 
 from scenesmith.agent_utils.room import ObjectType, SceneObject, UniqueID
 from scenesmith.furniture_agents.tools import snapping_helpers
+from scenesmith.utils.mesh_loading import load_object_collision_geometry
 
 
 class _NoCollisionManager:
@@ -53,6 +54,78 @@ def _object(object_id: str, position: tuple[float, float, float]) -> SceneObject
         geometry_path=Path(f"/{object_id}.gltf"),
         sdf_path=Path(f"/{object_id}.sdf"),
     )
+
+
+def _write_collision_sdf(directory: Path, mesh: trimesh.Trimesh) -> Path:
+    """Write a minimal SDF whose collision mesh is already physics-scaled."""
+    mesh_path = directory / "collision.obj"
+    mesh.export(mesh_path)
+    sdf_path = directory / "asset.sdf"
+    sdf_path.write_text(
+        """<sdf version=\"1.7\">
+  <model name=\"asset\">
+    <link name=\"base_link\">
+      <collision name=\"collision\">
+        <geometry><mesh><uri>collision.obj</uri></mesh></geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>
+"""
+    )
+    return sdf_path
+
+
+def test_sdf_collision_geometry_is_not_scaled_again_by_hssd_metadata(tmp_path) -> None:
+    """Snap geometry must agree with the requested dimensions baked into SDF."""
+    sdf_path = _write_collision_sdf(
+        tmp_path,
+        trimesh.creation.box(extents=(1.2, 0.6, 0.7)),
+    )
+    desk = _object("desk", (0.0, 0.0, 0.0))
+    desk.sdf_path = sdf_path
+    desk.scale_factor = 0.9230769
+
+    meshes = load_object_collision_geometry(desk)
+    bounds = np.vstack([mesh.bounds for mesh in meshes])
+    extents = bounds.max(axis=0) - bounds.min(axis=0)
+
+    np.testing.assert_allclose(extents, [1.2, 0.6, 0.7], atol=1e-6)
+
+
+def test_axis_wall_snap_uses_sdf_collision_extent_not_hssd_metadata(tmp_path) -> None:
+    """A furniture-to-wall snap retains the configured clearance in physics."""
+    sdf_path = _write_collision_sdf(
+        tmp_path,
+        trimesh.creation.box(extents=(1.2, 0.6, 0.7)),
+    )
+    desk = _object("desk", (0.0, -0.277, 0.0))
+    desk.sdf_path = sdf_path
+    desk.scale_factor = 0.9230769
+    wall = SceneObject(
+        object_id=UniqueID("south_wall"),
+        object_type=ObjectType.WALL,
+        name="south_wall",
+        description="south wall",
+        transform=RigidTransform(p=[0.0, -1.725, 1.25]),
+        bbox_min=np.array([-2.0, -0.025, -1.25]),
+        bbox_max=np.array([2.0, 0.025, 1.25]),
+        immutable=True,
+    )
+    cfg = OmegaConf.create({"snap_to_object": {"snap_margin_m": 0.01}})
+
+    movement, _ = snapping_helpers.snap_mesh_to_aabb_along_axis(
+        desk,
+        wall,
+        np.array([0.0, -1.0, 0.0]),
+        cfg,
+    )
+
+    final_y = desk.transform.translation()[1] + movement[1]
+    # The south wall's interior face is y=-1.7. With a 0.6m desk and a 1cm
+    # margin, the center must stop at y=-1.39, not at the false smaller-mesh
+    # result near -1.413 that penetrates Drake's wall collision.
+    assert abs(final_y - (-1.39)) < 1e-6
 
 
 def test_axis_snap_stops_chair_front_at_table_footprint(monkeypatch) -> None:
@@ -163,9 +236,9 @@ def test_high_poly_target_uses_bounded_vertex_pair_for_snap_direction(
     meshes = iter((source_mesh, target_mesh))
 
     monkeypatch.setattr(
-        snapping_helpers.trimesh,
-        "load",
-        lambda *args, **kwargs: next(meshes).copy(),
+        snapping_helpers,
+        "load_object_collision_geometry",
+        lambda _obj: [next(meshes).copy()],
     )
     monkeypatch.setattr(
         snapping_helpers.trimesh.proximity,
@@ -183,3 +256,111 @@ def test_high_poly_target_uses_bounded_vertex_pair_for_snap_direction(
     assert direction[0] > 0.9
     assert abs(direction[1]) < 0.1
     assert abs(direction[2]) < 0.1
+
+
+def test_mesh_to_mesh_direction_uses_collision_geometry_not_visual_mesh(
+    monkeypatch,
+) -> None:
+    """The direction source must match the physical snap/collision geometry."""
+    source = _object("source", (0.0, 0.0, 0.0))
+    target = _object("target", (3.0, 0.0, 0.0))
+    source.scale_factor = 0.5
+    target.scale_factor = 0.5
+    source_mesh = trimesh.creation.box(extents=(1.2, 0.8, 0.8))
+    target_mesh = trimesh.creation.box(extents=(1.2, 0.8, 0.8))
+    meshes = iter((source_mesh, target_mesh))
+    monkeypatch.setattr(
+        snapping_helpers,
+        "load_object_collision_geometry",
+        lambda _obj: [next(meshes).copy()],
+    )
+    cfg = OmegaConf.create({"snap_to_object": {"max_sample_vertices": 64}})
+
+    direction = snapping_helpers.compute_snap_direction_mesh_to_mesh(
+        source, target, cfg
+    )
+
+    np.testing.assert_allclose(direction, [1.0, 0.0, 0.0], atol=1e-7)
+
+
+def test_iterative_snap_does_not_transform_world_aabb_target_twice(monkeypatch) -> None:
+    """A translated AABB fallback must stay in the same world frame as its mesh peer."""
+    source = _object("source", (-2.0, 0.0, 0.0))
+    wall = SceneObject(
+        object_id=UniqueID("wall"),
+        object_type=ObjectType.WALL,
+        name="wall",
+        description="wall",
+        transform=RigidTransform(p=[2.0, 0.0, 0.0]),
+        bbox_min=np.array([-0.5, -1.0, -1.0]),
+        bbox_max=np.array([0.5, 1.0, 1.0]),
+        immutable=True,
+    )
+    monkeypatch.setattr(
+        snapping_helpers,
+        "load_object_collision_geometry",
+        lambda _obj: [trimesh.creation.box(extents=(0.5, 0.5, 0.5))],
+    )
+    monkeypatch.setattr(
+        snapping_helpers.trimesh.collision,
+        "CollisionManager",
+        _NoCollisionManager,
+    )
+    cfg = OmegaConf.create(
+        {
+            "snap_to_object": {
+                "iterative_snap_step_m": 0.1,
+                "max_snap_distance_m": 10.0,
+            }
+        }
+    )
+
+    movement, _ = snapping_helpers.snap_with_iterative_collision_check(
+        source, wall, np.array([1.0, 0.0, 0.0]), cfg
+    )
+
+    # Source front is -1.75 and the wall's world-space near face is 1.5.
+    # The 10cm iterator stops one step before contact at 3.2m. Applying the
+    # wall transform to the already-world AABB would incorrectly move 5.2m.
+    assert abs(movement[0] - 3.2) < 1e-9
+
+
+def test_sdf_only_furniture_uses_iterative_mesh_dispatch(monkeypatch) -> None:
+    """Generated SDF-only furniture must not silently fall back to an AABB snap."""
+    source = _object("source", (0.0, 0.0, 0.0))
+    target = _object("target", (2.0, 0.0, 0.0))
+    source.geometry_path = None
+    target.geometry_path = None
+    calls: list[tuple[SceneObject, SceneObject, np.ndarray]] = []
+
+    monkeypatch.setattr(
+        snapping_helpers,
+        "compute_snap_direction_mesh_to_mesh",
+        lambda *_args, **_kwargs: np.array([1.0, 0.0, 0.0]),
+    )
+
+    def iterative(obj, target, direction, cfg):
+        calls.append((obj, target, direction))
+        return np.array([0.5, 0.0, 0.0]), 0.5
+
+    monkeypatch.setattr(
+        snapping_helpers, "snap_with_iterative_collision_check", iterative
+    )
+    cfg = OmegaConf.create({"snap_to_object": {"max_sample_vertices": 64}})
+
+    result = snapping_helpers.select_and_execute_snap_algorithm(
+        obj=source,
+        target=target,
+        orientation="none",
+        orientation_applied=False,
+        object_id="source",
+        target_id="target",
+        cfg=cfg,
+    )
+
+    assert not isinstance(result, str)
+    np.testing.assert_allclose(result[0], [0.5, 0.0, 0.0])
+    assert len(calls) == 1
+    assert calls[0][0] is source
+    assert calls[0][1] is target
+    np.testing.assert_allclose(calls[0][2], [1.0, 0.0, 0.0])

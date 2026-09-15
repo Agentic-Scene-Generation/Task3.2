@@ -22,6 +22,9 @@ from scenesmith.agent_utils.furniture_layout_planning import (
     is_bedroom_scene,
 )
 from scenesmith.agent_utils.scoring import CritiqueWithScores
+from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.room_containment import (
+    ROOM_CONTAINMENT_FAILURE_CODE,
+)
 
 console_logger = logging.getLogger(__name__)
 
@@ -75,6 +78,7 @@ DEFAULT_ALIASES = {
     ],
     "dining_chair": ["dining chair", "dining chairs"],
     "student_chair": ["student chair", "student chairs"],
+    "sofa_chair": ["sofa chair", "sofa chairs"],
     "armchair": ["armchair", "armchairs", "arm chair", "arm chairs"],
     "desk": ["desk", "desks"],
     "chair": ["chair", "chairs"],
@@ -110,6 +114,15 @@ DEFAULT_ALIASES = {
     "plant": ["plant", "plants", "potted plant", "potted plants"],
     "rug": ["rug", "rugs", "area rug", "area rugs"],
     "floor_lamp": ["floor lamp", "floor lamps", "floorlamp", "floorlamps"],
+    "floor_speaker": [
+        "floor speaker",
+        "floor speakers",
+        "floor-standing speaker",
+        "floor-standing speakers",
+        "speaker tower",
+        "speaker towers",
+    ],
+    "speaker": ["speaker", "speakers", "loudspeaker", "loudspeakers"],
     "tv_stand": [
         "tv stand",
         "tv stands",
@@ -125,7 +138,6 @@ DEFAULT_ALIASES = {
         "tvs",
         "flat-screen television",
         "flat-screen tv",
-        "display",
     ],
     "sideboard": ["sideboard", "sideboards", "buffet cabinet"],
     "water_dispenser": [
@@ -148,12 +160,21 @@ FURNITURE_CATEGORY_PARENTS: dict[str, frozenset[str]] = {
     "guest_chair": frozenset({"chair"}),
     "dining_chair": frozenset({"chair"}),
     "student_chair": frozenset({"chair"}),
+    "sofa_chair": frozenset({"chair"}),
     "armchair": frozenset({"chair"}),
     "side_table": frozenset({"table"}),
     "coffee_table": frozenset({"table"}),
     "dining_table": frozenset({"table"}),
     "conference_table": frozenset({"table"}),
     "dressing_table": frozenset({"table"}),
+    "floor_speaker": frozenset({"speaker"}),
+}
+
+# Compound labels can contain another valid category token without being that
+# second physical object.  Remove the component requirement only when no
+# independent mention remains after masking every compound occurrence.
+FURNITURE_CATEGORY_COMPONENT_SHADOWS: dict[str, frozenset[str]] = {
+    "sofa_chair": frozenset({"sofa", "chair"}),
 }
 
 # Retrieval uses ``cabinet`` as the stable semantic name for the freestanding
@@ -236,6 +257,50 @@ def _remove_redundant_generic_furniture_requirements(
             else:
                 requirements.discard(generic)
 
+    for compound, shadowed_categories in FURNITURE_CATEGORY_COMPONENT_SHADOWS.items():
+        if compound not in requirements:
+            continue
+        for category in shadowed_categories:
+            if category not in requirements:
+                continue
+            standalone_text = _prompt_without_masked_categories(prompt, {compound})
+            standalone_count = _infer_prompt_category_count(standalone_text, category)
+            if standalone_count > 0:
+                if isinstance(requirements, dict):
+                    requirements[category] = standalone_count
+                continue
+            if isinstance(requirements, dict):
+                requirements.pop(category, None)
+            else:
+                requirements.discard(category)
+
+
+def _prompt_mentions_standalone_category(
+    prompt: str,
+    *,
+    category: str,
+    masked_categories: set[str],
+) -> bool:
+    """Return whether a category remains after longer compound spans are removed."""
+    remainder = _prompt_without_masked_categories(prompt, masked_categories)
+    return any(
+        _contains_alias(remainder, alias, category=category)
+        for alias in [category.replace("_", " "), *DEFAULT_ALIASES.get(category, [])]
+    )
+
+
+def _prompt_without_masked_categories(prompt: str, masked_categories: set[str]) -> str:
+    """Remove complete compound-category spans from prompt text."""
+    remainder = str(prompt or "").lower().replace("_", " ")
+    for masked in masked_categories:
+        aliases = [masked.replace("_", " "), *DEFAULT_ALIASES.get(masked, [])]
+        for alias in sorted(set(aliases), key=len, reverse=True):
+            alias_pattern = re.escape(alias.lower()).replace(r"\ ", r"\s+")
+            remainder = re.sub(
+                rf"(?<![a-z0-9]){alias_pattern}(?![a-z0-9])", " ", remainder
+            )
+    return remainder
+
 
 NUMBER_WORDS = {
     "a": 1,
@@ -247,6 +312,32 @@ NUMBER_WORDS = {
     "five": 5,
     "six": 6,
 }
+
+
+def _infer_prompt_category_count(prompt: str, canonical: str) -> int:
+    """Infer one category count from text whose longer compound spans are masked."""
+    text = str(prompt or "").lower().replace("_", " ")
+    number_pattern = "|".join([r"\d+", *NUMBER_WORDS.keys()])
+    best_count = 0
+    for alias in DEFAULT_ALIASES.get(canonical, [canonical.replace("_", " ")]):
+        escaped_alias = re.escape(alias.lower())
+        pattern = (
+            rf"(^|[^a-z0-9])(?:(?P<count>{number_pattern})\s+)?"
+            rf"(?:(?!(?:{number_pattern})\b)\w+\s+){{0,2}}{escaped_alias}"
+            rf"([^a-z0-9]|$)"
+        )
+        for match in re.finditer(pattern, text):
+            count_text = match.groupdict().get("count")
+            count = 1
+            if count_text:
+                count = (
+                    int(count_text)
+                    if count_text.isdigit()
+                    else NUMBER_WORDS.get(count_text, 1)
+                )
+            best_count = max(best_count, count)
+    return best_count
+
 
 DISTINCT_FURNITURE_ROLES = (
     "student",
@@ -277,6 +368,7 @@ class HardStateEvaluation:
     soft_reasons: list[str] = field(default_factory=list)
     weighted_score_penalty: float = 0.0
     plausibility_report: dict[str, Any] | None = None
+    typed_failures: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -327,19 +419,89 @@ def _contains_alias(
             normalized, match.end() - 1
         ):
             continue
+        if category == "television" and _is_non_standalone_television_mention(
+            normalized, match, alias
+        ):
+            continue
         return True
     return False
 
 
+def _is_negated_inventory_mention(text: str, start: int) -> bool:
+    """Return whether an inventory alias is directly negated in its clause."""
+    prefix = text[:start]
+    if start < len(text) and not text[start].isalnum():
+        prefix += text[start]
+    clause = re.split(r"[.!?;]", prefix)[-1]
+    # "not only a TV ..." introduces a positive item, and must not be
+    # mistaken for the standalone negator "not".
+    if re.search(
+        r"\bnot\s+only\s+(?:(?:a|an|any|one|the)\s+)?" r"(?:[a-z0-9-]+\s+){0,3}$",
+        clause,
+    ):
+        return False
+
+    # Evaluate the words between the last negator and the alias.  A
+    # ``and``/``but`` end a negated inventory phrase (for example, "no sofa
+    # and a TV"). ``or`` continues it: "no TV or television" negates both
+    # aliases and must not reintroduce television through its second mention.
+    for negation in reversed(
+        list(re.finditer(r"\b(?:no|without|neither|not)\b", clause))
+    ):
+        suffix = clause[negation.end() :]
+        if re.search(r"\b(?:and|but)\b", suffix):
+            continue
+        if re.fullmatch(
+            r"\s+(?:(?:a|an|any|one|the)\s+)?(?:[a-z0-9-]+\s+){0,3}",
+            suffix,
+        ):
+            return True
+
+    for directive in reversed(
+        list(
+            re.finditer(
+                r"\b(?:do not|does not|don't|doesn't)\s+"
+                r"(?:include|contain|have|feature|show)\b",
+                clause,
+            )
+        )
+    ):
+        suffix = clause[directive.end() :]
+        if re.search(r"\b(?:and|but)\b", suffix):
+            continue
+        if re.fullmatch(
+            r"\s+(?:(?:a|an|any|one|the)\s+)?(?:[a-z0-9-]+\s+){0,3}",
+            suffix,
+        ):
+            return True
+    return False
+
+
+def _is_non_standalone_television_mention(
+    text: str, match: re.Match[str], alias: str
+) -> bool:
+    """Exclude TV/television when it names a stand or console, not a display."""
+    alias_text = alias.lower().replace("_", " ")
+    matched_text = text[match.start() : match.end()]
+    alias_offset = matched_text.lower().rfind(alias_text)
+    if alias_offset < 0:
+        return False
+    alias_start = match.start() + alias_offset
+    alias_end = alias_start + len(alias_text)
+    if _is_negated_inventory_mention(text, alias_start):
+        return True
+    return re.match(r"\s+(?:stand|console)\b", text[alias_end:]) is not None
+
+
 def infer_furniture_category(text: str) -> str | None:
     """Return the most specific configured category found in object text."""
+    matches: list[tuple[int, int, str]] = []
     for canonical, aliases in DEFAULT_ALIASES.items():
-        if any(
-            _contains_alias(text, alias, category=canonical)
-            for alias in [canonical, *aliases]
-        ):
-            return canonical
-    return None
+        for alias in [canonical.replace("_", " "), *aliases]:
+            if _contains_alias(text, alias, category=canonical):
+                normalized = alias.lower().replace("_", " ")
+                matches.append((len(normalized.split()), len(normalized), canonical))
+    return max(matches)[2] if matches else None
 
 
 def furniture_category_matches(text: str, required_category: str) -> bool:
@@ -406,12 +568,24 @@ def furniture_object_category_matches(
     required_category: str,
 ) -> bool:
     """Return whether a structured scene object satisfies an inventory category."""
+    normalized_required = str(required_category).lower().replace("_", " ")
+    identity_text = f"{object_id} {name}"
     if str(
         required_category
     ).lower() == "storage_cabinet" and _is_explicit_non_storage_cabinet(
         f"{object_id} {name}"
     ):
         return False
+    # SceneTaskSpec categories can be more specific than this controller's
+    # legacy alias table (for example, ``fridge`` or ``pantry_shelf``).  A
+    # structured object id/name is authoritative enough to satisfy those
+    # categories even when the free-form description uses a synonym.
+    if normalized_required not in {
+        alias.lower().replace("_", " ") for alias in DEFAULT_ALIASES
+    } and _contains_alias(
+        identity_text, normalized_required, category=required_category
+    ):
+        return True
     object_category = infer_furniture_object_category(object_id, name, description)
     if object_category is not None:
         return furniture_category_satisfies(object_category, required_category)
@@ -679,6 +853,11 @@ class FurnitureSafetyController:
                     rf"([^a-z0-9]|$)"
                 )
                 for match in re.finditer(pattern, text):
+                    if (
+                        canonical == "television"
+                        and _is_non_standalone_television_mention(text, match, alias)
+                    ):
+                        continue
                     if canonical == "table" and _is_non_furniture_table_reference(
                         text, match.end() - 1
                     ):
@@ -1293,6 +1472,7 @@ class FurnitureSafetyController:
         """Run deterministic hard checks that do not depend on critic judgment."""
         hard_reasons: list[str] = []
         soft_reasons: list[str] = []
+        typed_failures: list[dict[str, Any]] = []
 
         required_counts = self.required_counts or {
             term: 1 for term in self.required_terms
@@ -1328,12 +1508,27 @@ class FurnitureSafetyController:
                     or world_min[1] < min_y - tol
                     or world_max[1] > max_y + tol
                 ):
-                    hard_reasons.append(
-                        f"{object_id} full bounding box exceeds room bounds: "
-                        f"x=[{world_min[0]:.3f}, {world_max[0]:.3f}] vs "
-                        f"[{min_x:.3f}, {max_x:.3f}], "
-                        f"y=[{world_min[1]:.3f}, {world_max[1]:.3f}] vs "
-                        f"[{min_y:.3f}, {max_y:.3f}]"
+                    # This is deliberately only a fast AABB guard. The critic's
+                    # floor-polygon/OBB result is authoritative, but both paths
+                    # publish the same typed failure identity for repair routing.
+                    typed_failures.append(
+                        {
+                            "relation_type": ROOM_CONTAINMENT_FAILURE_CODE,
+                            "primary_object": str(object_id),
+                            "label": "fail",
+                            "scoring_tier": "core",
+                            "diagnostics": {
+                                "object_id": str(object_id),
+                                "bbox_world": {
+                                    "min": [float(value) for value in world_min[:2]],
+                                    "max": [float(value) for value in world_max[:2]],
+                                },
+                                "room_bounds_xy": [min_x, min_y, max_x, max_y],
+                                "tolerance_m": tol,
+                                "geometry_authority": "scenebenchmark_room_containment",
+                            },
+                            "evaluation_source": "furniture_safety_bbox_guard",
+                        }
                     )
 
         bedroom_scene = is_bedroom_scene(scene)
@@ -1371,7 +1566,7 @@ class FurnitureSafetyController:
             hard_reasons.extend(self._evaluate_bedroom_relation_hard_reasons(scene))
 
         return HardStateEvaluation(
-            hard_valid=not hard_reasons,
+            hard_valid=not hard_reasons and not typed_failures,
             hard_reasons=hard_reasons,
             soft_reasons=soft_reasons,
             weighted_score_penalty=(
@@ -1382,6 +1577,7 @@ class FurnitureSafetyController:
                 if plausibility_report is not None
                 else None
             ),
+            typed_failures=typed_failures,
         )
 
     def _room_bounds_xy(self, scene: Any) -> tuple[float, float, float, float] | None:
