@@ -204,10 +204,18 @@ def validate_pair_inputs(
                     reasons.append(f"{name}_safety_proof_changed")
                 if candidate.get("snapshot_hash") != digest(snapshot):
                     reasons.append(f"{name}_snapshot_mismatch")
-                if candidate.get("evaluation_state_hash") != candidate.get(
-                    "raw_state_hash"
+                if (
+                    candidate.get("evaluation_state_hash")
+                    != candidate.get("raw_state_hash")
+                    and not require_fresh_physics
                 ):
-                    reasons.append(f"{name}_evaluation_state_changed")
+                    # Historical direct captures must match exactly; rescored
+                    # captures need the full verified-restoration chain even here.
+                    from scenesmith.scene_expert.slow_memory.paired_scoring import (
+                        validate_scoring_proof,
+                    )
+
+                    validate_scoring_proof(group / name, candidate)
                 if digest(read_json(group / name / "raw_state.json")) != candidate.get(
                     "raw_state_hash"
                 ):
@@ -276,7 +284,7 @@ def validate_pair_inputs(
                         group / "B/slow_memory/trajectories.jsonl",
                     ]
                 )
-        except (OSError, ValueError, KeyError, TypeError) as exc:
+        except (OSError, ValueError, KeyError, TypeError, IndexError) as exc:
             reasons.append(f"incomplete_group: {exc}")
         groups.append({"group": group.name, "valid": not reasons, "errors": reasons})
         errors.extend(f"{group.name}: {reason}" for reason in reasons)

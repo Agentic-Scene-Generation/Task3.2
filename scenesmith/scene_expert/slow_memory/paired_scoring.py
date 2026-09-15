@@ -8,7 +8,7 @@ from typing import Any
 
 from scenesmith.scene_expert.slow_memory.paired import digest, read_json, write_json
 
-SCORING_PROTOCOL = "sceneexpert.raw_candidate_scoring.v2"
+SCORING_PROTOCOL = "sceneexpert.raw_candidate_scoring.v3"
 
 
 def score_raw_candidate(scene: Any, cfg: Any) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -101,12 +101,21 @@ def validate_scoring_proof(directory: Path, candidate: dict[str, Any]) -> None:
     proof = read_json(directory / "evaluation_proof.json")
     physics = read_json(directory / "physics.json")
     report = read_json(directory / "report.json")
+    if proof.get("restoration_proof_sha256"):
+        from scenesmith.scene_expert.slow_memory.paired_restoration import (
+            validate_restoration_proof,
+        )
+
+        validate_restoration_proof(directory, candidate, proof)
+    elif candidate.get("evaluation_state_hash") != candidate.get("raw_state_hash"):
+        raise ValueError("raw evaluation state changed without verified restoration")
     if (
         candidate.get("scoring_protocol") != SCORING_PROTOCOL
         or proof.get("schema_version") != SCORING_PROTOCOL
         or proof.get("raw_state_sha256") != candidate.get("raw_state_hash")
-        or proof.get("evaluation_state_sha256") != candidate.get("raw_state_hash")
-        or physics.get("raw_state_sha256") != candidate.get("raw_state_hash")
+        or proof.get("evaluation_state_sha256")
+        != candidate.get("evaluation_state_hash")
+        or physics.get("raw_state_sha256") != candidate.get("evaluation_state_hash")
         or proof.get("physics_sha256") != digest(physics)
         or proof.get("report_sha256") != digest(report)
         or proof.get("raw_files_sha256") != digest(candidate.get("raw_files"))

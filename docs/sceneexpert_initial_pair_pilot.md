@@ -8,7 +8,10 @@ Run 008 completed A/B execution but revealed stale cached physics labels. The
 **current next step is offline rescoring of retained 008 candidates**, not another
 generation run; use the commands and matching packaging script in
 [the 008 review and 009 rescoring plan](sceneexpert_initial_pairs_008_review.md).
-The generation commands below remain the historical pilot reference.
+Run 009 exposed native quaternion roundoff in the restoration gate. The current
+retry is [010 with verified native restoration](sceneexpert_initial_pairs_009_recovery.md),
+which supersedes the 009 commands. The generation commands below remain the
+historical pilot reference.
 
 ## What this entrypoint executes
 

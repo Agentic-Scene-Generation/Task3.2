@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import signal
 import sys
@@ -30,6 +31,9 @@ def main() -> int:
     parser.add_argument("--min-pairs", type=int, default=1)
     args = parser.parse_args()
     if args.rescore_source:
+        logging.basicConfig(
+            level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
+        )
         if not args.rescore_output:
             parser.error("--rescore-source requires a new --rescore-output")
         from scenesmith.scene_expert.slow_memory.paired_rescore import rescore_pairs

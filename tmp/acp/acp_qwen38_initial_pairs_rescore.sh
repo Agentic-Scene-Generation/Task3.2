@@ -2,7 +2,7 @@
 # Refresh deterministic evidence from retained raw snapshots; no LLM services.
 set -euo pipefail
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}"
-RUN_ID="${RUN_ID:-qwen38_initial_pairs_008_rescore_009}"
+RUN_ID="${RUN_ID:-qwen38_initial_pairs_008_rescore_010}"
 SOURCE_RUN_ID="${SOURCE_RUN_ID:-qwen38_initial_pairs_008}"
 [[ "$RUN_ID" =~ ^[a-zA-Z0-9_-]+$ && "$SOURCE_RUN_ID" =~ ^[a-zA-Z0-9_-]+$ ]] || { echo 'Invalid run ID' >&2; exit 2; }
 [[ "$RUN_ID" != "$SOURCE_RUN_ID" ]] || { echo 'Use a new output RUN_ID' >&2; exit 2; }
