@@ -131,10 +131,45 @@ def deterministic_verdict(report: dict[str, Any]) -> tuple[str, float, int]:
 
 
 def validate_tool_execution(
-    trace: dict[str, Any], fatal_asset_error: Any = None
+    trace: dict[str, Any],
+    fatal_asset_error: Any = None,
+    *,
+    failure_path: Path | None = None,
 ) -> None:
     """Quarantine transport/unhandled-tool failures, never label them as poor design."""
+
+    def record_failure(
+        text: str,
+        *,
+        reason: str,
+        index: int | None = None,
+        call_id: str = "",
+        match_span: tuple[int, int] = (0, 0),
+    ) -> None:
+        if failure_path is None:
+            return
+        start = max(0, match_span[0] - 512)
+        end = min(len(text), start + 4096)
+        write_json(
+            failure_path,
+            {
+                "schema_version": "sceneexpert.candidate_tool_failure.v1",
+                "reason": reason,
+                "tool_result_index": index,
+                "tool_call_id": call_id,
+                "matched_text": text[slice(*match_span)],
+                "match_span": list(match_span),
+                "output_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "output_char_count": len(text),
+                "output_excerpt": text[start:end],
+                "excerpt_char_range": [start, end],
+                "excerpt_truncated": start > 0 or end < len(text),
+                "preference_eligible": False,
+            },
+        )
+
     if fatal_asset_error:
+        record_failure(str(fatal_asset_error), reason="fatal_asset_infrastructure")
         raise ValueError(f"candidate asset infrastructure failed: {fatal_asset_error}")
     failures = re.compile(
         r"an error occurred while running the tool|connection(?:error| refused| reset)|"
@@ -142,10 +177,18 @@ def validate_tool_execution(
         r"no available ports|server (?:unavailable|disconnected)|http[^\n]{0,30}\b50[234]\b",
         re.IGNORECASE,
     )
-    for result in trace.get("tool_results") or []:
+    for index, result in enumerate(trace.get("tool_results") or []):
         output = result.get("output", "")
         text = output if isinstance(output, str) else json.dumps(output)
-        if failures.search(text):
+        match = failures.search(text)
+        if match:
+            record_failure(
+                text,
+                reason="tool_infrastructure_or_unhandled_failure",
+                index=index,
+                call_id=str(result.get("tool_call_id") or ""),
+                match_span=match.span(),
+            )
             raise ValueError(
                 "candidate tool trace contains an infrastructure or unhandled-tool failure"
             )

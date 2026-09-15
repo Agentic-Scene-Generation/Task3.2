@@ -52,6 +52,7 @@ def test_original_layout_evidence_and_source_bytes_are_preserved(
         f"{pair}/group_1/A/report.json",
         f"{pair}/group_1/A/first_request.json",
         f"{pair}/group_1/B/failure.json",
+        f"{pair}/group_1/B/tool_execution_failure.json",
         f"{pair}/group_1/A/slow_memory/trajectories.jsonl",
         f"{pair}/group_1/A/slow_memory/media/tool.png",
         f"{pair}/dpo/images/input.jpg",
