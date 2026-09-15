@@ -91,8 +91,9 @@ exit "$STUB_AUDIT_EXIT"
 
 @pytest.mark.parametrize("exit_code", [0, 2, 7])
 @pytest.mark.parametrize("require_pairs", ["false", "true"])
+@pytest.mark.parametrize("rescore_groups", ["", "group_000,group_002"])
 def test_offline_rescore_launcher_needs_no_models_and_preserves_exit(
-    tmp_path: Path, exit_code: int, require_pairs: str
+    tmp_path: Path, exit_code: int, require_pairs: str, rescore_groups: str
 ) -> None:
     python_stub = tmp_path / "python-stub"
     _script(
@@ -100,9 +101,15 @@ def test_offline_rescore_launcher_needs_no_models_and_preserves_exit(
         """
 [[ "$2" == --rescore-source && "$4" == --rescore-output ]]
 [[ "$3" == */outputs/slow_memory/original/runs/paired_initial ]]
-if [[ "$REQUIRE_PAIRS" == true ]]; then [[ "$6" == --require-pairs ]]; else [[ $# == 5 ]]; fi
 mkdir -p "$5"
 printf '%s\\n' 'fresh physics audit' > "$5/stub.txt"
+shift 5
+if [[ "$REQUIRE_PAIRS" == true ]]; then [[ "$1" == --require-pairs ]]; shift; fi
+if [[ -n "$RESCORE_GROUPS" ]]; then
+  [[ $# == 3 && "$1" == --rescore-groups && "$2" == group_000 && "$3" == group_002 ]]
+else
+  [[ $# == 0 ]]
+fi
 exit "$STUB_EXIT"
 """,
     )
@@ -115,6 +122,7 @@ exit "$STUB_EXIT"
         "PYTHON_BIN": _path(python_stub),
         "STUB_EXIT": str(exit_code),
         "REQUIRE_PAIRS": require_pairs,
+        "RESCORE_GROUPS": rescore_groups,
     }
     result = subprocess.run(command, env=env, capture_output=True, text=True)
     assert result.returncode == exit_code, result.stderr

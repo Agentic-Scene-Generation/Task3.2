@@ -356,6 +356,37 @@ def test_fresh_physics_proof_is_mandatory_for_export(
     assert audit["candidate_count"] == audit["eligible_pair_count"] == 0
 
 
+@pytest.mark.parametrize("tamper", ["metadata", "proof"])
+def test_calibrated_scoring_evidence_is_bound_to_its_proof(
+    tmp_path: Path, tamper: str
+) -> None:
+    from scenesmith.scene_expert.slow_memory.paired_contract import CALIBRATION_PROTOCOL
+    from scenesmith.scene_expert.slow_memory.paired_scoring import (
+        validate_scoring_proof,
+    )
+
+    directory = _group(tmp_path) / "A"
+    report = read_json(directory / "report.json")
+    calibration = {"schema_version": CALIBRATION_PROTOCOL, "changes": []}
+    report["case_pack"]["sceneexpert_contract_calibration"] = calibration
+    proof = read_json(directory / "evaluation_proof.json")
+    proof.update(
+        report_sha256=digest(report), contract_calibration_sha256=digest(calibration)
+    )
+    write_json(directory / "report.json", report)
+    write_json(directory / "evaluation_proof.json", proof)
+    candidate = read_json(directory / "result.json")
+    validate_scoring_proof(directory, candidate)
+    if tamper == "metadata":
+        calibration["changes"].append({"kind": "unverified_override"})
+        write_json(directory / "report.json", report)
+    else:
+        proof.pop("contract_calibration_sha256")
+        write_json(directory / "evaluation_proof.json", proof)
+    with pytest.raises(ValueError, match="calibration proof mismatch"):
+        validate_scoring_proof(directory, candidate)
+
+
 def _mock_rescore_physics(
     monkeypatch: pytest.MonkeyPatch, *, corrupt_state: bool = False
 ) -> None:
@@ -404,16 +435,21 @@ def _mock_rescore_physics(
     monkeypatch.setattr(paired_rescore, "score_raw_candidate", fresh)
 
 
+@pytest.mark.parametrize("select_intact", [False, True])
 def test_offline_rescore_preserves_original_executions_and_keeps_no_contrast_gate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, select_intact: bool
 ) -> None:
     from scenesmith.scene_expert.slow_memory.paired_rescore import rescore_pairs
 
     source, output = tmp_path / "008", tmp_path / "009"
     group = _group(source)
+    if select_intact:
+        write_json(source / "group_001/status.json", {"status": "shadow_failed"})
     before = tree_hashes(source)
     _mock_rescore_physics(monkeypatch)
-    audit = rescore_pairs(source, output)
+    audit = rescore_pairs(
+        source, output, group_names=["group_000"] if select_intact else None
+    )
     assert tree_hashes(source) == before
     assert audit["execution_integrity_passed"] is True
     assert audit["candidate_count"] == 2
@@ -426,6 +462,11 @@ def test_offline_rescore_preserves_original_executions_and_keeps_no_contrast_gat
     assert rescore_status["outcome"] == "completed_no_pairs"
     manifest = read_json(output / "rescore_manifest.json")
     assert manifest["model_calls"] == 0
+    assert manifest["selected_groups"] == ["group_000"]
+    assert len(manifest["excluded_groups"]) == int(select_intact)
+    if select_intact:
+        assert manifest["excluded_groups"][0]["valid"] is False
+        assert not (output / "group_001").exists()
     assert manifest["candidates"][1]["old_verdict"] == "rejected"
     assert manifest["candidates"][1]["new_verdict"] == "accepted"
     old = read_json(group / "B/slow_memory/trajectories.jsonl")
@@ -446,6 +487,25 @@ def test_offline_rescore_preserves_original_executions_and_keeps_no_contrast_gat
         read_json(output / group.name / "B/rescore_origin.json")["result"]["verdict"]
         == "rejected"
     )
+
+
+@pytest.mark.parametrize(
+    "selection", [None, [], ["group_001"], ["group_000", "group_000"], ["group_099"]]
+)
+def test_rescore_cannot_silently_admit_broken_or_unknown_selected_groups(
+    tmp_path: Path, selection: list[str] | None
+) -> None:
+    from scenesmith.scene_expert.slow_memory.paired_rescore import rescore_pairs
+
+    source = tmp_path / "source"
+    _group(source)
+    write_json(source / "group_001/status.json", {"status": "shadow_failed"})
+    before = tree_hashes(source)
+    output = tmp_path / "output"
+    with pytest.raises(ValueError):
+        rescore_pairs(source, output, group_names=selection)
+    assert tree_hashes(source) == before
+    assert not output.exists()
 
 
 @pytest.mark.parametrize(
