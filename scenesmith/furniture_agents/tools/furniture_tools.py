@@ -59,6 +59,7 @@ from scenesmith.furniture_agents.tools.response_dataclasses import (
 from scenesmith.floor_plan_agents.tools.polygon_geometry import (
     room_geometry_covers_object,
 )
+from scenesmith.scene_expert.tool_contracts import asset_generation_argument_error
 
 console_logger = logging.getLogger(__name__)
 
@@ -519,6 +520,23 @@ class FurnitureTools:
                 f"Generating batch of {len(object_descriptions)} assets: "
                 f"{object_descriptions}"
             )
+            # Reject malformed batches before safety accounting or retrieval.
+            # A correctable model argument error must not consume a recovery
+            # allowance or become an SDK-wrapped service exception in the trace.
+            argument_error = asset_generation_argument_error(
+                object_descriptions, short_names, desired_dimensions
+            )
+            if argument_error:
+                return AssetGenerationResult(
+                    success=False,
+                    assets=[],
+                    successful_count=0,
+                    failed_count=len(object_descriptions),
+                    message=(
+                        f"Invalid generate_assets arguments: {argument_error} "
+                        "No assets were generated. Correct the arguments and retry."
+                    ),
+                ).to_json()
             safety_denial = self._safety_denial_generate_assets()
             if safety_denial:
                 return safety_denial
