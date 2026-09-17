@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timezone
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -38,6 +39,7 @@ _FLOOR_COVERING_TOKENS = {
 
 _ROUND_FOOTPRINT_TOKENS = {"circle", "circular", "oval", "round"}
 _SQUARE_FOOTPRINT_MAX_ASPECT_RATIO = 1.30
+_MAX_MANIFEST_VIEWS_PER_CANDIDATE = 4
 _HSSD_ID_PATTERN = re.compile(r"[0-9a-f]{40}", re.IGNORECASE)
 _AXIS_TO_RENDER_VIEW = {
     "+X": "right",
@@ -530,6 +532,96 @@ def _annotation_render_views(
     return tuple(views)
 
 
+@lru_cache(maxsize=4)
+def _manifest_image_paths_by_asset_uid(
+    manifest_path_text: str, manifest_mtime_ns: int, manifest_size: int
+) -> dict[str, tuple[Path, ...]]:
+    """Index visual evidence from one immutable manifest snapshot."""
+    del manifest_mtime_ns, manifest_size
+    manifest_path = Path(manifest_path_text)
+    image_paths_by_uid: dict[str, tuple[Path, ...]] = {}
+    with manifest_path.open(encoding="utf-8") as manifest_file:
+        for line_number, line in enumerate(manifest_file, start=1):
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                console_logger.warning(
+                    "Skipping invalid all-assets manifest record %s:%d: %s",
+                    manifest_path,
+                    line_number,
+                    exc,
+                )
+                continue
+            asset_uid = record.get("asset_uid")
+            raw_image_paths = record.get("image_paths")
+            if not isinstance(asset_uid, str) or not isinstance(raw_image_paths, list):
+                continue
+            resolved_paths: list[Path] = []
+            for raw_path in raw_image_paths:
+                if not isinstance(raw_path, str) or not raw_path:
+                    continue
+                image_path = Path(raw_path)
+                if not image_path.is_absolute():
+                    image_path = manifest_path.parent / image_path
+                resolved_paths.append(image_path)
+            if resolved_paths:
+                image_paths_by_uid[asset_uid] = tuple(resolved_paths)
+    return image_paths_by_uid
+
+
+def _all_assets_manifest_image_paths(asset_uid: str) -> tuple[Path, ...]:
+    manifest_path_text = os.environ.get("HSSD_ALL_ASSETS_MANIFEST_PATH")
+    if not manifest_path_text:
+        return ()
+    manifest_path = Path(manifest_path_text)
+    try:
+        stat = manifest_path.stat()
+        manifest_images = _manifest_image_paths_by_asset_uid(
+            str(manifest_path.resolve()), stat.st_mtime_ns, stat.st_size
+        )
+    except OSError as exc:
+        console_logger.warning(
+            "Could not load all-assets render manifest %s: %s", manifest_path, exc
+        )
+        return ()
+    return tuple(path for path in manifest_images.get(asset_uid, ()) if path.is_file())
+
+
+def _evenly_spaced_paths(image_paths: tuple[Path, ...], limit: int) -> tuple[Path, ...]:
+    if len(image_paths) <= limit:
+        return image_paths
+    indices = [
+        round(index * (len(image_paths) - 1) / (limit - 1)) for index in range(limit)
+    ]
+    return tuple(image_paths[index] for index in indices)
+
+
+def _candidate_render_views(
+    *, candidate_hssd_id: str, rendered_assets_dir: Path
+) -> tuple[tuple[str, Path], ...]:
+    """Resolve legacy HSSD renders first, then all-assets manifest images."""
+    legacy_ids = [candidate_hssd_id]
+    if candidate_hssd_id.startswith("hssd:"):
+        legacy_ids.append(candidate_hssd_id.removeprefix("hssd:"))
+    for legacy_id in legacy_ids:
+        asset_dir = rendered_assets_dir / legacy_id
+        iso_path = asset_dir / "iso.png"
+        if not iso_path.is_file():
+            continue
+        views = [("iso", iso_path)]
+        views.extend(_annotation_render_views(hssd_id=legacy_id, asset_dir=asset_dir))
+        return tuple(views)
+
+    image_paths = _evenly_spaced_paths(
+        _all_assets_manifest_image_paths(candidate_hssd_id),
+        _MAX_MANIFEST_VIEWS_PER_CANDIDATE,
+    )
+    return tuple(
+        (f"manifest view {index + 1}/{len(image_paths)}", image_path)
+        for index, image_path in enumerate(image_paths)
+    )
+
+
 def choose_hssd_candidate_from_iso_renders(
     *,
     candidates: list["HssdRetrievalResult"],
@@ -550,7 +642,7 @@ def choose_hssd_candidate_from_iso_renders(
     audit_path: Path | None = None,
     retrieval_backend: str | None = None,
 ) -> RenderedAssetChoice:
-    """Optionally reorder candidates using pre-rendered HSSD visual evidence."""
+    """Optionally reorder retrieval candidates using pre-rendered visual evidence."""
     fallback_semantic_name = normalize_semantic_name(object_short_name)
     forbidden_components = [
         normalized
@@ -594,19 +686,17 @@ def choose_hssd_candidate_from_iso_renders(
         candidates if requires_component_assessment else candidates[:top_n]
     )
     for original_index, candidate in enumerate(candidates_to_assess, start=1):
-        asset_dir = rendered_assets_dir / candidate.hssd_id
-        iso_path = asset_dir / "iso.png"
-        if not iso_path.exists():
-            continue
-        views = [("iso", iso_path)]
-        views.extend(
-            _annotation_render_views(hssd_id=candidate.hssd_id, asset_dir=asset_dir)
+        views = _candidate_render_views(
+            candidate_hssd_id=candidate.hssd_id,
+            rendered_assets_dir=rendered_assets_dir,
         )
+        if not views:
+            continue
         evidence_records.append(
             _CandidateRenderEvidence(
                 original_index=original_index,
                 candidate=candidate,
-                views=tuple(views),
+                views=views,
             )
         )
 
