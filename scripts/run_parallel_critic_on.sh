@@ -363,6 +363,7 @@ HSSD_RETRIEVAL_BACKEND="${HSSD_RETRIEVAL_BACKEND:-clip}"
 HSSD_RENDERED_ASSET_CHOICE="${HSSD_RENDERED_ASSET_CHOICE:-false}"
 HSSD_ZVEC_COLLECTION_PATH="${HSSD_ZVEC_COLLECTION_PATH:-}"
 HSSD_ALL_ASSETS_MANIFEST_PATH="${HSSD_ALL_ASSETS_MANIFEST_PATH:-}"
+HSSD_EMBEDDING_BASE_URL="${HSSD_EMBEDDING_BASE_URL:-http://127.0.0.1:8014}"
 # A directory check alone is insufficient for BGE-M3: recent Transformers
 # releases reject pickle checkpoints when the active Torch is too old. Load it
 # once in the controller before any batch starts so an incompatible runtime
@@ -1042,6 +1043,7 @@ export SCENEEXPERT_CHAT_COMPLETIONS_STREAM
 export HSSD_RETRIEVAL_BACKEND HSSD_RENDERED_ASSET_CHOICE
 export HSSD_ZVEC_COLLECTION_PATH
 export HSSD_ALL_ASSETS_MANIFEST_PATH
+export HSSD_EMBEDDING_BASE_URL
 export CONVEX_MAX_OMP_THREADS SCENEEXPERT_OMP_NUM_THREADS
 export FLOOR_PLAN_DESIGNER_THINKING FLOOR_PLAN_CRITIC_THINKING
 export FURNITURE_DESIGNER_THINKING FURNITURE_CRITIC_THINKING
@@ -1155,6 +1157,36 @@ if [ "$HSSD_RETRIEVAL_BACKEND" = "embedding" ] || [ "$HSSD_RETRIEVAL_BACKEND" = 
             exit 1
         fi
         echo "HSSD all-assets manifest: $HSSD_ALL_ASSETS_MANIFEST_PATH"
+    fi
+    if [ "$INTERNAL_RUN_BATCH" = "false" ] && [ "$DRY_RUN" = "false" ]; then
+        echo "preflighting HSSD embedding service: $HSSD_EMBEDDING_BASE_URL/embeddings"
+        if ! "$PYTHON_BIN" - <<'PY'
+import os
+from pathlib import Path
+
+from scenesmith.agent_utils.hssd_retrieval.config import HssdZvecConfig
+from scenesmith.agent_utils.hssd_retrieval.zvec_similarity import (
+    LlamaTextEmbeddingClient,
+)
+
+config = HssdZvecConfig(
+    collection_path=Path(os.environ["HSSD_ZVEC_COLLECTION_PATH"]),
+    base_url=os.environ["HSSD_EMBEDDING_BASE_URL"],
+    timeout_seconds=10.0,
+    request_retries=0,
+)
+embedding = LlamaTextEmbeddingClient(config).embed_text(
+    "HSSD embedding service readiness probe"
+)
+if not embedding:
+    raise RuntimeError("embedding service returned an empty vector")
+print(f"HSSD embedding service ready: dimension={len(embedding)}")
+PY
+        then
+            echo "ERROR: HSSD embedding service preflight failed; no critic batches were started." >&2
+            echo "       Check $HSSD_EMBEDDING_BASE_URL and the embedding llama.cpp log." >&2
+            exit 1
+        fi
     fi
 fi
 echo "skip controller bpy import: $SKIP_MAIN_BPY_IMPORT"
@@ -1356,6 +1388,10 @@ if [ "$HSSD_RETRIEVAL_BACKEND" = "embedding" ] || [ "$HSSD_RETRIEVAL_BACKEND" = 
         "wall_agent.asset_manager.hssd.zvec.collection_path=${HSSD_ZVEC_COLLECTION_PATH}"
         "ceiling_agent.asset_manager.hssd.zvec.collection_path=${HSSD_ZVEC_COLLECTION_PATH}"
         "manipuland_agent.asset_manager.hssd.zvec.collection_path=${HSSD_ZVEC_COLLECTION_PATH}"
+        "furniture_agent.asset_manager.hssd.zvec.base_url=${HSSD_EMBEDDING_BASE_URL}"
+        "wall_agent.asset_manager.hssd.zvec.base_url=${HSSD_EMBEDDING_BASE_URL}"
+        "ceiling_agent.asset_manager.hssd.zvec.base_url=${HSSD_EMBEDDING_BASE_URL}"
+        "manipuland_agent.asset_manager.hssd.zvec.base_url=${HSSD_EMBEDDING_BASE_URL}"
     )
 fi
 

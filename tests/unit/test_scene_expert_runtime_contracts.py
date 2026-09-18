@@ -129,6 +129,24 @@ class SceneExpertRuntimeBoundaryTest(unittest.TestCase):
             runner_source,
         )
 
+    def test_parallel_runner_preflights_external_hssd_embedding_service(self) -> None:
+        runner_source = self._source("scripts/run_parallel_critic_on.sh")
+
+        self.assertIn(
+            'HSSD_EMBEDDING_BASE_URL="${HSSD_EMBEDDING_BASE_URL:-http://127.0.0.1:8014}"',
+            runner_source,
+        )
+        self.assertIn("LlamaTextEmbeddingClient(config).embed_text(", runner_source)
+        self.assertIn(
+            "HSSD embedding service preflight failed; no critic batches were started.",
+            runner_source,
+        )
+        for component in ("furniture", "wall", "ceiling", "manipuland"):
+            self.assertIn(
+                f'"{component}_agent.asset_manager.hssd.zvec.base_url=${{HSSD_EMBEDDING_BASE_URL}}"',
+                runner_source,
+            )
+
     def test_parallel_runner_preserves_generation_exit_on_metrics_failure(
         self,
     ) -> None:
