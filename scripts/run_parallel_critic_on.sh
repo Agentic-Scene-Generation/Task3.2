@@ -8,7 +8,7 @@
 #   GENERATE_SHARED_BASE=true ... bash scripts/run_parallel_critic_on.sh
 # generates OUTPUT_ROOT/shared_base and branches the critic run from it.
 # To reuse a previous base, set BRANCH_FROM_SHARED_BASE=true and point
-# SHARED_BASE_ROOT at that directory.
+# SHARED_BASE_ROOT at either the prior output root or its shared_base directory.
 # Output defaults to ``outputs/critic_probe/<run-id>``. Override it with
 # OUTPUT_ROOT, ``--output-root <directory>``, or ``--output-dir <directory>``
 # for disposable probes.
@@ -519,6 +519,32 @@ normalize_replay_source_root() {
     return 1
 }
 
+normalize_shared_base_root() {
+    local requested_root="$1"
+    local candidate batch_csv
+
+    if [ ! -d "$requested_root" ]; then
+        echo "ERROR: SHARED_BASE_ROOT does not exist: $requested_root" >&2
+        return 1
+    fi
+
+    # An output root may contain both critic_on/ and shared_base/. Prefer the
+    # immutable shared base explicitly; critic_on batches are later-stage
+    # results and must never be selected just because they also have manifests.
+    for candidate in "$requested_root/shared_base" "$requested_root"; do
+        for batch_csv in "$candidate"/batch_[0-9][0-9][0-9]/batch_cases.csv; do
+            if [ -f "$batch_csv" ]; then
+                readlink -f "$candidate"
+                return 0
+            fi
+        done
+    done
+
+    echo "ERROR: SHARED_BASE_ROOT has no reusable batch manifests: $requested_root" >&2
+    echo "       Expected batch_NNN/batch_cases.csv under that directory or its shared_base/ child." >&2
+    return 1
+}
+
 require_positive_integer SCENE_BATCH_SIZE "$SCENE_BATCH_SIZE"
 require_positive_integer SCENE_WORKERS_PER_PROCESS "$SCENE_WORKERS_PER_PROCESS"
 if [[ ! "$SCENE_RETRY_ATTEMPTS" =~ ^[0-9]+$ ]]; then
@@ -756,9 +782,10 @@ if [ "$BRANCH_FROM_SHARED_BASE" = "true" ] || [ "$GENERATE_SHARED_BASE" = "true"
     if [ -z "$SHARED_BASE_ROOT" ]; then
         SHARED_BASE_ROOT="$OUTPUT_ROOT/shared_base"
     fi
-    if [ "$GENERATE_SHARED_BASE" = "false" ] && [ ! -d "$SHARED_BASE_ROOT" ]; then
-        echo "ERROR: SHARED_BASE_ROOT does not exist: $SHARED_BASE_ROOT" >&2
-        exit 1
+    if [ "$GENERATE_SHARED_BASE" = "false" ]; then
+        if ! SHARED_BASE_ROOT="$(normalize_shared_base_root "$SHARED_BASE_ROOT")"; then
+            exit 1
+        fi
     fi
 fi
 
@@ -1142,6 +1169,9 @@ if [ "$INTERNAL_RUN_BATCH" = "false" ] \
 fi
 echo "thinking profile: floor_plan=${FLOOR_PLAN_DESIGNER_THINKING}/${FLOOR_PLAN_CRITIC_THINKING}, furniture=${FURNITURE_DESIGNER_THINKING}/${FURNITURE_CRITIC_THINKING}, wall=${WALL_DESIGNER_THINKING}/${WALL_CRITIC_THINKING}, ceiling=${CEILING_DESIGNER_THINKING}/${CEILING_CRITIC_THINKING}, manipuland=${MANIPULAND_DESIGNER_THINKING}/${MANIPULAND_CRITIC_THINKING}"
 echo "shared base: $BRANCH_FROM_SHARED_BASE (generate=$GENERATE_SHARED_BASE)"
+if [ "$BRANCH_FROM_SHARED_BASE" = "true" ]; then
+    echo "shared base root: $SHARED_BASE_ROOT"
+fi
 echo "replay source: ${REPLAY_FROM_PATH:-none} (mode=$REPLAY_MODE)"
 echo "holdout cases: $INCLUDE_HOLDOUT_CASES"
 echo "SceneEval no-VLM geometry after run: $SCENEEVAL_AFTER_RUN"
