@@ -595,7 +595,7 @@ def _compute_clearance_via_raycasting(
     full_mesh: trimesh.Trimesh,
     config: SupportSurfaceExtractionConfig,
     default_clearance: float,
-) -> float:
+) -> tuple[float, bool]:
     """Compute clearance by ray-casting upward from surface vertices.
 
     Casts vertical rays (+Z direction) from each vertex in the surface mesh
@@ -610,7 +610,7 @@ def _compute_clearance_via_raycasting(
         default_clearance: Clearance to use when no obstacles found above.
 
     Returns:
-        Clearance distance in meters based on config.clearance_percentile.
+        Clearance distance and whether no obstacle was found above the surface.
     """
     # Get surface vertices as ray origins, with Z offset to avoid self-intersection.
     # The surface mesh is flattened to a single Z height (the surface plane).
@@ -645,7 +645,7 @@ def _compute_clearance_via_raycasting(
     if len(locations) == 0:
         # No intersections - use default clearance for top surfaces.
         console_logger.debug(f"No hits, using default clearance={default_clearance}m")
-        return default_clearance
+        return default_clearance, True
 
     # Compute distances from ray origins to intersection points.
     # index_ray tells us which ray (vertex) each intersection belongs to.
@@ -657,6 +657,15 @@ def _compute_clearance_via_raycasting(
     # Filter out tiny distances (self-intersections or numerical noise).
     # With the offset, self-intersections should no longer occur, but filter anyway.
     valid_distances = distances[distances > config.self_intersection_threshold_m]
+
+    if len(valid_distances) == 0:
+        # Raw hits can consist entirely of numerical self-intersections. Those
+        # do not prove that the space above the surface is bounded.
+        console_logger.debug(
+            "No valid obstacle hits after self-intersection filtering; "
+            f"using default clearance={default_clearance}m"
+        )
+        return default_clearance, True
 
     # Include non-hit rays with default clearance for correct percentile semantics.
     # The percentile should represent "X% of rays have clearance this low or lower",
@@ -682,7 +691,7 @@ def _compute_clearance_via_raycasting(
         f"p{config.clearance_percentile:.0f}={percentile_clearance:.3f}m, "
         f"capped={capped_clearance:.3f}m"
     )
-    return capped_clearance
+    return capped_clearance, False
 
 
 def _compute_surface_bounds(
@@ -691,7 +700,7 @@ def _compute_surface_bounds(
     transform: RigidTransform,
     simplified_mesh: trimesh.Trimesh,
     config: SupportSurfaceExtractionConfig,
-) -> tuple[np.ndarray, np.ndarray, float]:
+) -> tuple[np.ndarray, np.ndarray, float, bool]:
     """Compute 3D AABB for surface in surface-local frame.
 
     Algorithm:
@@ -713,8 +722,8 @@ def _compute_surface_bounds(
         config: Algorithm configuration.
 
     Returns:
-        Tuple of (bounds_min, bounds_max, clearance) in surface-local frame.
-        bounds_min and bounds_max are (3,) arrays, clearance is float in meters.
+        Tuple of (bounds_min, bounds_max, clearance, open_above) in the surface
+        local frame.
     """
     # Extract vertices of faces in this surface.
     face_vertices = mesh.vertices[mesh.faces[plane.face_indices]]  # (N, 3, 3).
@@ -744,7 +753,7 @@ def _compute_surface_bounds(
     z_min = config.surface_offset_m
 
     # Ray-cast to find actual clearance above this surface.
-    clearance = _compute_clearance_via_raycasting(
+    clearance, open_above = _compute_clearance_via_raycasting(
         surface_mesh=simplified_mesh,
         full_mesh=mesh,
         config=config,
@@ -757,7 +766,7 @@ def _compute_surface_bounds(
     bounds_min = np.array([xy_min_centered[0], xy_min_centered[1], z_min])
     bounds_max = np.array([xy_max_centered[0], xy_max_centered[1], z_max])
 
-    return bounds_min, bounds_max, clearance
+    return bounds_min, bounds_max, clearance, open_above
 
 
 def _create_flattened_surface_mesh(
@@ -923,7 +932,7 @@ def _create_support_surface_from_plane(
     )
 
     # Compute surface bounds (uses ray-casting with flattened mesh).
-    bounds_min, bounds_max, clearance = _compute_surface_bounds(
+    bounds_min, bounds_max, clearance, open_above = _compute_surface_bounds(
         mesh=mesh,
         plane=plane,
         transform=transform,
@@ -1002,6 +1011,7 @@ def _create_support_surface_from_plane(
         bounding_box_max=bounds_max,
         transform=transform,
         mesh=mesh_local,
+        open_above=open_above,
     )
 
     return surface
@@ -1358,9 +1368,24 @@ def extract_support_surfaces_articulated(
                     np.linalg.norm(locations - ray_origins[index_ray], axis=1)
                     + config.self_intersection_threshold_m
                 )
-                clearance = float(np.percentile(distances, config.clearance_percentile))
+                valid_distances = distances[
+                    distances > config.self_intersection_threshold_m
+                ]
+                if len(valid_distances) > 0:
+                    clearance = float(
+                        np.percentile(valid_distances, config.clearance_percentile)
+                    )
+                    surface.open_above = False
+                else:
+                    clearance = config.top_surface_clearance_m
+                    surface.open_above = True
             else:
                 clearance = config.top_surface_clearance_m
+                surface.open_above = True
+
+            # Per-link extraction cannot see geometry from other links. Keep the
+            # stored placement volume aligned with the combined-mesh measurement.
+            surface.bounding_box_max[2] = surface.bounding_box_min[2] + clearance
 
             # Apply clearance filter.
             if clearance >= config.min_clearance_m:

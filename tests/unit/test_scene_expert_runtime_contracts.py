@@ -1,3 +1,4 @@
+import subprocess
 import unittest
 
 from pathlib import Path
@@ -92,6 +93,23 @@ class SceneExpertRuntimeBoundaryTest(unittest.TestCase):
         self.assertIn("if run_shared_base_with_recovery; then", runner_source)
         self.assertNotIn("if ! run_shared_base_with_recovery; then", runner_source)
 
+    def test_parallel_runner_uses_one_immutable_script_snapshot(self) -> None:
+        runner_path = _PROJECT_ROOT / "scripts/run_parallel_critic_on.sh"
+        runner_source = runner_path.read_text(encoding="utf-8")
+
+        subprocess.run(["bash", "-n", runner_path], check=True)
+        self.assertIn(
+            "CRITIC_PROBE_SCRIPT_SNAPSHOT:-false",
+            runner_source,
+        )
+        self.assertIn('cp -- "$source_script" "$snapshot_path"', runner_source)
+        self.assertIn('bash -n "$snapshot_path"', runner_source)
+        self.assertIn('bash "$snapshot_path" "$@" &', runner_source)
+        self.assertIn(
+            'SCRIPT_DIR="${CRITIC_PROBE_SOURCE_SCRIPT_DIR:-',
+            runner_source,
+        )
+
     def test_parallel_runner_scopes_scene_failure_policy(self) -> None:
         runner_source = self._source("scripts/run_parallel_critic_on.sh")
 
@@ -104,6 +122,48 @@ class SceneExpertRuntimeBoundaryTest(unittest.TestCase):
             '"experiment.scene_failure_policy=${scene_failure_policy}"',
             runner_source,
         )
+
+    def test_parallel_runner_enables_auditable_chat_streaming(self) -> None:
+        runner_source = self._source("scripts/run_parallel_critic_on.sh")
+
+        self.assertIn(
+            'SCENEEXPERT_CHAT_COMPLETIONS_STREAM="${SCENEEXPERT_CHAT_COMPLETIONS_STREAM:-true}"',
+            runner_source,
+        )
+        self.assertIn(
+            'SCENEEXPERT_CHAT_COMPLETIONS_STREAM="$(normalize_bool "$SCENEEXPERT_CHAT_COMPLETIONS_STREAM")"',
+            runner_source,
+        )
+        self.assertIn(
+            "ERROR: SCENEEXPERT_CHAT_COMPLETIONS_STREAM must be true or false",
+            runner_source,
+        )
+        self.assertIn(
+            "export SCENEEXPERT_CHAT_COMPLETIONS_STREAM",
+            runner_source,
+        )
+        self.assertIn(
+            'echo "Chat Completions streaming: $SCENEEXPERT_CHAT_COMPLETIONS_STREAM"',
+            runner_source,
+        )
+
+    def test_parallel_runner_preflights_external_hssd_embedding_service(self) -> None:
+        runner_source = self._source("scripts/run_parallel_critic_on.sh")
+
+        self.assertIn(
+            'HSSD_EMBEDDING_BASE_URL="${HSSD_EMBEDDING_BASE_URL:-http://127.0.0.1:8014}"',
+            runner_source,
+        )
+        self.assertIn("LlamaTextEmbeddingClient(config).embed_text(", runner_source)
+        self.assertIn(
+            "HSSD embedding service preflight failed; no critic batches were started.",
+            runner_source,
+        )
+        for component in ("furniture", "wall", "ceiling", "manipuland"):
+            self.assertIn(
+                f'"{component}_agent.asset_manager.hssd.zvec.base_url=${{HSSD_EMBEDDING_BASE_URL}}"',
+                runner_source,
+            )
 
     def test_parallel_runner_preserves_generation_exit_on_metrics_failure(
         self,

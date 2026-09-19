@@ -85,6 +85,59 @@ class HssdPreprocessedData:
             return None
 
 
+def load_hssd_metadata_by_wordnet(
+    index_path: Path,
+) -> dict[str, list[HssdMeshMetadata]]:
+    """Load the lightweight HSSD metadata index without CLIP embeddings.
+
+    The all-assets runtime needs HSSD's source ``up`` and ``front`` vectors to
+    preserve the same mesh-frame contract as the HSSD-only retriever. Loading
+    the embedding array just to recover those vectors would make the retrieval
+    server unnecessarily expensive.
+    """
+    if not index_path.exists():
+        raise FileNotFoundError(f"Index file not found: {index_path}")
+
+    with open(index_path, "r") as f:
+        index_data = json.load(f)
+
+    metadata_by_wordnet: dict[str, list[HssdMeshMetadata]] = {}
+    total_entries = 0
+    entries_with_orientation = 0
+    for wordnet_key, entries in index_data.items():
+        metadata_list = []
+        for entry in entries:
+            total_entries += 1
+            up = entry.get("up", "")
+            front = entry.get("front", "")
+            if up and front:
+                entries_with_orientation += 1
+            metadata_list.append(
+                HssdMeshMetadata(
+                    mesh_id=entry["id"],
+                    name=entry["name"],
+                    up=up,
+                    front=front,
+                    wordnet_key=wordnet_key,
+                )
+            )
+        metadata_by_wordnet[wordnet_key] = metadata_list
+
+    entries_without_orientation = total_entries - entries_with_orientation
+    orientation_percentage = (
+        entries_with_orientation / total_entries * 100.0 if total_entries else 0.0
+    )
+    missing_percentage = (
+        entries_without_orientation / total_entries * 100.0 if total_entries else 0.0
+    )
+    console_logger.info(
+        f"Loaded {total_entries} HSSD entries: {entries_with_orientation} with "
+        f"orientation data ({orientation_percentage:.1f}%), "
+        f"{entries_without_orientation} without ({missing_percentage:.1f}%)"
+    )
+    return metadata_by_wordnet
+
+
 def load_preprocessed_data(preprocessed_path: Path) -> HssdPreprocessedData:
     """Load all preprocessed HSSD data.
 
@@ -114,44 +167,7 @@ def load_preprocessed_data(preprocessed_path: Path) -> HssdPreprocessedData:
     if not categories_path.exists():
         raise FileNotFoundError(f"Categories file not found: {categories_path}")
 
-    with open(index_path, "r") as f:
-        index_data = json.load(f)
-
-    metadata_by_wordnet: dict[str, list[HssdMeshMetadata]] = {}
-    total_entries = 0
-    entries_with_orientation = 0
-    entries_without_orientation = 0
-    for wordnet_key, entries in index_data.items():
-        metadata_list = []
-        for entry in entries:
-            total_entries += 1
-
-            # Extract orientation fields (may be empty strings).
-            up = entry.get("up", "")
-            front = entry.get("front", "")
-
-            # Track orientation availability for logging.
-            if up and front:
-                entries_with_orientation += 1
-            else:
-                entries_without_orientation += 1
-
-            metadata = HssdMeshMetadata(
-                mesh_id=entry["id"],
-                name=entry["name"],
-                up=up,
-                front=front,
-                wordnet_key=wordnet_key,
-            )
-            metadata_list.append(metadata)
-        metadata_by_wordnet[wordnet_key] = metadata_list
-
-    console_logger.info(
-        f"Loaded {total_entries} HSSD entries: {entries_with_orientation} with "
-        f"orientation data ({entries_with_orientation/total_entries*100:.1f}%), "
-        f"{entries_without_orientation} without "
-        f"({entries_without_orientation/total_entries*100:.1f}%)"
-    )
+    metadata_by_wordnet = load_hssd_metadata_by_wordnet(index_path)
 
     clip_embeddings = np.load(embeddings_path)
     console_logger.info(

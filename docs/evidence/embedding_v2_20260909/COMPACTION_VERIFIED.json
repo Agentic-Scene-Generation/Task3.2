@@ -1,0 +1,9 @@
+{
+  "passed": true,
+  "source": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_gpu_20260909",
+  "destination": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_gpu_compact_20260909",
+  "preserved_vectors": 10769,
+  "all_vectors_and_fields_exact": true,
+  "seconds": 29.696725939400494,
+  "timestamp": 1788960566.2486775
+}

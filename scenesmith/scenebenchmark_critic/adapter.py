@@ -19,7 +19,11 @@ from scenesmith.agent_utils.room import (
     SupportSurface,
 )
 from scenesmith.scenebenchmark_critic.asset_library_annotations import (
+    build_scenebenchmark_annotation,
     get_hssd_asset_annotations,
+)
+from scenesmith.scenebenchmark_critic.current_asset_annotations import (
+    get_current_asset_annotation,
 )
 from scenesmith.scenebenchmark_critic.evaluator import build_all_checks
 from scenesmith.scenebenchmark_critic.intent_contract import (
@@ -938,11 +942,17 @@ def _support_surface_to_region(
     corners_world = np.array([surface.transform @ corner for corner in corners_local])
     corners_world = corners_world + offset
     z_world = float((surface.transform @ np.array([0.0, 0.0, 0.0]))[2] + offset[2])
+    clearance_above_m = max(
+        float(surface.bounding_box_max[2] - surface.bounding_box_min[2]), 0.0
+    )
+    if not math.isfinite(clearance_above_m):
+        clearance_above_m = 0.0
     return {
         "region_id": str(surface.surface_id),
         "support_kind": "top_surface",
         "height_world_z": z_world,
-        "clearance_above_m": None,
+        "clearance_above_m": clearance_above_m,
+        "open_above": getattr(surface, "open_above", False) is True,
         "access_type": "top",
         "area_m2": surface.area,
         "polygon_world_xy": corners_world[:, :2].tolist(),
@@ -1387,11 +1397,17 @@ _HSSD_METADATA_ID_KEYS = ("hssd_mesh_id", "asset_id", "object_id")
 
 
 def _hssd_annotation_functional_hints(obj: SceneObject) -> dict[str, Any]:
+    """Return functional hints for HSSD or namespaced all-assets retrievals."""
     asset_id = _hssd_asset_id_from_metadata(obj.metadata)
     if not asset_id:
         return {}
     try:
-        record = get_hssd_asset_annotations(asset_id)
+        if asset_id.lower().startswith("3dfuture:"):
+            record = get_current_asset_annotation(asset_id)
+            annotation_source = "3dfuture_annotations"
+        else:
+            record = get_hssd_asset_annotations(asset_id)
+            annotation_source = "hssd_annotations"
     except Exception:
         return {}
     if not isinstance(record, dict):
@@ -1400,11 +1416,16 @@ def _hssd_annotation_functional_hints(obj: SceneObject) -> dict[str, Any]:
     if not isinstance(hints, dict):
         hints = (record.get("scenebenchmark_fd_sa") or {}).get("functional_hints")
     if not isinstance(hints, dict):
+        hints = build_scenebenchmark_annotation(record).get("functional_hints")
+    if not isinstance(hints, dict):
         return {}
     out = dict(hints)
-    out.setdefault("asset_annotation_source", "hssd_annotations")
-    out.setdefault("classification_source", "hssd_annotations")
-    out["hssd_annotation_asset_id"] = normalize_hssd_id_for_adapter(asset_id)
+    out.setdefault("asset_annotation_source", annotation_source)
+    out.setdefault("classification_source", annotation_source)
+    if annotation_source == "hssd_annotations":
+        out["hssd_annotation_asset_id"] = normalize_hssd_id_for_adapter(asset_id)
+    else:
+        out["asset_annotation_asset_uid"] = asset_id
     return out
 
 

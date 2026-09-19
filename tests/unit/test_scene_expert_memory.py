@@ -411,6 +411,15 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertEqual(
             "manipuland",
             generation_owner(
+                "television",
+                relation="on_top_of",
+                endpoint="subject",
+                declared_owner="furniture",
+            ),
+        )
+        self.assertEqual(
+            "manipuland",
+            generation_owner(
                 "glass_bowl",
                 relation="on_top_of",
                 endpoint="subject",
@@ -502,17 +511,14 @@ class SceneExpertMemoryTest(unittest.TestCase):
             SceneTaskSpec(
                 room_type="living_room",
                 style="standard",
-                required_large_objects=["tv stand"],
-                required_small_objects=["television"],
+                required_large_objects=["tv stand", "television"],
             ),
             media_contract,
         )
 
-        self.assertCountEqual(
-            ["tv stand", "television"], media_spec.required_large_objects
-        )
-        self.assertNotIn("television", media_spec.required_small_objects)
-        self.assertEqual("furniture", media_contract["constraints"][0]["stage"])
+        self.assertEqual(["tv stand"], media_spec.required_large_objects)
+        self.assertEqual(["television"], media_spec.required_small_objects)
+        self.assertEqual("manipuland", media_contract["constraints"][0]["stage"])
 
         bowl_contract = {
             "constraints": [
@@ -570,10 +576,11 @@ class SceneExpertMemoryTest(unittest.TestCase):
                 contract,
             )
 
-            self.assertIn("television", reconciled.required_large_objects)
+            self.assertIn("television", reconciled.required_small_objects)
+            self.assertNotIn("television", reconciled.required_large_objects)
             self.assertNotIn("television", reconciled.required_wall_objects)
             self.assertTrue(
-                all(row["stage"] == "furniture" for row in contract["constraints"])
+                all(row["stage"] == "manipuland" for row in contract["constraints"])
             )
 
     def test_explicit_wall_mount_still_owns_television(self) -> None:

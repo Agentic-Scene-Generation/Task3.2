@@ -1270,9 +1270,9 @@ def test_bilateral_bedside_prompt_recovers_both_nightstands() -> None:
     ]
 
 
-def test_tv_stand_prompt_recovers_television_target_but_not_wall_mounts() -> None:
+def test_tv_stand_prompt_requires_explicit_support_and_rejects_wall_mounts() -> None:
     obligations = infer_prompt_manipuland_obligations(
-        "A living room with a TV stand and television on the opposite wall."
+        "A living room with a television on top of the TV stand."
     )
 
     assert [(item.category, item.target_count) for item in obligations] == [
@@ -1285,12 +1285,18 @@ def test_tv_stand_prompt_recovers_television_target_but_not_wall_mounts() -> Non
 
     assert wall_mounted == []
 
+    cooccurring = infer_prompt_manipuland_obligations(
+        "A living room with a TV stand and television on the opposite wall."
+    )
+
+    assert cooccurring == []
+
 
 def test_recovery_adds_tv_stand_omitted_by_vlm() -> None:
     tv_stand = _object("tv_stand_0", "TV stand")
     scene = SimpleNamespace(
         scene_expert_original_description=(
-            "A living room with a TV stand and television on the opposite wall."
+            "A living room with a television on top of the TV stand."
         ),
         text_description="",
         objects={tv_stand.object_id: tv_stand},
