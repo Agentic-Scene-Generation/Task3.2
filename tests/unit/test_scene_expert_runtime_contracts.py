@@ -1,3 +1,4 @@
+import subprocess
 import unittest
 
 from pathlib import Path
@@ -91,6 +92,23 @@ class SceneExpertRuntimeBoundaryTest(unittest.TestCase):
 
         self.assertIn("if run_shared_base_with_recovery; then", runner_source)
         self.assertNotIn("if ! run_shared_base_with_recovery; then", runner_source)
+
+    def test_parallel_runner_uses_one_immutable_script_snapshot(self) -> None:
+        runner_path = _PROJECT_ROOT / "scripts/run_parallel_critic_on.sh"
+        runner_source = runner_path.read_text(encoding="utf-8")
+
+        subprocess.run(["bash", "-n", runner_path], check=True)
+        self.assertIn(
+            "CRITIC_PROBE_SCRIPT_SNAPSHOT:-false",
+            runner_source,
+        )
+        self.assertIn('cp -- "$source_script" "$snapshot_path"', runner_source)
+        self.assertIn('bash -n "$snapshot_path"', runner_source)
+        self.assertIn('bash "$snapshot_path" "$@" &', runner_source)
+        self.assertIn(
+            'SCRIPT_DIR="${CRITIC_PROBE_SOURCE_SCRIPT_DIR:-',
+            runner_source,
+        )
 
     def test_parallel_runner_scopes_scene_failure_policy(self) -> None:
         runner_source = self._source("scripts/run_parallel_critic_on.sh")

@@ -15,8 +15,61 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+# Bash parses top-level input incrementally. These probes can run for many
+# hours, so replacing this file while a controller is still running can make
+# that process read the beginning from the old file and the tail from the new
+# one. Run the controller and every re-entered batch from one syntax-checked
+# snapshot to keep a live run independent of later checkouts or edits.
+if [ "${CRITIC_PROBE_SCRIPT_SNAPSHOT:-false}" != "true" ]; then
+    source_script="$(readlink -f "${BASH_SOURCE[0]}")"
+    source_script_dir="$(dirname "$source_script")"
+    source_project_root="$(dirname "$source_script_dir")"
+    snapshot_dir="$(mktemp -d "${TMPDIR:-/tmp}/critic-probe-script.XXXXXX")"
+    snapshot_path="$snapshot_dir/run_parallel_critic_on.sh"
+    snapshot_pid=""
+
+    cleanup_script_snapshot() {
+        rm -f -- "$snapshot_path"
+        rmdir -- "$snapshot_dir" 2>/dev/null || true
+    }
+    forward_snapshot_signal() {
+        if [ -n "$snapshot_pid" ] && kill -0 "$snapshot_pid" 2>/dev/null; then
+            kill -s "$1" "$snapshot_pid" 2>/dev/null || true
+        fi
+    }
+    trap cleanup_script_snapshot EXIT
+    trap 'forward_snapshot_signal INT' INT
+    trap 'forward_snapshot_signal TERM' TERM
+    trap 'forward_snapshot_signal HUP' HUP
+
+    cp -- "$source_script" "$snapshot_path"
+    if ! bash -n "$snapshot_path"; then
+        echo "ERROR: critic probe script snapshot failed syntax validation: $source_script" >&2
+        exit 2
+    fi
+    env \
+        CRITIC_PROBE_SCRIPT_SNAPSHOT=true \
+        CRITIC_PROBE_SOURCE_SCRIPT_DIR="$source_script_dir" \
+        CRITIC_PROBE_SOURCE_PROJECT_ROOT="$source_project_root" \
+        bash "$snapshot_path" "$@" &
+    snapshot_pid=$!
+    if wait "$snapshot_pid"; then
+        snapshot_exit_code=0
+    else
+        snapshot_exit_code=$?
+        while kill -0 "$snapshot_pid" 2>/dev/null; do
+            if wait "$snapshot_pid"; then
+                snapshot_exit_code=0
+            else
+                snapshot_exit_code=$?
+            fi
+        done
+    fi
+    exit "$snapshot_exit_code"
+fi
+
+SCRIPT_DIR="${CRITIC_PROBE_SOURCE_SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+PROJECT_ROOT="${CRITIC_PROBE_SOURCE_PROJECT_ROOT:-$(dirname "$SCRIPT_DIR")}"
 cd "$PROJECT_ROOT"
 
 # Critic probes normally run the non-memory harness. Memory experiments remain
