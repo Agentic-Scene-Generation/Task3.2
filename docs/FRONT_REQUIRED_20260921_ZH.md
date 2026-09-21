@@ -33,7 +33,7 @@
 
 这是快照库存覆盖，不宣称自动包含未来生成的新资产。
 
-本次实际覆盖 36,665 件：HSSD 10,963、3DFuture 14,823、Others 5,564、生成 5,315。Luna unique 13,924、multiple_valid 选一面 820、保留旧方向作为 fallback 18,030、未完成 Luna 而保留原语义方向 108、新补 +Z fallback 3,783。全量方向、三处文件与源坐标转换、实际 require/require_unified 和 Task 数据读取接口通过；nobody 用户能读全量 36,665 条方向。
+本次当前快照覆盖 36,714 件：HSSD 10,963、3DFuture 14,823、Others 5,564、生成 5,364。Luna unique 13,924、multiple_valid 选一面 820、保留旧方向作为 fallback 18,030、未完成 Luna 而保留原语义方向 108、新补 +Z fallback 3,832。全量方向、三处文件与源坐标转换、实际 require/require_unified 和 Task 数据读取接口通过；nobody 用户能读全量 36,714 条方向。
 
 测试边界：新增解析规则 5 项通过；历史 HSSD front 审计测试改为检查 canonical_front_previous，并新增当前方向全覆盖检查，相关 4 项通过。独立库首次完整测试 138 通过 / 5 失败，其中 4 项为上述旧快照断言；另 1 项 `test_record_completion_has_no_pending_families` 因旧构建器读取 style@2.0 中不存在的 annotation_status，发布前备份亦缺该旧字段，不属于本次正面变更。Task3.2 完整测试被环境缺少 bpy 阻挡；局部 open-mesh 7 项通过，2 条既有 pytest 配置警告。未宣称完整测试全绿。
 
