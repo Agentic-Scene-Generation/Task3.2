@@ -12,6 +12,7 @@ import argparse
 import base64
 import concurrent.futures
 import gc
+import gzip
 import json
 import logging
 import multiprocessing as mp
@@ -29,7 +30,10 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import zvec
+try:
+    import zvec
+except ModuleNotFoundError:
+    zvec = None  # CPU prompt/HTTP tests do not require a vector database.
 
 from tqdm import tqdm
 
@@ -42,7 +46,7 @@ warnings.filterwarnings(
     message=r"The '(repr|frozen)' attribute .*`?Field\(\)`? function.*",
 )
 
-HSSD_ID_RE = re.compile(r"(?<![0-9a-fA-F])([0-9a-fA-F]{40})(?![0-9a-fA-F])")
+HSSD_ID_RE = re.compile(r"(?<![0-9a-fA-FxX])([0-9a-fA-F]{40}|[xX]{4}[0-9a-fA-FxX]{36})(?![0-9a-fA-FxX])")
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 DEFAULT_RETRIEVAL_VIEWS = ("front", "back", "left", "right", "top", "iso")
 VIEW_PRIORITY = (*DEFAULT_RETRIEVAL_VIEWS, "bottom", "side", "image")
@@ -57,6 +61,13 @@ class HssdMeshMetadata:
     wordnet_key: str
 
 
+@dataclass(frozen=True)
+class StylePath:
+    level_1_id: str
+    level_2_id: str | None
+    evidence_type: str
+
+
 @dataclass
 class RenderedAsset:
     asset_id: str
@@ -64,6 +75,7 @@ class RenderedAsset:
     metadata: HssdMeshMetadata | None
     object_groups: list[str]
     asset_path: Path | None
+    style_paths: list[StylePath]
 
 
 @dataclass
@@ -276,12 +288,23 @@ def load_hssd_lookup(
     return metadata_by_id, groups_by_wordnet
 
 
+def load_asset_style_annotations(path: Path, ontology_path: Path | None = None) -> dict[str, list[StylePath]]:
+    """Use the current 17-L1/source-only-L2 contract, never legacy candidates."""
+    try:
+        from .style_embedding_v2 import load_confirmed_paths, DEFAULT_ONTOLOGY
+    except ImportError:
+        from style_embedding_v2 import load_confirmed_paths, DEFAULT_ONTOLOGY
+    paths = load_confirmed_paths(path, ontology_path or DEFAULT_ONTOLOGY)
+    return {aid: [StylePath(*item) for item in items] for aid, items in paths.items()}
+
+
 def discover_rendered_assets(
     render_root: Path,
     metadata_by_id: dict[str, HssdMeshMetadata],
     groups_by_wordnet: dict[str, list[str]],
     hssd_root: Path | None,
     include_views: set[str] | None,
+    styles_by_id: dict[str, list[StylePath]] | None = None,
     require_metadata: bool = True,
 ) -> list[RenderedAsset]:
     grouped: dict[str, dict[str, Path]] = {}
@@ -317,6 +340,7 @@ def discover_rendered_assets(
                 metadata=metadata,
                 object_groups=object_groups,
                 asset_path=asset_path,
+                style_paths=(styles_by_id or {}).get(asset_id, []),
             )
         )
     if skipped_without_metadata:
@@ -598,6 +622,14 @@ def build_asset_content(asset: RenderedAsset) -> str:
             parts.append(f"Original front vector: {asset.metadata.front}.")
     if asset.object_groups:
         parts.append(f"HSSD groups: {', '.join(asset.object_groups)}.")
+    if asset.style_paths:
+        labels = []
+        for style in asset.style_paths:
+            label = style.level_1_id.replace("_", " ")
+            if style.level_2_id:
+                label += f" > {style.level_2_id.replace('_', ' ')}"
+            labels.append(label)
+        parts.append(f"Verified styles: {'; '.join(labels)}.")
     parts.append(f"Rendered views: {', '.join(asset.image_paths.keys())}.")
     return " ".join(parts)
 
@@ -845,6 +877,8 @@ def open_or_create_collection(
     schema: zvec.CollectionSchema,
     recreate: bool,
 ) -> zvec.Collection:
+    if collection_path.resolve() == Path('/data/task3_2/share_data/scenesmith/hssd_zvec_collection').resolve():
+        raise ValueError('Protected production collection: use a separate style-v2 collection')
     if recreate and collection_path.exists():
         shutil.rmtree(collection_path)
 
@@ -1012,6 +1046,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=Path("data/hssd-models"),
         help="HSSD model root containing objects/<first-char>/<asset-id>.glb.",
+    )
+    parser.add_argument(
+        "--style-annotations",
+        type=Path,
+        default=None,
+        help=(
+            "Optional asset_style@2.0 JSON or JSON.GZ overlay. Only confirmed "
+            "source_metadata and visual_reviewed paths are added to embedding text."
+        ),
     )
     parser.add_argument(
         "--base-url",
@@ -1183,6 +1226,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if zvec is None:
+        raise RuntimeError("zvec is required for indexing; prompt-only validation does not create vectors")
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -1201,6 +1246,12 @@ def main(argv: list[str] | None = None) -> int:
         LOGGER.warning("HSSD root not found; asset_path field will be empty")
 
     metadata_by_id, groups_by_wordnet = load_hssd_lookup(preprocessed_path)
+    styles_by_id: dict[str, list[StylePath]] = {}
+    if args.style_annotations is not None:
+        if not args.style_annotations.exists():
+            LOGGER.error("Style annotation overlay not found: %s", args.style_annotations)
+            return 2
+        styles_by_id = load_asset_style_annotations(args.style_annotations)
     include_views = parse_include_views(args.include_views)
     render_views = parse_view_list(args.render_views)
 
@@ -1241,6 +1292,7 @@ def main(argv: list[str] | None = None) -> int:
         groups_by_wordnet=groups_by_wordnet,
         hssd_root=hssd_root,
         include_views=include_views,
+        styles_by_id=styles_by_id,
         require_metadata=not args.allow_missing_metadata,
     )
     if args.limit is not None:

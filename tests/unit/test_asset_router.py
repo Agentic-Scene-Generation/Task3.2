@@ -251,6 +251,80 @@ class TestRenderedHssdAssetChoice(unittest.TestCase):
         self.assertIn("Original scene prompt", prompt)
         self.assertIn("nightstand with a table lamp", prompt)
 
+    def test_uses_all_assets_manifest_images_for_namespaced_candidates(self) -> None:
+        candidates = [
+            self._candidate("others:abo:bed_a", "upholstered bed", 0.91),
+            self._candidate("3dfuture:bed_b", "wood platform bed", 0.89),
+        ]
+        vlm_service = MagicMock()
+        vlm_service.create_completion.return_value = (
+            '{"selected_index": 2, "selected_hssd_id": "3dfuture:bed_b", '
+            '"reason": "correct bed form"}'
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manifest_path = root / "embedding_inputs.shared.jsonl"
+            manifest_records = []
+            for candidate_index, candidate in enumerate(candidates):
+                image_paths = []
+                for view_index in range(9):
+                    image_path = (
+                        root / "images" / str(candidate_index) / f"{view_index}.png"
+                    )
+                    image_path.parent.mkdir(parents=True, exist_ok=True)
+                    Image.new(
+                        "RGB",
+                        (32, 32),
+                        (40 + candidate_index * 80, 30 + view_index * 10, 100),
+                    ).save(image_path)
+                    image_paths.append(str(image_path))
+                manifest_records.append(
+                    {
+                        "asset_uid": candidate.hssd_id,
+                        "image_paths": image_paths,
+                    }
+                )
+            manifest_path.write_text(
+                "".join(json.dumps(record) + "\n" for record in manifest_records),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {"HSSD_ALL_ASSETS_MANIFEST_PATH": str(manifest_path)},
+            ):
+                choice = choose_hssd_candidate_from_iso_renders(
+                    candidates=candidates,
+                    object_description="wood platform bed",
+                    scene_context="A bedroom with the bed against the main wall.",
+                    vlm_service=vlm_service,
+                    model="test-model",
+                    reasoning_effort="low",
+                    verbosity="low",
+                    vision_detail="low",
+                    rendered_assets_dir=root / "missing_legacy_renders",
+                    top_n=2,
+                    retrieval_backend="all_assets_embedding",
+                )
+
+        self.assertEqual(choice.selected_hssd_id, "3dfuture:bed_b")
+        self.assertEqual(choice.used_image_count, 2)
+        content = vlm_service.create_completion.call_args.kwargs["messages"][0][
+            "content"
+        ]
+        self.assertEqual(
+            len([item for item in content if item["type"] == "image_url"]), 2
+        )
+        evidence_labels = [
+            item["text"]
+            for item in content
+            if item["type"] == "text" and item["text"].startswith("CANDIDATE_INDEX=")
+        ]
+        self.assertEqual(len(evidence_labels), 2)
+        self.assertTrue(all("manifest view 1/4" in label for label in evidence_labels))
+        self.assertTrue(all("manifest view 4/4" in label for label in evidence_labels))
+
     def test_writes_rendered_choice_audit(self) -> None:
         candidates = [
             self._candidate("asset_audit_a", "generic wardrobe", 0.91),

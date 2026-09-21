@@ -137,6 +137,23 @@ class TestHssdUpholsteredSeatPolicy(unittest.TestCase):
             surface.bounding_box_max[2] - surface.bounding_box_min[2], 0.2
         )
         self.assertAlmostEqual(surface.transform.translation()[2], 0.51)
+        self.assertFalse(surface.open_above)
+
+    def test_annotation_without_finite_clearance_samples_is_open_above(self):
+        self._write_annotation([self._surface(index=5, clearances=())])
+
+        surfaces = self._load("general")
+
+        self.assertEqual(len(surfaces), 1)
+        self.assertTrue(surfaces[0].open_above)
+
+    def test_annotation_with_finite_clearance_samples_is_bounded(self):
+        self._write_annotation([self._surface(index=5, clearances=(0.2,) * 10)])
+
+        surfaces = self._load("general")
+
+        self.assertEqual(len(surfaces), 1)
+        self.assertFalse(surfaces[0].open_above)
 
     def test_upholstered_policy_still_rejects_low_p90_clearance(self):
         self._write_annotation(

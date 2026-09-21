@@ -1,3 +1,5 @@
+最新资产标注交付：[2026-09-21 中文说明](docs/ANNOTATION_SYNC_20260921_ZH.md)（新增 Luna 正面候选，保留原 canonical_front）。
+
 <h1 align="center">
   <img src="media/symbol.svg" alt="" height="36" align="absmiddle">&nbsp;SceneSmith
 </h1>
