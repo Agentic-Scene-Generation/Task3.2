@@ -1,1 +1,7 @@
-{"documentation":"docs/FRONT_REQUIRED_20260921_ZH.md","embedding_vectors_updated":false,"front_candidates_are_not_canonical_replacements":false,"manifest":"FRONT_REQUIRED_20260921.json","release":"front_required_20260921"}
+{
+  "release": "front_and_style_fallback_20260921",
+  "manifest": "FRONT_STYLE_FALLBACK_20260921.json",
+  "documentation": "docs/ASSET_LIBRARY_CURRENT_STATUS_AND_FRONT_REVIEW_20260921_ZH.md",
+  "front_rejudgment_merged": false,
+  "embedding_vectors_updated": false
+}

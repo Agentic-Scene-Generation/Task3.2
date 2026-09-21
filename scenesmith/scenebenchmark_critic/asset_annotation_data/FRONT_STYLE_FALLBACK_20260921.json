@@ -1,0 +1,21 @@
+{
+  "release": "front_and_style_fallback_20260921",
+  "total": 36714,
+  "counts": {
+    "hssd": 10963,
+    "3dfuture": 14823,
+    "others": 5564,
+    "generated": 5364
+  },
+  "sha256": {
+    "hssd_annotation_lookup.json.gz": "bca0963a39f913060efbbc00dfd4b6d99d4d3bdb3c911b2b0390091d60db8c3c",
+    "3dfuture/3dfuture_annotation_lookup.json.gz": "ea8c912c3aace35a53e0190cf1f330f5821edc680f2ba19e84e3d7e2336a1a31",
+    "external/others_annotation_lookup.json.gz": "139fd264709b9bd34b02094d42a3f00e7e440e1392e39a17b9e6b132e85efc52",
+    "generated_annotations.json.gz": "f19e252d7b35efda73f4371a94cffde71a06735d29c658c8394e65f35bdf582e",
+    "canonical_front_required.json.gz": "535114aa6652cbb740c565a4a45a6a95ffdd0a2c1743cfb145455d51b56681c1",
+    "asset_style_annotations_v2.shared.json.gz": "3ef8ac8092287f3dcf722a0d1557cd91c51dc864fd4e23161c468ff1d6a0c7b0"
+  },
+  "unknown_style": 1439,
+  "front_rejudgment_merged": false,
+  "replacement_policy": "Only after complete batch reconciliation and validation; no incremental canonical overwrite."
+}
