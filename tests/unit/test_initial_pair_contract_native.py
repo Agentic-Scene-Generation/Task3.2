@@ -46,7 +46,12 @@ def _evaluate(case):
 
 
 @pytest.mark.parametrize("lifted", [False, True])
-def test_prompt_floor_support_overrides_asset_prior_but_still_checks_height(lifted):
+@pytest.mark.parametrize(
+    "prompt", ["A plant on the floor.", "Place one large floor plant."]
+)
+def test_prompt_floor_support_overrides_asset_prior_but_still_checks_height(
+    lifted, prompt
+):
     plant = _object("plant_0", "plant", 1.0, 0, 0.4, 0.4, 0.9, z=0.8 if lifted else 0)
     plant["object_type"] = "furniture"
     plant["object_function_profile"] = {"is_small_placeable": True}
@@ -58,7 +63,7 @@ def test_prompt_floor_support_overrides_asset_prior_but_still_checks_height(lift
     table["functional_hints"] = {"candidate_affordances": ["supportable"]}
     case = {
         "stage": "furniture",
-        "original_task_instruction": "A plant on the floor.",
+        "original_task_instruction": prompt,
         "intent_contract": {"constraints": []},
         "scene_geometry": {
             "objects": [
@@ -225,3 +230,121 @@ def test_combined_edge_partition_checks_all_seven_chairs(wrong_facing):
         == "restore_complete_edge_partition"
     )
     assert rows and any(r["label"] == "fail" for r in rows) is wrong_facing
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "Do not place floor plants.",
+        "A room without floor plants.",
+        "Place floor plants on the table.",
+        "Place a floor plant in the corner. Place a plant on the table.",
+    ],
+)
+def test_compound_floor_support_does_not_resolve_negative_or_mixed_instructions(prompt):
+    case = {"original_task_instruction": prompt, "intent_contract": {"constraints": []}}
+    calibrate_contract(case)
+    assert not case["sceneexpert_contract_calibration"]["changes"]
+
+
+def _five_chair_case():
+    prompt = (
+        "Place one rectangular dining table. Arrange five dining chairs around the table: "
+        "two evenly spaced along each long side and one centered on one short side, "
+        "all facing the table; keep the opposite short side free of chairs."
+    )
+    edge = next(
+        row
+        for row in build_intent_contract(prompt)["constraints"]
+        if row["relation"] == "edge_distribution"
+    )
+    full = deepcopy(edge)
+    full["orientation"] = "unconstrained"
+    full["groups"][1]["spacing"] = "unconstrained"
+    partial = deepcopy(full)
+    partial.update(constraint_id="partial_long_sides", source="model_inferred")
+    partial["subjects"]["count"] = 4
+    partial["groups"] = full["groups"][:1]
+    centering = {
+        "constraint_id": "misinferred_short_side",
+        "relation": "centered_on_wall",
+        "source": "model_inferred",
+        "subjects": dict(edge["subjects"], count=1),
+        "targets": deepcopy(edge["targets"]),
+        "inference_reason": "one dining chair should be centered on one short side of the table",
+    }
+    objects = [_object("dining_table_0", "dining_table", 0, 0, 4, 1.2, 0.75)]
+    for i, (x, y, yaw) in enumerate(
+        [
+            (-1, -0.95, 0),
+            (1, -0.95, 0),
+            (-1, 0.95, 180),
+            (1, 0.95, 180),
+            (-2.35, 0, -90),
+        ]
+    ):
+        objects.append(
+            _object(f"dining_chair_{i}", "dining_chair", x, y, 0.6, 0.6, 0.9, yaw=yaw)
+        )
+    return {
+        "stage": "furniture",
+        "original_task_instruction": prompt,
+        "intent_contract": {"constraints": [full, partial, centering]},
+        "scene_geometry": {"objects": objects},
+    }
+
+
+@pytest.mark.parametrize("defect", [None, "facing", "missing", "extra", "off_center"])
+def test_full_layout_and_partial_duplicate_keep_count_centering_and_facing(defect):
+    case = _five_chair_case()
+    objects = case["scene_geometry"]["objects"]
+    if defect == "facing":
+        objects[1]["yaw_deg"] = 180
+    elif defect == "missing":
+        objects.pop()
+    elif defect == "extra":
+        objects.append(
+            _object("dining_chair_5", "dining_chair", 2.35, 0, 0.6, 0.6, 0.9, yaw=90)
+        )
+    elif defect == "off_center":
+        objects[-1] = _object(
+            "dining_chair_4", "dining_chair", -2.35, 0.7, 0.6, 0.6, 0.9, yaw=-90
+        )
+    original = deepcopy(case)
+    calibrated, results = _evaluate(case)
+    assert case == original
+    rows = calibrated["intent_contract"]["constraints"]
+    assert len(rows) == 1
+    assert rows[0]["subjects"]["count"] == 5
+    assert rows[0]["orientation"] == "toward_target"
+    assert all(group["spacing"] == "equal_segments" for group in rows[0]["groups"])
+    assert results and any(row["label"] == "fail" for row in results) is (
+        defect is not None
+    )
+    changes = calibrated["sceneexpert_contract_calibration"]["changes"]
+    assert len(changes) == 1 and len(changes[0]["removed_constraints"]) == 3
+
+
+@pytest.mark.parametrize(
+    "conflict", ["counts", "orientation", "explicit_centering", "wall_target"]
+)
+def test_complete_layout_does_not_suppress_noncovered_constraints(conflict):
+    case = _five_chair_case()
+    original = case["intent_contract"]["constraints"]
+    if conflict == "counts":
+        protected = original[1]
+        protected["subjects"]["count"] = 6
+        protected["groups"] = deepcopy(protected["groups"])
+        protected["groups"][0]["counts_per_edge"] = [3, 3]
+    elif conflict == "orientation":
+        protected = original[1]
+        protected["orientation"] = "away_from_target"
+    elif conflict == "explicit_centering":
+        protected = original[2]
+        protected["source"] = "explicit_prompt"
+    else:
+        protected = original[2]
+        protected["targets"]["category"] = "wall"
+    protected = deepcopy(protected)
+    calibrate_contract(case)
+    assert protected in case["intent_contract"]["constraints"]

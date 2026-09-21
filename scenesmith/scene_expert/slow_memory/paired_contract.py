@@ -6,12 +6,13 @@ The existing deterministic parser and Main evaluators remain the semantic source
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from typing import Any
 
 from scenesmith.scene_expert.slow_memory.paired import digest
 
-CALIBRATION_PROTOCOL = "sceneexpert.candidate_contract_calibration.v1"
+CALIBRATION_PROTOCOL = "sceneexpert.candidate_contract_calibration.v2"
 
 
 def _selector_key(selector: dict[str, Any] | None) -> tuple[Any, ...]:
@@ -29,6 +30,116 @@ def _endpoints(row: dict[str, Any]) -> tuple[Any, ...]:
     return (_selector_key(row.get("subjects")), _selector_key(row.get("targets")))
 
 
+def _grounded_constraints(prompt: str) -> list[dict[str, Any]]:
+    """Parse explicit relations, including the positive noun phrase floor plants."""
+    from scenesmith.scenebenchmark_critic.intent_contract import build_intent_contract
+
+    rows = list(build_intent_contract(prompt).get("constraints") or [])
+    # Do not resolve mixed/contradictory support instructions by dropping one.
+    if any(
+        row.get("relation") in {"on_top_of", "object_on_support"}
+        and (row.get("subjects") or {}).get("category") == "plant"
+        and (row.get("targets") or {}).get("category") != "floor"
+        for row in rows
+    ):
+        return rows
+    for sentence in re.split(r"[.!?;]", prompt):
+        if not re.search(r"\bfloor[ -]+plants?\b", sentence, re.IGNORECASE):
+            continue
+        if re.search(r"\b(?:no|not|without|avoid)\b", sentence, re.IGNORECASE):
+            continue
+        normalized = re.sub(
+            r"\bfloor[ -]+(plants?)\b",
+            r"\1 on the floor",
+            sentence,
+            flags=re.IGNORECASE,
+        )
+        for row in build_intent_contract(normalized).get("constraints") or []:
+            if (
+                row.get("relation") == "on_top_of"
+                and (row.get("subjects") or {}).get("category") == "plant"
+                and (row.get("targets") or {}).get("category") == "floor"
+                and not any(
+                    old.get("relation") == "on_top_of"
+                    and _endpoints(old) == _endpoints(row)
+                    for old in rows
+                )
+            ):
+                row = deepcopy(row)
+                row["evidence_span"] = sentence.strip()
+                row["inference_reason"] = (
+                    "Explicit floor-plant noun phrase normalization"
+                )
+                rows.append(row)
+    return rows
+
+
+def _covered_edge_rows(
+    rows: list[dict[str, Any]], candidate: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Find exact topological parts covered by a complete prompt-derived layout."""
+    expected = {group["edge_class"]: group for group in candidate.get("groups") or []}
+    covered: list[dict[str, Any]] = []
+    for row in rows:
+        groups = row.get("groups") or []
+        if (
+            row.get("relation") != "edge_distribution"
+            or (row.get("subjects") or {}).get("category")
+            != (candidate.get("subjects") or {}).get("category")
+            or _selector_key(row.get("targets"))
+            != _selector_key(candidate.get("targets"))
+            or row.get("edge_frame") != candidate.get("edge_frame")
+            or row.get("orientation")
+            not in {"unconstrained", candidate.get("orientation")}
+            or not groups
+            or len({group.get("edge_class") for group in groups}) != len(groups)
+            or sum(sum(group.get("counts_per_edge") or []) for group in groups)
+            != int((row.get("subjects") or {}).get("count") or 0)
+        ):
+            continue
+        if all(
+            group.get("edge_class") in expected
+            and sorted(group.get("counts_per_edge") or [])
+            == sorted(expected[group["edge_class"]].get("counts_per_edge") or [])
+            and group.get("spacing")
+            in {"unconstrained", expected[group["edge_class"]].get("spacing")}
+            for group in groups
+        ):
+            covered.append(row)
+    # Require evidence for the whole topology, never select a geometric subset.
+    if {group["edge_class"] for row in covered for group in row["groups"]} != set(
+        expected
+    ):
+        return []
+    return covered
+
+
+def _covered_short_side_centering(
+    row: dict[str, Any], candidate: dict[str, Any]
+) -> bool:
+    """Recognize inferred wall-centering errors already enforced by a table slot."""
+    return bool(
+        row.get("source") == "model_inferred"
+        and row.get("relation") == "centered_on_wall"
+        and (row.get("subjects") or {}).get("category")
+        == (candidate.get("subjects") or {}).get("category")
+        and (row.get("subjects") or {}).get("count") == 1
+        and (row.get("subjects") or {}).get("cohort") in (None, "", "all")
+        and _selector_key(row.get("targets")) == _selector_key(candidate.get("targets"))
+        and re.search(
+            r"\bcentered\b[^.]{0,80}\bshort (?:side|edge)\b",
+            str(row.get("inference_reason") or ""),
+            re.IGNORECASE,
+        )
+        and any(
+            group.get("edge_class") == "short"
+            and sorted(group.get("counts_per_edge") or []) == [0, 1]
+            and group.get("spacing") == "equal_segments"
+            for group in candidate.get("groups") or []
+        )
+    )
+
+
 def calibrate_contract(case_pack: dict[str, Any]) -> None:
     """Reconcile narrowly supported contract errors against the original prompt."""
     contract = deepcopy(case_pack.get("intent_contract") or {})
@@ -44,9 +155,7 @@ def calibrate_contract(case_pack: dict[str, Any]) -> None:
         calibration["calibrated_contract_sha256"] = digest(contract)
         return
 
-    from scenesmith.scenebenchmark_critic.intent_contract import build_intent_contract
-
-    grounded = build_intent_contract(prompt).get("constraints") or []
+    grounded = _grounded_constraints(prompt)
     rows = list(contract.get("constraints") or [])
     for candidate in grounded:
         relation = candidate.get("relation")
@@ -96,29 +205,16 @@ def calibrate_contract(case_pack: dict[str, Any]) -> None:
                     }
                 )
         elif relation == "edge_distribution":
-            # Merge only an exact partition already stated in the prompt. No
-            # pose-dependent cohort selection, count relaxation or nearest match.
-            parts = [
-                row
-                for row in rows
-                if row.get("relation") == relation
-                and (row.get("subjects") or {}).get("category")
-                == (candidate.get("subjects") or {}).get("category")
-                and _selector_key(row.get("targets"))
-                == _selector_key(candidate.get("targets"))
-                and row.get("edge_frame") == candidate.get("edge_frame")
-                and row.get("orientation") == candidate.get("orientation")
-            ]
-            if len(parts) < 2:
+            # A complete row plus an inferred partial duplicate is just as
+            # contradictory as separate cohorts. Restore the full prompt rule,
+            # including its centering/facing checks, without looking at poses.
+            parts = _covered_edge_rows(rows, candidate)
+            if not parts:
                 continue
-            groups = [group for row in parts for group in row.get("groups") or []]
-            if (
-                sum(int((row.get("subjects") or {}).get("count") or 0) for row in parts)
-                != int((candidate.get("subjects") or {}).get("count") or 0)
-                or sorted(map(digest, groups))
-                != sorted(map(digest, candidate.get("groups") or []))
-                or len({group.get("edge_class") for group in groups}) != len(groups)
-            ):
+            parts += [
+                row for row in rows if _covered_short_side_centering(row, candidate)
+            ]
+            if parts == [candidate]:
                 continue
             rows = [row for row in rows if row not in parts]
             rows.append(deepcopy(candidate))
@@ -142,7 +238,6 @@ def calibrate_asset_checks(case_pack: dict[str, Any]) -> None:
     from scenesmith.scenebenchmark_critic.intent_contract import (
         augment_contract_checks,
         bound_ids,
-        build_intent_contract,
     )
 
     # Main normally materializes these during evaluation. Materialize them
@@ -150,7 +245,7 @@ def calibrate_asset_checks(case_pack: dict[str, Any]) -> None:
     augment_contract_checks(case_pack)
     objects = (case_pack.get("scene_geometry") or {}).get("objects") or []
     authorized: dict[str, str] = {}
-    for row in build_intent_contract(prompt).get("constraints") or []:
+    for row in _grounded_constraints(prompt):
         if (
             row.get("relation") != "on_top_of"
             or (row.get("targets") or {}).get("category") != "floor"
