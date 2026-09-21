@@ -91,9 +91,13 @@ _selector_categories_overlap = selector_categories_overlap
 
 
 LEGACY_INTENT_CONTRACT_SCHEMA_VERSIONS = frozenset(
-    {"scenesmith.intent_contract.v5", "scenesmith.intent_contract.v6"}
+    {
+        "scenesmith.intent_contract.v5",
+        "scenesmith.intent_contract.v6",
+        "scenesmith.intent_contract.v7",
+    }
 )
-INTENT_CONTRACT_SCHEMA_VERSION = "scenesmith.intent_contract.v7"
+INTENT_CONTRACT_SCHEMA_VERSION = "scenesmith.intent_contract.v8"
 INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v16"
 INTENT_COMPILER_SEMANTIC_IR_VERSION = "scenesmith.intent_compiler.semantic_ir.v1"
 
@@ -369,7 +373,14 @@ class IntentRelation(BaseModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     evidence_span: str = ""
     inference_reason: str = ""
-    reconciliation_reason: Literal["disjoint_support_cohort_minimum"] | None = None
+    reconciliation_reason: (
+        Literal[
+            "disjoint_support_cohort_minimum",
+            "heterogeneous_inventory_group",
+            "task_inventory_count_cap",
+        ]
+        | None
+    ) = None
 
     @field_validator("relation", mode="before")
     @classmethod

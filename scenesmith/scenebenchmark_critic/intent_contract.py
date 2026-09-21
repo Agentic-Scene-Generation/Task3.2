@@ -945,6 +945,33 @@ def bound_ids(
     return ids
 
 
+def grouped_bound_ids(
+    selector: dict[str, Any] | None,
+    objects: Iterable[dict[str, Any]],
+) -> list[str]:
+    """Resolve a group selector that may contain two inventory categories."""
+    object_rows = list(objects)
+    primary_ids = bound_ids(selector, object_rows)
+    if not isinstance(selector, dict):
+        return primary_ids
+    secondary_category = str(selector.get("secondary_category") or "")
+    if not secondary_category:
+        return primary_ids
+    secondary_selector = {
+        "category": secondary_category,
+        "count": selector.get("secondary_count") or 1,
+        "quantifier": selector.get("quantifier") or "all",
+        "role": selector.get("secondary_role") or "",
+        "cohort": selector.get("cohort") or "",
+        "stage": selector.get("stage") or "",
+        "capabilities": selector.get("capabilities") or [],
+    }
+    secondary_ids = bound_ids(secondary_selector, object_rows)
+    if not primary_ids or not secondary_ids:
+        return []
+    return sorted(dict.fromkeys([*primary_ids, *secondary_ids]))
+
+
 _FINITE_RELATION_COHORTS = frozenset({"behind", "in_front_of", "near", "next_to"})
 
 

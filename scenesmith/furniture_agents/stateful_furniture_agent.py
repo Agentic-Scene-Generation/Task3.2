@@ -6,6 +6,7 @@ SQLiteSession agents that maintain conversation memory across interactions.
 """
 
 import copy
+import itertools
 import logging
 import math
 import re
@@ -2064,7 +2065,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
             bed_head_wall = plan.bed_head_wall if plan else "north"
 
         changed = False
+        handled_bedside_ids: set[str] = set()
         for obj in self.scene.objects.values():
+            if str(obj.object_id) in handled_bedside_ids:
+                continue
             if getattr(obj, "immutable", False):
                 continue
             if getattr(obj, "object_type", None) != ObjectType.FURNITURE:
@@ -2083,6 +2087,14 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     fallback=transform,
                 )
             if self._transform_close(obj.transform, transform):
+                continue
+            if self._category_for_object(obj.object_id, obj) == "bed":
+                overrides = self._bedside_group_overrides(obj, transform)
+                if overrides is None:
+                    continue
+                if self._commit_bedside_group_overrides(overrides):
+                    handled_bedside_ids.update(overrides)
+                    changed = True
                 continue
             self.scene.move_object(obj.object_id, transform)
             changed = True
@@ -2373,6 +2385,18 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         movable.sort(key=self._collision_repair_candidate_key)
         for moving in movable:
             other = second if moving is first else first
+            relation_groups = self._hard_relation_groups_for_object(
+                str(moving.object_id)
+            )
+            bedside_group = self._bedside_group_ids_for_bed(moving)
+            if bedside_group:
+                relation_groups = [*relation_groups, bedside_group]
+            companion_ids = {
+                object_id
+                for group in relation_groups
+                for object_id in group
+                if object_id != str(moving.object_id)
+            }
             transforms = self._safe_shallow_collision_transforms(
                 moving,
                 other,
@@ -2380,19 +2404,18 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                 clearance=clearance,
                 before_pairs=before_pairs,
                 max_translation=max_translation,
-            )
-            relation_groups = self._hard_relation_groups_for_object(
-                str(moving.object_id)
+                allowed_new_pair_ids=companion_ids,
             )
             for transform in transforms:
-                override_candidates = [
-                    {str(moving.object_id): transform},
-                    *self._rigid_group_collision_overrides(
-                        moving,
-                        transform,
-                        relation_groups,
-                    ),
-                ]
+                override_candidates = self._rigid_group_collision_overrides(
+                    moving,
+                    transform,
+                    relation_groups,
+                )
+                # A bed with bedside furniture must not win a collision repair
+                # by moving alone. Its companions retain their bed-local poses.
+                if not bedside_group:
+                    override_candidates.insert(0, {str(moving.object_id): transform})
                 for overrides in override_candidates:
                     after_pairs = self._furniture_aabb_overlap_pairs(
                         overrides=overrides
@@ -2450,6 +2473,22 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         for object_id, transform in best.items():
             self.scene.move_object(self.scene.objects[object_id].object_id, transform)
         return tuple(sorted(best))
+
+    def _bedside_group_ids_for_bed(self, obj: SceneObject) -> tuple[str, ...]:
+        """Return the implicit bedside group when ``obj`` is a movable bed."""
+        if self.scene is None or self._category_for_object(obj.object_id, obj) != "bed":
+            return ()
+        nightstands = self._furniture_by_category("nightstand")[:2]
+        if not nightstands:
+            return ()
+        return tuple(
+            sorted(
+                {
+                    str(obj.object_id),
+                    *(str(nightstand.object_id) for nightstand in nightstands),
+                }
+            )
+        )
 
     def _rigid_group_collision_overrides(
         self,
@@ -2695,6 +2734,7 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         clearance: float,
         before_pairs: set[frozenset[str]],
         max_translation: float | None = None,
+        allowed_new_pair_ids: set[str] | None = None,
     ) -> list[RigidTransform]:
         moving_bounds = moving.compute_world_bounds()
         other_bounds = other.compute_world_bounds()
@@ -2742,7 +2782,15 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
                     overrides={str(moving.object_id): candidate}
                 )
                 target_pair = frozenset((str(moving.object_id), str(other.object_id)))
-                if target_pair in after_pairs or after_pairs - before_pairs:
+                new_pairs = after_pairs - before_pairs
+                allowed_companions = allowed_new_pair_ids or set()
+                if target_pair in after_pairs or any(
+                    str(moving.object_id) not in pair
+                    or not (set(pair) - {str(moving.object_id)}).issubset(
+                        allowed_companions
+                    )
+                    for pair in new_pairs
+                ):
                     continue
                 candidates.append(candidate)
         candidates.sort(
@@ -3417,8 +3465,10 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         )
         if self._transform_close(bed.transform, transform):
             return False
-        self.scene.move_object(bed.object_id, transform)
-        return True
+        overrides = self._bedside_group_overrides(bed, transform)
+        if overrides is None:
+            return False
+        return self._commit_bedside_group_overrides(overrides)
 
     def _opening_safe_bed_transform(
         self,
@@ -3696,98 +3746,188 @@ class StatefulFurnitureAgent(BaseStatefulAgent, BaseFurnitureAgent):
         needed = self._required_count("nightstand")
         if needed > len(self._furniture_by_category("nightstand")):
             self._ensure_required_furniture_asset("nightstand")
-        nightstands = self._furniture_by_category("nightstand")[:2]
-        if len(nightstands) < 2:
-            return False
-
         bed = beds[0]
+        overrides = self._bedside_group_overrides(bed, bed.transform)
+        if overrides is None:
+            return False
+        return self._commit_bedside_group_overrides(overrides)
+
+    def _bedside_group_overrides(
+        self,
+        bed: SceneObject,
+        bed_transform: RigidTransform,
+    ) -> dict[str, RigidTransform] | None:
+        """Return an all-or-nothing valid pose for a bed and its nightstands."""
+        if self.scene is None:
+            return None
+        nightstands = sorted(
+            self._furniture_by_category("nightstand")[:2],
+            key=lambda obj: str(obj.object_id),
+        )
+        overrides = {str(bed.object_id): bed_transform}
+        if not nightstands:
+            return overrides
+
         bed_dims = self._local_size(bed, [1.60, 2.05, 0.80])
-        bed_center = np.asarray(bed.transform.translation(), dtype=float)
-        rotation = np.asarray(bed.transform.rotation().matrix(), dtype=float)
+        bed_center = np.asarray(bed_transform.translation(), dtype=float)
+        rotation = np.asarray(bed_transform.rotation().matrix(), dtype=float)
         lateral = rotation @ np.array([1.0, 0.0, 0.0])
         # Bed assets point +Y toward the foot; bedside furniture belongs at
         # the opposite (headboard) end.
         head = -(rotation @ np.array([0.0, 1.0, 0.0]))
-        yaw = math.degrees(RollPitchYaw(bed.transform.rotation()).yaw_angle())
+        yaw = math.degrees(RollPitchYaw(bed_transform.rotation()).yaw_angle())
         gap = float(self._repair_cfg_value("nightstand_gap_m", 0.08))
-
-        changed = False
-        forbidden_zones = self._opening_forbidden_zones(include_windows=False)
-        bed_bounds = self._bounds_for_transform(bed, bed.transform)
+        forbidden_zones = self._opening_forbidden_zones(include_windows=True)
+        bed_bounds = self._bounds_for_transform(bed, bed_transform)
         overlap_tolerance = float(
             self._repair_cfg_value("nightstand_bed_overlap_tolerance_m", 0.03)
         )
-        for side, nightstand in zip((-1.0, 1.0), nightstands):
+
+        candidates_by_nightstand: dict[
+            str, dict[float, list[tuple[tuple[float, float, float], RigidTransform]]]
+        ] = {}
+        for nightstand in nightstands:
             ns_dims = self._local_size(nightstand, [0.45, 0.42, 0.55])
-            target = (
-                bed_center
-                + side * lateral * (bed_dims[0] / 2 + ns_dims[0] / 2 + gap)
-                + head * max(0.0, bed_dims[1] / 2 - ns_dims[1] / 2 - 0.10)
-            )
-            candidates: list[tuple[float, float, float, RigidTransform]] = []
-            # A door can occupy the nominal head-side slot. Search both axes in
-            # the bed-local frame so the nightstand can move inward or toward
-            # the head wall while remaining a reachable bedside surface.
-            for head_retreat_step in range(9):
-                head_retreat = head_retreat_step * 0.08
-                for inward_step in range(6):
-                    inward = inward_step * 0.06
-                    candidate_target = (
-                        target + head * head_retreat - side * lateral * inward
-                    )
-                    raw_candidate = self._grounded_transform(
-                        nightstand,
-                        x=float(candidate_target[0]),
-                        y=float(candidate_target[1]),
-                        yaw_deg=yaw,
-                    )
-                    candidate = raw_candidate
-                    candidate = self._fit_transform_inside_room(nightstand, candidate)
-                    bounds = self._bounds_for_transform(nightstand, candidate)
-                    if bounds is None:
-                        continue
-                    zone_penalty = self._zone_overlap_penalty(bounds, forbidden_zones)
-                    if zone_penalty > 1e-6:
-                        # A clearance repair may need to use the last few
-                        # centimetres beside a wall; keep a positive margin.
+            side_candidates: dict[
+                float, list[tuple[tuple[float, float, float], RigidTransform]]
+            ] = {}
+            for side in (-1.0, 1.0):
+                target = (
+                    bed_center
+                    + side * lateral * (bed_dims[0] / 2 + ns_dims[0] / 2 + gap)
+                    + head * max(0.0, bed_dims[1] / 2 - ns_dims[1] / 2 - 0.10)
+                )
+                candidates: list[tuple[tuple[float, float, float], RigidTransform]] = []
+                # A door can occupy the nominal head-side slot. Search both axes
+                # in the bed-local frame while preserving reachable bedside use.
+                for head_retreat_step in range(9):
+                    head_retreat = head_retreat_step * 0.08
+                    for inward_step in range(6):
+                        inward = inward_step * 0.06
+                        candidate_target = (
+                            target + head * head_retreat - side * lateral * inward
+                        )
+                        raw_candidate = self._grounded_transform(
+                            nightstand,
+                            x=float(candidate_target[0]),
+                            y=float(candidate_target[1]),
+                            yaw_deg=yaw,
+                        )
                         candidate = self._fit_transform_inside_room(
-                            nightstand, raw_candidate, margin_m=0.03
+                            nightstand, raw_candidate
                         )
-                    bounds = self._bounds_for_transform(nightstand, candidate)
-                    if bounds is None:
-                        continue
-                    zone_penalty = self._zone_overlap_penalty(bounds, forbidden_zones)
-                    if bed_bounds is not None:
-                        overlap_x, overlap_y = self._xy_overlap_depths(
-                            bed_bounds, bounds
-                        )
+                        bounds = self._bounds_for_transform(nightstand, candidate)
+                        if bounds is None:
+                            continue
+                        if self._zone_overlap_penalty(bounds, forbidden_zones) > 1e-6:
+                            # Near a wall opening, use the existing narrow positive
+                            # room margin before rejecting an otherwise valid side.
+                            candidate = self._fit_transform_inside_room(
+                                nightstand, raw_candidate, margin_m=0.03
+                            )
+                            bounds = self._bounds_for_transform(nightstand, candidate)
                         if (
-                            overlap_x > overlap_tolerance
-                            and overlap_y > overlap_tolerance
+                            bounds is None
+                            or self._zone_overlap_penalty(bounds, forbidden_zones)
+                            > 1e-6
                         ):
                             continue
-                    displacement = float(
-                        np.linalg.norm(
-                            np.asarray(candidate.translation()[:2]) - target[:2]
+                        if bed_bounds is not None:
+                            overlap_x, overlap_y = self._xy_overlap_depths(
+                                bed_bounds, bounds
+                            )
+                            if (
+                                overlap_x > overlap_tolerance
+                                and overlap_y > overlap_tolerance
+                            ):
+                                continue
+                        target_displacement = float(
+                            np.linalg.norm(
+                                np.asarray(candidate.translation()[:2]) - target[:2]
+                            )
                         )
-                    )
-                    candidates.append(
-                        (
-                            zone_penalty,
-                            displacement,
-                            head_retreat + inward,
-                            candidate,
+                        movement = float(
+                            np.linalg.norm(
+                                np.asarray(candidate.translation()[:2])
+                                - np.asarray(nightstand.transform.translation()[:2])
+                            )
                         )
-                    )
-            if not candidates:
+                        candidates.append(
+                            (
+                                (target_displacement, head_retreat + inward, movement),
+                                candidate,
+                            )
+                        )
+                side_candidates[side] = candidates
+            candidates_by_nightstand[str(nightstand.object_id)] = side_candidates
+
+        assignments = (
+            [(-1.0,), (1.0,)] if len(nightstands) == 1 else [(-1.0, 1.0), (1.0, -1.0)]
+        )
+        group_ids = {str(bed.object_id), *(str(obj.object_id) for obj in nightstands)}
+        baseline_pairs = self._furniture_aabb_overlap_pairs()
+        best: tuple[tuple[float, float, float], dict[str, RigidTransform]] | None = None
+        for assignment in assignments:
+            options = [
+                candidates_by_nightstand[str(nightstand.object_id)][side]
+                for nightstand, side in zip(nightstands, assignment)
+            ]
+            if any(not candidates for candidates in options):
                 continue
-            _, _, _, transform = min(
-                candidates, key=lambda item: (item[0], item[1], item[2])
+            for selected in itertools.product(*options):
+                candidate_overrides = dict(overrides)
+                score = [0.0, 0.0, 0.0]
+                for nightstand, (candidate_score, transform) in zip(
+                    nightstands, selected
+                ):
+                    candidate_overrides[str(nightstand.object_id)] = transform
+                    score = [
+                        total + increment
+                        for total, increment in zip(score, candidate_score)
+                    ]
+                candidate_pairs = self._furniture_aabb_overlap_pairs(
+                    overrides=candidate_overrides
+                )
+                if candidate_pairs - baseline_pairs:
+                    continue
+                if any(pair.issubset(group_ids) for pair in candidate_pairs):
+                    continue
+                if best is None or tuple(score) < best[0]:
+                    best = (tuple(score), candidate_overrides)
+        return best[1] if best is not None else None
+
+    def _commit_bedside_group_overrides(
+        self,
+        overrides: dict[str, RigidTransform],
+    ) -> bool:
+        """Commit a validated bedside group pose, restoring every member on error."""
+        if self.scene is None:
+            return False
+        changed = {
+            object_id: transform
+            for object_id, transform in overrides.items()
+            if object_id in self.scene.objects
+            and not self._transform_close(
+                self.scene.objects[object_id].transform, transform
             )
-            if not self._transform_close(nightstand.transform, transform):
-                self.scene.move_object(nightstand.object_id, transform)
-                changed = True
-        return changed
+        }
+        if not changed:
+            return False
+        originals = {
+            object_id: self.scene.objects[object_id].transform for object_id in changed
+        }
+        try:
+            for object_id, transform in changed.items():
+                self.scene.move_object(
+                    self.scene.objects[object_id].object_id, transform
+                )
+        except Exception:
+            for object_id, transform in originals.items():
+                self.scene.move_object(
+                    self.scene.objects[object_id].object_id, transform
+                )
+            return False
+        return True
 
     def _repair_wardrobe_wall_anchor(self) -> bool:
         wardrobes = self._furniture_by_category("wardrobe")

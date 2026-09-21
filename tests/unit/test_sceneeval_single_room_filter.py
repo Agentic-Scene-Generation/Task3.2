@@ -14,7 +14,12 @@ ANNOTATIONS = PROJECT_ROOT / "scripts" / "assets" / "annotations.csv"
 RUNNER = PROJECT_ROOT / "scripts" / "run_parallel_critic_on.sh"
 
 
-def _run_runner(tmp_path: Path, *args: str, annotations: Path = ANNOTATIONS):
+def _run_runner(
+    tmp_path: Path,
+    *args: str,
+    annotations: Path = ANNOTATIONS,
+    env_overrides: dict[str, str] | None = None,
+):
     env = os.environ.copy()
     env.update(
         {
@@ -26,6 +31,7 @@ def _run_runner(tmp_path: Path, *args: str, annotations: Path = ANNOTATIONS):
             "SCENEEVAL_ANNOTATIONS": str(annotations),
         }
     )
+    env.update(env_overrides or {})
     return subprocess.run(
         ["bash", str(RUNNER), *args],
         cwd=PROJECT_ROOT,
@@ -34,6 +40,18 @@ def _run_runner(tmp_path: Path, *args: str, annotations: Path = ANNOTATIONS):
         text=True,
         check=False,
     )
+
+
+def _write_shared_base_manifest(root: Path) -> None:
+    batch_root = root / "batch_021"
+    batch_root.mkdir(parents=True)
+    with (batch_root / "batch_cases.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as stream:
+        writer = csv.writer(stream, quoting=csv.QUOTE_NONNUMERIC)
+        writer.writerow(["scene_index", "case_id"])
+        writer.writerow([20, "20"])
+    (root / ".critic_on_case_set").write_text("sceneeval100\n", encoding="utf-8")
 
 
 def test_annotations_mark_only_known_multi_room_cases() -> None:
@@ -112,7 +130,10 @@ def test_runner_rejects_explicit_multi_room_before_output_creation(
     )
 
     assert result.returncode == 2
-    assert "scene ID '49' is marked multi_room" in result.stderr
+    assert (
+        "scene ID '49' is marked multi_room in the sceneeval100 registry"
+        in result.stderr
+    )
     assert not (tmp_path / "output").exists()
 
 
@@ -140,3 +161,104 @@ def test_runner_rejects_invalid_scene_scope(tmp_path: Path) -> None:
 
     assert result.returncode == 2
     assert "SceneEval ID 0 has invalid SceneScope 'whole_house'" in result.stderr
+
+
+def test_runner_loads_custom_prompt_csv_without_sceneeval_id_contract(
+    tmp_path: Path,
+) -> None:
+    prompts = tmp_path / "style_prompts.csv"
+    with prompts.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=["ID", "Description", "Difficulty", "SceneScope", "CriticGoal"],
+        )
+        writer.writeheader()
+        writer.writerows(
+            [
+                {
+                    "ID": "modern_lounge",
+                    "Description": "A modern living room with a sofa and coffee table.",
+                    "Difficulty": "medium",
+                    "SceneScope": "single_room",
+                    "CriticGoal": "modern furniture cohesion",
+                },
+                {
+                    "ID": "industrial_dining",
+                    "Description": "An industrial dining room with a table and chairs.",
+                    "Difficulty": "medium",
+                    "SceneScope": "single_room",
+                    "CriticGoal": "industrial furniture cohesion",
+                },
+            ]
+        )
+
+    result = _run_runner(
+        tmp_path,
+        "--prompt-csv",
+        str(prompts),
+        "--difficulty",
+        "medium",
+        "--parallelism",
+        "2",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "case set: promptcsv" in result.stdout
+    assert f"Prompt CSV: {prompts}" in result.stdout
+    assert "Prompt CSV SHA-256:" in result.stdout
+    assert "critic_on/batch_001" in result.stdout
+    assert "critic_on/batch_002" in result.stdout
+
+
+def test_runner_normalizes_output_root_to_nested_shared_base(tmp_path: Path) -> None:
+    run_root = tmp_path / "previous_run"
+    shared_base_root = run_root / "shared_base"
+    _write_shared_base_manifest(shared_base_root)
+
+    # A misleading direct batch must not win over the dedicated shared_base/.
+    direct_batch = run_root / "batch_021"
+    direct_batch.mkdir(parents=True)
+    (direct_batch / "batch_cases.csv").write_text(
+        'scene_index,case_id\n20,"wrong"\n', encoding="utf-8"
+    )
+
+    result = _run_runner(
+        tmp_path,
+        "--case-set",
+        "sceneeval100",
+        "--difficulty",
+        "medium",
+        "--scenes",
+        "20",
+        env_overrides={
+            "BRANCH_FROM_SHARED_BASE": "true",
+            "GENERATE_SHARED_BASE": "false",
+            "SHARED_BASE_ROOT": str(run_root),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"shared base root: {shared_base_root.resolve()}" in result.stdout
+
+
+def test_runner_accepts_normalized_shared_base_root(tmp_path: Path) -> None:
+    shared_base_root = tmp_path / "previous_run" / "shared_base"
+    _write_shared_base_manifest(shared_base_root)
+
+    result = _run_runner(
+        tmp_path,
+        "--case-set",
+        "sceneeval100",
+        "--difficulty",
+        "medium",
+        "--scenes",
+        "20",
+        env_overrides={
+            "BRANCH_FROM_SHARED_BASE": "true",
+            "GENERATE_SHARED_BASE": "false",
+            "SHARED_BASE_ROOT": str(shared_base_root),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"shared base root: {shared_base_root.resolve()}" in result.stdout

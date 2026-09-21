@@ -706,6 +706,161 @@ class SceneExpertMemoryTest(unittest.TestCase):
         self.assertIn("plant", result.required_large_objects)
         self.assertNotIn("plant", result.required_small_objects)
 
+    def test_heterogeneous_group_does_not_expand_primary_inventory(self) -> None:
+        evidence = (
+            "A coffee table is surrounded by a simple sofa and two cube ottomans."
+        )
+        contract = {
+            "constraints": [
+                {
+                    "relation": "required_count",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "subjects": {
+                        "category": "sofa",
+                        "count": 3,
+                        "quantifier": "minimum",
+                    },
+                    "source": "task_compiler_inventory",
+                    "reconciliation_reason": "disjoint_support_cohort_minimum",
+                },
+                {
+                    "relation": "required_count",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "subjects": {"category": "cube_ottoman", "count": 2},
+                    "source": "task_compiler_inventory",
+                },
+                {
+                    "relation": "surround",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "subjects": {
+                        "category": "sofa",
+                        "count": 3,
+                        "quantifier": "exactly",
+                        "cohort": "sofa_and_ottomans",
+                    },
+                    "targets": {"category": "coffee_table", "count": 1},
+                    "source": "explicit_prompt",
+                    "evidence_span": evidence,
+                },
+            ]
+        }
+
+        result = _reconcile_task_spec_stage_ownership(
+            SceneTaskSpec(
+                room_type="living_room",
+                style="standard",
+                required_large_objects=[
+                    "coffee_table",
+                    "sofa",
+                    "cube_ottoman",
+                    "cube_ottoman",
+                ],
+            ),
+            contract,
+        )
+
+        self.assertEqual(1, result.required_large_objects.count("sofa"))
+        self.assertEqual(2, result.required_large_objects.count("cube_ottoman"))
+        required_sofa = contract["constraints"][0]
+        self.assertEqual(1, required_sofa["subjects"]["count"])
+        self.assertEqual("at_least", required_sofa["subjects"]["quantifier"])
+        self.assertNotIn("reconciliation_reason", required_sofa)
+        surround = contract["constraints"][2]
+        self.assertEqual(1, surround["subjects"]["count"])
+        self.assertEqual("cube_ottoman", surround["subjects"]["secondary_category"])
+        self.assertEqual(2, surround["subjects"]["secondary_count"])
+        self.assertEqual(
+            "heterogeneous_inventory_group",
+            surround["reconciliation_reason"],
+        )
+
+    def test_relation_count_cap_preserves_absent_endpoint_inventory(self) -> None:
+        contract = {
+            "constraints": [
+                {
+                    "relation": "near",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "subjects": {"category": "sofa", "count": 3},
+                    "targets": {"category": "coffee_table", "count": 1},
+                    "source": "explicit_prompt",
+                    "evidence_span": "the sofa near the coffee table",
+                },
+                {
+                    "relation": "near",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "subjects": {"category": "floor_lamp", "count": 2},
+                    "targets": {"category": "sofa", "count": 1},
+                    "source": "explicit_prompt",
+                    "evidence_span": "two floor lamps near the sofa",
+                },
+            ]
+        }
+
+        result = _reconcile_task_spec_stage_ownership(
+            SceneTaskSpec(
+                room_type="living_room",
+                style="standard",
+                required_large_objects=["coffee_table", "sofa"],
+            ),
+            contract,
+        )
+
+        self.assertEqual(1, result.required_large_objects.count("sofa"))
+        self.assertEqual(2, result.required_large_objects.count("floor_lamp"))
+        self.assertEqual(1, contract["constraints"][0]["subjects"]["count"])
+        self.assertEqual(
+            "task_inventory_count_cap",
+            contract["constraints"][0]["reconciliation_reason"],
+        )
+
+    def test_heterogeneous_distribution_reconciles_unseen_categories(self) -> None:
+        contract = {
+            "constraints": [
+                {
+                    "relation": "distributed_evenly",
+                    "stage": "furniture",
+                    "strength": "hard",
+                    "subjects": {
+                        "category": "bench",
+                        "count": 3,
+                        "quantifier": "exactly",
+                    },
+                    "targets": {"category": "dining_table", "count": 1},
+                    "source": "explicit_prompt",
+                    "evidence_span": (
+                        "one bench and two chairs are distributed evenly around "
+                        "the dining table"
+                    ),
+                }
+            ]
+        }
+
+        result = _reconcile_task_spec_stage_ownership(
+            SceneTaskSpec(
+                room_type="dining_room",
+                style="standard",
+                required_large_objects=[
+                    "dining_table",
+                    "bench",
+                    "chair",
+                    "chair",
+                ],
+            ),
+            contract,
+        )
+
+        subjects = contract["constraints"][0]["subjects"]
+        self.assertEqual(1, subjects["count"])
+        self.assertEqual("chair", subjects["secondary_category"])
+        self.assertEqual(2, subjects["secondary_count"])
+        self.assertEqual(1, result.required_large_objects.count("bench"))
+        self.assertEqual(2, result.required_large_objects.count("chair"))
+
     def test_repair_taxonomy_classifies_core_hard_failures(self) -> None:
         failures = classify_hard_reasons(
             [
