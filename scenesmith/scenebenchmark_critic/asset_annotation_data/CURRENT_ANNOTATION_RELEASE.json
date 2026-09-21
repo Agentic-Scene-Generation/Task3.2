@@ -1,1 +1,1 @@
-{"release":"existing_annotations_20260921","manifest":"ANNOTATION_RELEASE_20260921.json","documentation":"docs/ANNOTATION_SYNC_20260921_ZH.md","front_candidates_are_not_canonical_replacements":true,"embedding_vectors_updated":false}
+{"documentation":"docs/FRONT_REQUIRED_20260921_ZH.md","embedding_vectors_updated":false,"front_candidates_are_not_canonical_replacements":false,"manifest":"FRONT_REQUIRED_20260921.json","release":"front_required_20260921"}
