@@ -2,7 +2,7 @@
 # The current Qwen3.8 GGUF used by llama.cpp is inference-only. Set this to the
 # matching Hugging Face safetensors directory or Hub ID before training.
 model:
-  name_or_path: ""  # TODO: set a trainable Qwen safetensors path or Hub ID.
+  name_or_path: "/mnt/afs/task3_2/share_model/Qwen/Qwen3.8-27B"
   backend: "transformers"
   tuning_mode: "qlora"  # qlora=4-bit base; lora=bf16 base.
   multimodal: true
@@ -56,7 +56,8 @@ training:
   per_device_train_batch_size: 1
   per_device_eval_batch_size: 1
   gradient_accumulation_steps: 16
-  warmup_ratio: 0.05
+  warmup_steps: 0.05  # Fractional steps specify a ratio in Transformers 5.15.
+  precompute_ref_log_probs: true
   lr_scheduler_type: "cosine"
   optim: "adamw_8bit"
   max_grad_norm: 1.0

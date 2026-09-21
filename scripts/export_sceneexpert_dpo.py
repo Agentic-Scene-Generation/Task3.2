@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -40,6 +39,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--min-quality-margin", type=float, default=0.05)
     parser.add_argument(
+        "--preference-policy",
+        choices=("strict", "verified_relative_v1"),
+        default="strict",
+    )
+    parser.add_argument("--split-manifest", type=Path)
+    parser.add_argument(
+        "--completion-view", choices=("full", "first_turn"), default="full"
+    )
+    parser.add_argument(
         "--include-task-type",
         action="append",
         choices=(
@@ -72,6 +80,15 @@ def main() -> int:
         test_ratio=args.test_ratio,
         seed=args.seed,
         min_quality_margin=args.min_quality_margin,
+        preference_policy=args.preference_policy,
+        completion_view=args.completion_view,
+        split_assignments=(
+            json.loads(args.split_manifest.read_text(encoding="utf-8"))[
+                "split_assignments"
+            ]
+            if args.split_manifest
+            else None
+        ),
         include_task_types=(
             set(args.include_task_type)
             if args.include_task_type

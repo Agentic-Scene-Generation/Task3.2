@@ -42,6 +42,12 @@ def main() -> int:
     parser.add_argument("--preflight-report", type=Path)
     parser.add_argument("--expected-groups", type=int, default=2)
     parser.add_argument("--min-pairs", type=int, default=1)
+    parser.add_argument(
+        "--preference-policy",
+        choices=("strict", "verified_relative_v1"),
+        default="strict",
+    )
+    parser.add_argument("--min-quality-margin", type=float, default=0.05)
     args = parser.parse_args()
     if args.audit_output and not args.audit_root:
         parser.error("--audit-output requires --audit-root")
@@ -90,8 +96,8 @@ def main() -> int:
             else result["execution_integrity_passed"]
         )
         return 0 if success else 2
-    if args.min_pairs < 0 or not 1 <= args.expected_groups <= 4:
-        parser.error("expected groups must be 1..4 and min pairs must be nonnegative")
+    if args.min_pairs < 0 or not 1 <= args.expected_groups <= 512:
+        parser.error("expected groups must be 1..512 and min pairs must be nonnegative")
     if args.preflight:
         from scenesmith.scene_expert.slow_memory.paired_runtime import (
             snapshot_codec_preflight,
@@ -139,6 +145,8 @@ def main() -> int:
         min_pairs=args.min_pairs,
         expected_groups=args.expected_groups,
         output_dir=args.audit_output,
+        preference_policy=args.preference_policy,
+        min_quality_margin=args.min_quality_margin,
     )
     print(
         json.dumps(

@@ -5,8 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-
 from collections import Counter
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,48 @@ import yaml
 
 from scenesmith.scene_expert.slow_memory.dpo import validate_dataset_dir
 from scenesmith.scene_expert.slow_memory.schemas import DPOPreferencePair
+
+
+def apply_training_profile(config: dict[str, Any], profile: str) -> dict[str, Any]:
+    """Separate initial-policy research scope from infrastructure-only smoke tests."""
+    result = deepcopy(config)
+    if profile == "full":
+        return result
+    if profile not in {"furniture_initial", "pipeline_smoke"}:
+        raise ValueError("unknown training profile")
+    smoke = profile == "pipeline_smoke"
+    result["training_profile"] = profile
+    result.setdefault("data", {}).update(
+        minimum_train_pairs=1 if smoke else 16,
+        minimum_unique_train_groups=1 if smoke else 16,
+        minimum_unique_train_stages=1,
+        required_task_types=["designer_initial"],
+        minimum_pairs_per_required_task_type=1 if smoke else 16,
+        maximum_single_task_type_ratio=1.0,
+        allow_unsafe_small_dataset=False,
+    )
+    result.setdefault("quality_gate", {}).update(
+        require_validation=not smoke, require_test=False
+    )
+    # Imperfect relative winners must not become unconditional SFT targets.
+    result.setdefault("training", {}).update(
+        loss_type="sigmoid",
+        loss_weights=None,
+        report_to="none",
+        num_train_epochs=2.0,
+        gradient_accumulation_steps=4,
+        eval_steps=8,
+        save_steps=8,
+        use_liger_kernel=True,
+        precompute_ref_log_probs=False,
+        prediction_loss_only=True,
+    )
+    if smoke:
+        result["training"].update(
+            max_steps=2, gradient_accumulation_steps=1, save_steps=2
+        )
+        result.setdefault("publish", {})["push_to_hub"] = False
+    return result
 
 
 def load_training_config(path: Path) -> dict[str, Any]:
@@ -245,6 +287,38 @@ def validate_training_request(
             for key, expected in required_policy.items():
                 if policy.get(key) is not expected:
                     errors.append(f"dataset pairing policy does not enforce {key}")
+            if config.get("training_profile") in {
+                "furniture_initial",
+                "pipeline_smoke",
+            }:
+                if manifest.get("completion_view") != "first_turn":
+                    errors.append(
+                        "initial-policy training requires a first_turn export; tool results are not policy targets"
+                    )
+                for split in ("train", "validation", "test"):
+                    path = dataset_dir / f"{split}.jsonl"
+                    if not path.exists():
+                        continue
+                    for line in path.read_text(encoding="utf-8").splitlines():
+                        if not line.strip():
+                            continue
+                        try:
+                            pair = json.loads(line)
+                        except json.JSONDecodeError:
+                            # The dataset validator already records malformed rows.
+                            continue
+                        if not isinstance(pair, dict):
+                            continue
+                        if any(
+                            not isinstance(message, dict)
+                            or message.get("role") != "assistant"
+                            for side in ("chosen", "rejected")
+                            for message in pair.get(side, [])
+                        ):
+                            errors.append(
+                                f"{split}: first_turn completions contain environment messages"
+                            )
+                            break
 
     output_value = str(train_cfg.get("output_dir") or "").strip()
     output_dir = Path(output_value) if output_value else Path()
@@ -304,6 +378,10 @@ def evaluate_training_promotion(
     eval_loss = evaluation_metrics.get("eval_loss")
     eval_loss = float(eval_loss) if isinstance(eval_loss, (int, float)) else None
     reasons: list[str] = []
+    if config.get("training_profile") == "pipeline_smoke":
+        reasons.append(
+            "pipeline_smoke verifies infrastructure only and cannot be promoted"
+        )
     if gate.get("require_validation", True) and accuracy is None:
         reasons.append("TRL validation preference accuracy was not reported")
     minimum_accuracy = float(gate.get("minimum_preference_accuracy", 0.55))
