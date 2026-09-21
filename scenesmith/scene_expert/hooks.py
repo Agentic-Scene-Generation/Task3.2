@@ -3171,7 +3171,8 @@ def build_hook_runner(
         ret_cfg = memory_cfg.get("retrieval", {})
         memory_store = FastMemoryStore(
             memory_dir,
-            read_only=evaluation_requested and require_frozen_memory,
+            read_only=(evaluation_requested and require_frozen_memory)
+            or _cfg_bool(memory_cfg.get("read_only"), False),
         )
         os.environ["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] = str(memory_dir)
         if memory_store.read_only:

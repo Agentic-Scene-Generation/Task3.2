@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import shutil
 import time
-
 from collections import Counter, defaultdict
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -297,6 +298,7 @@ def build_preference_pairs(
     trajectories: Iterable[TrajectoryRecord],
     *,
     min_quality_margin: float = 0.05,
+    preference_policy: str = "strict",
     include_task_types: set[str] | frozenset[str] | None = None,
 ) -> tuple[list[DPOPreferencePair], list[dict[str, Any]]]:
     """Build one observed best-vs-worst pair per exact decision context.
@@ -306,6 +308,15 @@ def build_preference_pairs(
     when independent downstream execution established its causal outcome.
     """
 
+    from scenesmith.scene_expert.slow_memory.relative import (
+        RELATIVE_POLICY,
+        select_relative,
+    )
+
+    if preference_policy not in {"strict", RELATIVE_POLICY}:
+        raise ValueError("unsupported preference policy")
+    if not math.isfinite(min_quality_margin) or min_quality_margin <= 0:
+        raise ValueError("min_quality_margin must be finite and positive")
     groups: dict[tuple[str, str, str, str, str, str], list[TrajectoryRecord]] = (
         defaultdict(list)
     )
@@ -375,7 +386,12 @@ def build_preference_pairs(
         rejected = [
             record for record in records if record.evidence.verdict == "rejected"
         ]
-        if not accepted:
+        relative = (
+            select_relative(records, min_quality_margin)
+            if preference_policy == RELATIVE_POLICY and not (accepted and rejected)
+            else None
+        )
+        if not accepted and relative is None:
             _append_diagnostic(
                 diagnostics,
                 reason=(
@@ -387,10 +403,13 @@ def build_preference_pairs(
                 trajectories=records,
             )
             continue
-        chosen = max(accepted, key=_candidate_rank)
+        chosen = relative[0] if relative else max(accepted, key=_candidate_rank)
         preference_basis = "accepted_vs_rejected_outcome"
         negative_evidence = None
-        if rejected:
+        if relative:
+            negative = relative[1]
+            preference_basis = RELATIVE_POLICY
+        elif rejected:
             negative = min(rejected, key=_candidate_rank)
         else:
             critic_ranked = [
@@ -463,6 +482,13 @@ def build_preference_pairs(
             negative,
             min_quality_margin=min_quality_margin,
         )
+        if relative:
+            margin = chosen.evidence.quality_score - negative.evidence.quality_score
+            margin_evidence = {
+                "basis": RELATIVE_POLICY,
+                "observed_quality_delta": margin,
+                "physical_regression": False,
+            }
         if margin is None:
             reason = str(margin_evidence.get("reason") or "invalid_preference_margin")
             _append_diagnostic(
@@ -511,6 +537,8 @@ def build_preference_pairs(
                     "exact_media_context_match": True,
                     "exact_spatial_context_match": True,
                     "preference_basis": preference_basis,
+                    "preference_policy": preference_policy,
+                    "relative_minimum_margin": min_quality_margin,
                     "preference_order": "execution_then_hard_then_relation_then_visual",
                     "preference_margin_evidence": margin_evidence,
                     "rejected_response_is_observed": True,
@@ -755,6 +783,9 @@ def export_dpo_dataset(
     test_ratio: float = 0.1,
     seed: int = 42,
     min_quality_margin: float = 0.05,
+    preference_policy: str = "strict",
+    split_assignments: dict[str, str] | None = None,
+    completion_view: str = "full",
     include_task_types: set[str] | frozenset[str] | None = DEFAULT_TRAINING_TASK_TYPES,
 ) -> dict[str, Any]:
     """Materialize a portable, auditable tool/VLM DPO dataset package."""
@@ -766,11 +797,52 @@ def export_dpo_dataset(
     pairs, pair_diagnostics = build_preference_pairs(
         trajectories,
         min_quality_margin=min_quality_margin,
+        preference_policy=preference_policy,
         include_task_types=include_task_types,
     )
     diagnostics = load_diagnostics + pair_diagnostics
+    raw_preference_pair_count = len(pairs)
+    if completion_view not in {"full", "first_turn"}:
+        raise ValueError("completion_view must be full or first_turn")
     portable_pairs: list[DPOPreferencePair] = []
     for pair in pairs:
+        if completion_view == "first_turn":
+
+            def first_turn(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                result = []
+                for message in messages:
+                    if message.get("role") != "assistant":
+                        break
+                    normalized = deepcopy(message)
+                    for call in normalized.get("tool_calls") or []:
+                        # Transport IDs are not sampled policy actions. Different
+                        # UUIDs must never create a false preference contrast.
+                        call.pop("id", None)
+                        call.pop("call_id", None)
+                    result.append(normalized)
+                return result
+
+            chosen, rejected = first_turn(pair.chosen), first_turn(pair.rejected)
+            if not chosen or not rejected or _canonical(chosen) == _canonical(rejected):
+                diagnostics.append(
+                    {
+                        "reason": "no_distinct_first_assistant_turn",
+                        "pair_id": pair.pair_id,
+                    }
+                )
+                continue
+            pair = pair.model_copy(
+                update={
+                    "chosen": chosen,
+                    "rejected": rejected,
+                    "provenance": {
+                        **pair.provenance,
+                        "completion_view": "first_turn",
+                        "credit_assignment": "executed_rollout_outcome_for_initial_action",
+                    },
+                },
+                deep=True,
+            )
         portable, error = _materialize_pair_media(pair, output_dir=output_dir)
         if portable is None:
             diagnostics.append(
@@ -795,6 +867,15 @@ def export_dpo_dataset(
         test_ratio=test_ratio,
         seed=seed,
     )
+    if split_assignments is not None:
+        splits = {"train": [], "validation": [], "test": []}
+        for pair in pairs:
+            assignment = split_assignments.get(pair.leakage_group)
+            if assignment not in splits:
+                raise ValueError(
+                    f"pair is outside the frozen task partition: {pair.task_id}"
+                )
+            splits[assignment].append(pair)
     for split, split_pairs in splits.items():
         _write_jsonl(
             output_dir / f"{split}.jsonl",
@@ -818,6 +899,8 @@ def export_dpo_dataset(
         "schema_version": "sceneexpert.dpo_stats.v2",
         "generated_at": _utc_now(),
         "trajectory_count": len(trajectories),
+        "raw_preference_pair_count": raw_preference_pair_count,
+        "completion_view": completion_view,
         "eligible_pair_count": len(pairs),
         "diagnostic_count": len(diagnostics),
         "diagnostic_reasons": dict(sorted(reason_counts.items())),
@@ -870,6 +953,9 @@ def export_dpo_dataset(
         "validation_ratio": validation_ratio,
         "test_ratio": test_ratio,
         "min_quality_margin": min_quality_margin,
+        "preference_policy": preference_policy,
+        "split_assignments": split_assignments,
+        "completion_view": completion_view,
         "included_task_types": sorted(include_task_types or []),
         "pairing_policy": {
             "same_context_required": True,

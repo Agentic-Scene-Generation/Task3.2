@@ -187,9 +187,30 @@ class DPOPreferencePair(BaseModel):
     def _validate_preference(self) -> "DPOPreferencePair":
         if self.chosen == self.rejected:
             raise ValueError("chosen and rejected responses must differ")
-        if self.chosen_evidence.verdict != "accepted":
+        relative = self.provenance.get("preference_basis") == "verified_relative_v1"
+        if relative:
+            from types import SimpleNamespace
+
+            from scenesmith.scene_expert.slow_memory.relative import relative_order
+
+            margin = float(self.provenance.get("relative_minimum_margin") or 0)
+            if (
+                self.provenance.get("preference_policy") != "verified_relative_v1"
+                or margin <= 0
+                or not relative_order(
+                    SimpleNamespace(
+                        outcome=self.chosen_outcome, evidence=self.chosen_evidence
+                    ),
+                    SimpleNamespace(
+                        outcome=self.rejected_outcome, evidence=self.rejected_evidence
+                    ),
+                    margin,
+                )
+            ):
+                raise ValueError("relative preference lacks a verified improvement")
+        if not relative and self.chosen_evidence.verdict != "accepted":
             raise ValueError("chosen trajectory is not accepted")
-        if self.rejected_evidence.verdict != "rejected":
+        if not relative and self.rejected_evidence.verdict != "rejected":
             raise ValueError("rejected trajectory is not rejected")
         if not self.chosen_evidence.authoritative:
             raise ValueError("chosen trajectory lacks authoritative evidence")

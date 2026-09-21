@@ -93,8 +93,8 @@ def rebase(value: Any, source: str, destination: str) -> Any:
 
 def reserve_group(root: Path, identity: str, limit: int) -> Path | None:
     """Claim a bounded slot without overwriting a previous group."""
-    if not 1 <= limit <= 4:
-        raise ValueError("initial pilot supports 1 to 4 decision groups")
+    if not 1 <= limit <= 512:
+        raise ValueError("initial collection supports 1 to 512 decision groups")
     root.mkdir(parents=True, exist_ok=True)
     for group in root.glob("group_*/identity.json"):
         if read_json(group).get("identity") == identity:
@@ -289,6 +289,15 @@ def validate_pair_inputs(
                 if candidate_errors or len(candidate_records) != 1:
                     reasons.append(f"{name}_invalid_candidate_capture")
                 for record in candidate_records:
+                    if record.evidence.details.get("relative_profile"):
+                        from scenesmith.scene_expert.slow_memory.relative import (
+                            report_profile,
+                        )
+
+                        if record.evidence.details[
+                            "relative_profile"
+                        ] != report_profile(read_json(group / name / "report.json")):
+                            reasons.append(f"{name}_relative_profile_mismatch")
                     if (
                         record.task_type != "designer_initial"
                         or record.stage != "furniture"
@@ -341,6 +350,8 @@ def audit_pairs(
     min_pairs: int = 1,
     expected_groups: int = 1,
     output_dir: Path | None = None,
+    preference_policy: str = "strict",
+    min_quality_margin: float = 0.05,
 ) -> dict[str, Any]:
     """Export only independent groups with fresh raw-state evidence."""
     destination = root
@@ -363,7 +374,10 @@ def audit_pairs(
     if len(groups) != expected_groups:
         errors.append(f"group_count_mismatch: {len(groups)} != {expected_groups}")
     manifest = export_dpo_dataset(
-        trajectory_sources=sources, output_dir=destination / "dpo"
+        trajectory_sources=sources,
+        output_dir=destination / "dpo",
+        preference_policy=preference_policy,
+        min_quality_margin=min_quality_margin,
     )
     records, diagnostics = load_trajectories(sources)
     if diagnostics:

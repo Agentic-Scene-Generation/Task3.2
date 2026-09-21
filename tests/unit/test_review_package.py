@@ -135,6 +135,34 @@ def test_short_jobs_do_not_require_collection_end_markers(tmp_path: Path, mode: 
     assert manifest["finalization"]["success_verified"] is False
 
 
+def test_campaign_keeps_service_logs_under_original_project_paths(tmp_path: Path):
+    _write(tmp_path, f"{RESULTS}/campaign.json")
+    _write(tmp_path, f"{RESULTS}/campaign_audit.json")
+    _write(tmp_path, f"{RESULTS}/campaign_exit_status.env", b"exit_code=0\n")
+    service = f"tmp/acp_logs/{RUN}_attempt_003/llama.log"
+    _write(tmp_path, service, b"model service diagnostics")
+    media = f"{RESULTS}/datasets/verified_relative_v1/images/context.png"
+    _write(tmp_path, media, b"test media bytes")
+    _write(
+        tmp_path,
+        f"{RESULTS}/attempts/attempt_003/runs/paired_initial/group_000/A/raw_scene/model.obj",
+    )
+    _, manifest, content = _bundle(tmp_path)
+    assert service in content
+    assert media in content
+    assert manifest["finalization"]["mode"] == "sceneeval_campaign"
+    assert manifest["finalization"]["state"] == "finalization_markers_present"
+    assert all(not name.endswith(".obj") for name in content)
+
+
+def test_intermediate_campaign_audit_is_not_a_finalization_marker(tmp_path: Path):
+    _write(tmp_path, f"{RESULTS}/campaign.json")
+    _write(tmp_path, f"{RESULTS}/campaign_audit.json")
+    _, manifest, _ = _bundle(tmp_path)
+    assert manifest["finalization"]["state"] == "finalization_markers_missing"
+    assert manifest["finalization"]["success_verified"] is False
+
+
 def test_identical_latest_run_is_deduplicated_only_against_archived_bytes(
     tmp_path: Path,
 ) -> None:

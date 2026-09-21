@@ -2,16 +2,17 @@
 # /// script
 # requires-python = ">=3.11,<3.13"
 # dependencies = [
-#   "accelerate>=1.10.0",
-#   "bitsandbytes>=0.46.1",
-#   "datasets>=4.7.0,<5",
-#   "peft>=0.17.0",
-#   "pillow>=11.0.0",
-#   "pyyaml>=6.0.2",
-#   "trackio>=0.2.0",
-#   "transformers>=4.57.0,<6",
-#   "trl>=1.10.0,<2",
-#   "unsloth>=2025.8.0",
+#   "torch==2.11.0",
+#   "transformers==5.15.0",
+#   "trl==1.13.0",
+#   "peft==0.20.0",
+#   "datasets==5.0.1",
+#   "accelerate==1.14.0",
+#   "bitsandbytes==0.50.2",
+#   "liger-kernel==0.8.3",
+#   "pillow>=11,<13",
+#   "pyyaml>=6,<7",
+#   "pydantic>=2.10,<3",
 # ]
 # ///
 """Train and gate a Qwen LoRA/QLoRA adapter from SceneExpert DPO data."""
@@ -21,21 +22,22 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
-import subprocess
 import sys
 import time
-
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scenesmith.scene_expert.slow_memory.training import (
+    apply_training_profile,
     evaluate_training_promotion,
     load_training_config,
     validate_training_request,
 )
+from scenesmith.scene_expert.trace_logger import collect_code_provenance
 
 
 def _parse_args() -> argparse.Namespace:
@@ -50,23 +52,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--resume-from-checkpoint", default="")
     parser.add_argument(
+        "--profile",
+        choices=("full", "furniture_initial", "pipeline_smoke"),
+        default="full",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Validate config and dataset without importing CUDA libraries.",
     )
     return parser.parse_args()
-
-
-def _git_revision() -> str:
-    try:
-        return subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        return "unknown"
 
 
 def _file_sha256(path: Path) -> str:
@@ -104,6 +99,8 @@ def _read_rows(path: Path, *, dataset_dir: Path) -> list[dict[str, Any]]:
 
 def _load_json_dataset(
     dataset_dir: Path,
+    *,
+    visible_action_only: bool = False,
 ) -> tuple[Any, Any | None, dict[str, bool]]:
     from datasets import Dataset
 
@@ -117,6 +114,11 @@ def _load_json_dataset(
     has_tools = any(row.get("tools") for row in [*train_rows, *validation_rows])
     has_images = any(row.get("images") for row in [*train_rows, *validation_rows])
     for row in [*train_rows, *validation_rows]:
+        if visible_action_only:
+            # Captures contain visible actions, not hidden reasoning. Condition
+            # their loss on the template's closed thinking envelope, rather than
+            # inventing reasoning targets or misaligning the first action tokens.
+            row["chat_template_kwargs"] = {"enable_thinking": False}
         if not has_tools:
             row.pop("tools", None)
         if not has_images:
@@ -128,6 +130,57 @@ def _load_json_dataset(
         else None
     )
     return train, validation, {"has_tools": has_tools, "has_images": has_images}
+
+
+def _audit_template_boundaries(processor: Any, datasets: list[Any]) -> dict[str, int]:
+    """Reject template/token prefix drift before allocating the training model."""
+    tokenizer = getattr(processor, "tokenizer", processor)
+    stats = {
+        "pair_count": 0,
+        "max_text_prompt_tokens": 0,
+        "max_text_completion_tokens": 0,
+    }
+    for dataset in datasets:
+        if dataset is None:
+            continue
+        for row in dataset:
+            tools = row.get("tools")
+            tools = json.loads(tools) if isinstance(tools, str) else tools
+            kwargs = {
+                "tokenize": False,
+                "tools": tools,
+                **(row.get("chat_template_kwargs") or {}),
+            }
+            prefix = processor.apply_chat_template(
+                row["prompt"], add_generation_prompt=True, **kwargs
+            )
+            prefix_ids = tokenizer.encode(prefix, add_special_tokens=False)
+            completions = []
+            for side in ("chosen", "rejected"):
+                rendered = processor.apply_chat_template(
+                    row["prompt"] + row[side], **kwargs
+                )
+                tokens = tokenizer.encode(rendered, add_special_tokens=False)
+                if (
+                    not rendered.startswith(prefix)
+                    or tokens[: len(prefix_ids)] != prefix_ids
+                ):
+                    raise ValueError(
+                        f"{side} has a chat-template/token prefix mismatch; refuse misaligned DPO"
+                    )
+                completions.append(tokens[len(prefix_ids) :])
+            if not all(completions) or completions[0] == completions[1]:
+                raise ValueError(
+                    "preference has no distinct completion after applying the model template"
+                )
+            stats["pair_count"] += 1
+            stats["max_text_prompt_tokens"] = max(
+                stats["max_text_prompt_tokens"], len(prefix_ids)
+            )
+            stats["max_text_completion_tokens"] = max(
+                stats["max_text_completion_tokens"], *(len(x) for x in completions)
+            )
+    return stats
 
 
 def _build_model_and_processor(
@@ -166,7 +219,6 @@ def _build_model_and_processor(
         peft_config = None
     else:
         import torch
-
         from peft import LoraConfig
         from transformers import AutoProcessor, AutoTokenizer, BitsAndBytesConfig
 
@@ -258,9 +310,14 @@ def _verify_processing_contract(
         raise RuntimeError("multimodal preference data requires an image processor")
 
 
-def _training_args(config: dict[str, Any], output_dir: Path, has_eval: bool) -> Any:
+def _training_args(
+    config: dict[str, Any],
+    output_dir: Path,
+    has_eval: bool,
+    *,
+    has_images: bool = False,
+) -> Any:
     import torch
-
     from trl import DPOConfig
 
     model_cfg = config["model"]
@@ -272,6 +329,7 @@ def _training_args(config: dict[str, Any], output_dir: Path, has_eval: bool) -> 
         "run_name": str(train.get("run_name", "sceneexpert-qwen-dpo")),
         "seed": int(train.get("seed", 42)),
         "num_train_epochs": float(train.get("num_train_epochs", 1.0)),
+        "max_steps": int(train.get("max_steps", -1)),
         "learning_rate": float(train.get("learning_rate", 1e-5)),
         "beta": float(train.get("beta", 0.1)),
         "per_device_train_batch_size": int(train.get("per_device_train_batch_size", 1)),
@@ -279,7 +337,10 @@ def _training_args(config: dict[str, Any], output_dir: Path, has_eval: bool) -> 
         "gradient_accumulation_steps": int(
             train.get("gradient_accumulation_steps", 16)
         ),
-        "warmup_ratio": float(train.get("warmup_ratio", 0.05)),
+        # Transformers 5.15 folds fractional warmup into warmup_steps.
+        "warmup_steps": float(
+            train.get("warmup_steps", train.get("warmup_ratio", 0.05))
+        ),
         "lr_scheduler_type": str(train.get("lr_scheduler_type", "cosine")),
         "optim": str(train.get("optim", "adamw_8bit")),
         "max_grad_norm": float(train.get("max_grad_norm", 1.0)),
@@ -297,10 +358,16 @@ def _training_args(config: dict[str, Any], output_dir: Path, has_eval: bool) -> 
         "truncation_mode": str(train.get("truncation_mode", "keep_start")),
         "loss_type": train.get("loss_type", ["sigmoid", "sft"]),
         "loss_weights": train.get("loss_weights", [1.0, 0.2]),
+        # TRL 1.13 precomputes text reference scores only. Vision batches are
+        # processed on the fly and retain their normal reference forward pass.
+        "precompute_ref_log_probs": bool(train.get("precompute_ref_log_probs", True))
+        and not has_images,
         "report_to": report_to,
         "project": "sceneexpert-slow-memory",
         "trackio_space_id": train.get("trackio_space_id"),
         "remove_unused_columns": True,
+        "use_liger_kernel": bool(train.get("use_liger_kernel", False)),
+        "prediction_loss_only": bool(train.get("prediction_loss_only", True)),
         "load_best_model_at_end": False,
         "trust_remote_code": bool(model_cfg.get("trust_remote_code", True)),
         "dataset_num_proc": int(config.get("data", {}).get("num_proc", 4)),
@@ -312,7 +379,7 @@ def _training_args(config: dict[str, Any], output_dir: Path, has_eval: bool) -> 
 
 def main() -> int:
     args = _parse_args()
-    config = load_training_config(args.config)
+    config = apply_training_profile(load_training_config(args.config), args.profile)
     data_cfg = config.setdefault("data", {})
     train_cfg = config.setdefault("training", {})
     dataset_dir = args.dataset_dir or Path(str(data_cfg.get("dataset_dir", "")))
@@ -331,16 +398,37 @@ def main() -> int:
         return 0
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    train_dataset, eval_dataset, dataset_features = _load_json_dataset(dataset_dir)
+    for name, payload in (
+        ("effective_config.json", config),
+        ("preflight.json", preflight),
+    ):
+        (output_dir / name).write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+    train_dataset, eval_dataset, dataset_features = _load_json_dataset(
+        dataset_dir, visible_action_only=args.profile != "full"
+    )
     model, processor, peft_config, quantization_config = _build_model_and_processor(
         config, preflight["model_name_or_path"]
     )
     _verify_processing_contract(processor, dataset_features=dataset_features)
+    template_audit = _audit_template_boundaries(
+        processor, [train_dataset, eval_dataset]
+    )
+    (output_dir / "template_boundary_audit.json").write_text(
+        json.dumps(template_audit, indent=2), encoding="utf-8"
+    )
+    print(json.dumps({"template_boundary_audit": template_audit}), flush=True)
     from trl import DPOTrainer
 
     trainer_kwargs: dict[str, Any] = {
         "model": model,
-        "args": _training_args(config, output_dir, eval_dataset is not None),
+        "args": _training_args(
+            config,
+            output_dir,
+            eval_dataset is not None,
+            has_images=dataset_features["has_images"],
+        ),
         "train_dataset": train_dataset,
         "eval_dataset": eval_dataset,
         "processing_class": processor,
@@ -350,9 +438,33 @@ def main() -> int:
     if quantization_config is not None:
         trainer_kwargs["quantization_config"] = quantization_config
     trainer = DPOTrainer(**trainer_kwargs)
+    if trainer.args.use_liger_kernel:
+        from scenesmith.scene_expert.slow_memory.fused_policy import (
+            completion_only_fused_loss,
+        )
+
+        trainer.liger_loss = completion_only_fused_loss(trainer.liger_loss)
     resume = args.resume_from_checkpoint or train_cfg.get("resume_from_checkpoint")
     train_result = trainer.train(resume_from_checkpoint=resume or None)
     train_metrics = dict(train_result.metrics)
+    if trainer.state.global_step < 1 or not math.isfinite(
+        float(train_metrics.get("train_loss", float("nan")))
+    ):
+        raise RuntimeError("DPO did not complete an optimizer step with finite loss")
+    import torch
+
+    changed_lora_tensors = sum(
+        bool(torch.count_nonzero(value.detach()).item())
+        for name, value in trainer.model.named_parameters()
+        if "lora_B" in name
+    )
+    if not changed_lora_tensors:
+        raise RuntimeError("optimizer completed but all LoRA B tensors remain zero")
+    train_metrics.update(
+        optimizer_steps=trainer.state.global_step,
+        nonzero_lora_b_tensors=changed_lora_tensors,
+        peak_cuda_memory_gib=torch.cuda.max_memory_allocated() / 1024**3,
+    )
     trainer.save_metrics("train", train_metrics)
     evaluation_metrics: dict[str, Any] = {}
     if eval_dataset is not None:
@@ -383,7 +495,8 @@ def main() -> int:
     manifest = {
         "schema_version": "sceneexpert.dpo_training_run.v2",
         "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "code_revision": _git_revision(),
+        "training_profile": args.profile,
+        "code_provenance": collect_code_provenance(include_git=False),
         "config_path": str(args.config.resolve()),
         "config_fingerprint": preflight["config_fingerprint"],
         "dataset_manifest": str((dataset_dir / "manifest.json").resolve()),
@@ -397,6 +510,23 @@ def main() -> int:
             )
         },
         "dataset_features": dataset_features,
+        "template_boundary_audit": template_audit,
+        "use_liger_kernel": trainer.args.use_liger_kernel,
+        "loss_projection": (
+            "completion_positions_only"
+            if trainer.args.use_liger_kernel
+            else "all_positions"
+        ),
+        "reasoning_target": (
+            "visible_actions_after_closed_thinking_envelope"
+            if args.profile != "full"
+            else "template_default"
+        ),
+        "learning_scope": (
+            "first_assistant_turn"
+            if args.profile != "full"
+            else "configured_completion"
+        ),
         "model_name_or_path": preflight["model_name_or_path"],
         "backend": preflight["backend"],
         "tuning_mode": preflight["tuning_mode"],
@@ -418,6 +548,9 @@ def main() -> int:
         newline="\n",
     )
     print(json.dumps(manifest, indent=2, ensure_ascii=False))
+    if args.profile == "pipeline_smoke":
+        print("Pipeline smoke completed; this adapter is not an effectiveness result.")
+        return 0
     return 0 if promotion["promotable"] else 3
 
 

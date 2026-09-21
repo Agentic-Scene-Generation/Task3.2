@@ -1,0 +1,12 @@
+# Isolated training environment; do not install into the scene runtime.
+torch==2.11.0
+transformers==5.15.0
+trl==1.13.0
+peft==0.20.0
+datasets==5.0.1
+accelerate==1.14.0
+bitsandbytes==0.50.2
+liger-kernel==0.8.3
+pillow>=11,<13
+pyyaml>=6,<7
+pydantic>=2.10,<3

@@ -51,7 +51,8 @@ def _policy(path: Path, relative: Path) -> tuple[int | None, str]:
         # Include original model-input/tool media and exported DPO images.
         # Intermediate renders/textures remain on the server by default.
         if ("slow_memory" in parts and "media" in parts) or (
-            "images" in parts and any(p in {"dpo", "dpo_probe"} for p in parts)
+            "images" in parts
+            and any(p in {"dpo", "dpo_probe", "datasets"} for p in parts)
         ):
             return 40, "evidence_image"
         return None, "intermediate_render_or_texture"
@@ -101,7 +102,20 @@ def _finalization_evidence(
     pairs = f"{collection}/runs/paired_initial"
     audit = f"{pairs}/pair_audit.json"
     rescore = f"{pairs}/rescore_status.json"
-    if rescore in included_paths:
+    if f"{collection}/campaign.json" in included_paths:
+        mode = "sceneeval_campaign"
+        required = {
+            f"{collection}/campaign.json",
+            f"{collection}/campaign_audit.json",
+            f"{collection}/campaign_exit_status.env",
+        }
+    elif f"{collection}/training_manifest.json" in included_paths:
+        mode = "dpo_training"
+        required = {
+            f"{collection}/training_manifest.json",
+            f"{collection}/exit_status.env",
+        }
+    elif rescore in included_paths:
         mode = "candidate_rescore"
         required = {audit, rescore, f"{logs}/exit_status.env"}
     elif f"{pairs}/audit_code_provenance.json" in included_paths:
@@ -166,6 +180,10 @@ def package_results(
         (collection_root or project_root / "outputs/slow_memory" / run_id).absolute(),
         (log_root or project_root / "tmp/acp_logs" / run_id).absolute(),
     ]
+    if (roots[0] / "campaign.json").is_file():
+        roots.extend(
+            sorted((project_root / "tmp/acp_logs").glob(f"{run_id}_attempt_*"))
+        )
     for root in roots:
         if root.is_symlink() or not root.resolve().is_relative_to(project_root):
             raise ValueError("source roots must be real directories within the project")
