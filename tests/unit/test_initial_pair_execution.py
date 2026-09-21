@@ -160,9 +160,12 @@ def test_native_initial_dispatch_preserves_canonical_continuation(
             assert calls.index("native_safety") < calls.index("shadow")
 
 
-def test_sdk_wire_capture_sees_serialized_request_and_never_headers(tmp_path):
+def test_sdk_wire_capture_sees_serialized_request_and_never_headers(tmp_path, monkeypatch):
     openai = pytest.importorskip("openai")
     httpx = pytest.importorskip("httpx")
+    # Proxy mounts take precedence over _transport; keep the mock fully offline.
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
 
     async def run():
         with capture_wire(tmp_path):
