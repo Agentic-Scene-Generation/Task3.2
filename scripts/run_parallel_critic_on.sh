@@ -136,6 +136,10 @@ SCENE_SELECTION="${SCENE_SELECTION:-all}"
 SCENE_SELECTION_EXPLICIT="false"
 SCENEEVAL_SIZE="${SCENEEVAL_SIZE:-100}"
 SCENEEVAL_ANNOTATIONS="${SCENEEVAL_ANNOTATIONS:-$SCRIPT_DIR/assets/annotations.csv}"
+# Custom prompt suites are deliberately independent from SceneEval: unlike
+# SceneEval, their case IDs do not need to be consecutive integers.
+PROMPT_CSV="${PROMPT_CSV:-}"
+PROMPT_CSV_SHA256=""
 DIFFICULTY_SELECTION="${DIFFICULTY_SELECTION:-all}"
 CLI_PARALLELISM=""
 REPLAY_FROM_PATH="${REPLAY_FROM_PATH:-}"
@@ -147,8 +151,10 @@ usage() {
 Usage: bash scripts/run_parallel_critic_on.sh [options]
 
 Options:
-  --case-set <set>         new3 (default), legacy8, sceneeval100, or sceneeval500
+  --case-set <set>         new3 (default), legacy8, sceneeval100, sceneeval500,
+                           or promptcsv
   --scene-eval <size>      run SceneEval-100 or SceneEval-500 (size: 100 or 500)
+  --prompt-csv <path>      run an independent prompt CSV; selects promptcsv
   --difficulty <levels>    SceneEval difficulty: all (default), easy, medium, hard,
                            or a comma-separated combination
   --parallelism <count>    number of scene batches to run concurrently (default: 1)
@@ -169,11 +175,15 @@ Case registries:
             dining_room_service_squeeze
   sceneeval100  IDs 0-99 from scripts/assets/annotations.csv
   sceneeval500  IDs 0-499 from scripts/assets/annotations.csv
+  promptcsv     arbitrary unique IDs from --prompt-csv (or PROMPT_CSV).
+                Required columns: ID, Description, Difficulty, SceneScope.
+                Optional CriticGoal becomes the per-case critic goal.
 
 Examples:
   bash scripts/run_parallel_critic_on.sh --scene-eval 100 --parallelism 4
   bash scripts/run_parallel_critic_on.sh --scene-eval 500 --difficulty hard --parallelism 2
   bash scripts/run_parallel_critic_on.sh --case-set sceneeval100 --difficulty easy,medium
+  bash scripts/run_parallel_critic_on.sh --prompt-csv scripts/assets/style_prompt_cases.csv --parallelism 4
 
 CASE_FILTER remains available for legacy substring filtering when --scenes is
 not supplied. An explicit --scenes selection takes precedence. A reusable
@@ -252,6 +262,24 @@ if [ "${1:-}" != "--internal-run-batch" ]; then
                     echo "ERROR: --scene-eval requires 100 or 500" >&2
                     exit 2
                 fi
+                shift
+                ;;
+            --prompt-csv)
+                if [ "$#" -lt 2 ] || [ -z "${2:-}" ]; then
+                    echo "ERROR: --prompt-csv requires a CSV path" >&2
+                    exit 2
+                fi
+                PROMPT_CSV="$2"
+                CASE_SET="promptcsv"
+                shift 2
+                ;;
+            --prompt-csv=*)
+                PROMPT_CSV="${1#*=}"
+                if [ -z "$PROMPT_CSV" ]; then
+                    echo "ERROR: --prompt-csv requires a CSV path" >&2
+                    exit 2
+                fi
+                CASE_SET="promptcsv"
                 shift
                 ;;
             --difficulty|--difficulties)
@@ -337,13 +365,18 @@ case "${CASE_SET,,}" in
     sceneeval|scene-eval) CASE_SET="sceneeval${SCENEEVAL_SIZE}" ;;
     sceneeval100|sceneeval-100|sceneeval_100) CASE_SET="sceneeval100"; SCENEEVAL_SIZE=100 ;;
     sceneeval500|sceneeval-500|sceneeval_500) CASE_SET="sceneeval500"; SCENEEVAL_SIZE=500 ;;
+    promptcsv|prompt-csv|customcsv|custom-csv) CASE_SET="promptcsv" ;;
     *)
-        echo "ERROR: CASE_SET must be new3, legacy8, sceneeval100, or sceneeval500; got '$CASE_SET'" >&2
+        echo "ERROR: CASE_SET must be new3, legacy8, sceneeval100, sceneeval500, or promptcsv; got '$CASE_SET'" >&2
         exit 2
         ;;
 esac
 if [[ "$SCENEEVAL_SIZE" != "100" && "$SCENEEVAL_SIZE" != "500" ]]; then
     echo "ERROR: SceneEval size must be 100 or 500, got '$SCENEEVAL_SIZE'" >&2
+    exit 2
+fi
+if [ "$CASE_SET" = "promptcsv" ] && [ -z "$PROMPT_CSV" ]; then
+    echo "ERROR: promptcsv requires --prompt-csv <path> or PROMPT_CSV" >&2
     exit 2
 fi
 
@@ -405,6 +438,9 @@ DRY_RUN="${DRY_RUN:-false}"
 SCENEEVAL_AFTER_RUN="${SCENEEVAL_AFTER_RUN:-auto}"
 CRITIC_PROBE_RENDER_FINAL_VIEWS="${CRITIC_PROBE_RENDER_FINAL_VIEWS:-false}"
 CRITIC_PROBE_FINAL_VIEW_PARALLELISM="${CRITIC_PROBE_FINAL_VIEW_PARALLELISM:-1}"
+CRITIC_PROBE_FINAL_VIEW_RESOLUTION="${CRITIC_PROBE_FINAL_VIEW_RESOLUTION:-1536}"
+CRITIC_PROBE_FINAL_VIEW_SAMPLES="${CRITIC_PROBE_FINAL_VIEW_SAMPLES:-4}"
+CRITIC_PROBE_FINAL_VIEW_ENGINE="${CRITIC_PROBE_FINAL_VIEW_ENGINE:-eevee}"
 FINAL_VIEW_PYTHON_BIN="${FINAL_VIEW_PYTHON_BIN:-$PYTHON_BIN}"
 DISABLE_ARTICULATED="${SCENEEXPERT_DISABLE_ARTICULATED:-false}"
 DISABLE_MATERIALS="${SCENEEXPERT_DISABLE_MATERIALS:-false}"
@@ -616,6 +652,8 @@ require_positive_integer CRITIC_PROBE_PORT_BASE "$CRITIC_PROBE_PORT_BASE"
 require_positive_integer CRITIC_PROBE_PORT_BLOCK_SIZE "$CRITIC_PROBE_PORT_BLOCK_SIZE"
 require_positive_integer CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS "$CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS"
 require_positive_integer CRITIC_PROBE_FINAL_VIEW_PARALLELISM "$CRITIC_PROBE_FINAL_VIEW_PARALLELISM"
+require_positive_integer CRITIC_PROBE_FINAL_VIEW_RESOLUTION "$CRITIC_PROBE_FINAL_VIEW_RESOLUTION"
+require_positive_integer CRITIC_PROBE_FINAL_VIEW_SAMPLES "$CRITIC_PROBE_FINAL_VIEW_SAMPLES"
 if [ -n "$CONVEX_MAX_OMP_THREADS" ]; then
     require_positive_integer SCENEEXPERT_CONVEX_MAX_OMP_THREADS "$CONVEX_MAX_OMP_THREADS"
 fi
@@ -625,8 +663,13 @@ if ! DIFFICULTY_SELECTION="$(normalize_difficulty_selection "$DIFFICULTY_SELECTI
     echo "ERROR: DIFFICULTY_SELECTION/--difficulty must be all or a unique comma-separated selection of easy, medium, hard" >&2
     exit 2
 fi
-if [[ "$CASE_SET" != sceneeval* && "$DIFFICULTY_SELECTION" != "all" ]]; then
-    echo "ERROR: --difficulty is supported only with SceneEval case sets" >&2
+if [[ "$CASE_SET" != sceneeval* && "$CASE_SET" != "promptcsv" && "$DIFFICULTY_SELECTION" != "all" ]]; then
+    echo "ERROR: --difficulty is supported only with SceneEval or promptcsv case sets" >&2
+    exit 2
+fi
+CRITIC_PROBE_FINAL_VIEW_ENGINE="${CRITIC_PROBE_FINAL_VIEW_ENGINE,,}"
+if [[ "$CRITIC_PROBE_FINAL_VIEW_ENGINE" != "eevee" && "$CRITIC_PROBE_FINAL_VIEW_ENGINE" != "cycles" ]]; then
+    echo "ERROR: CRITIC_PROBE_FINAL_VIEW_ENGINE must be eevee or cycles" >&2
     exit 2
 fi
 case "${SCENEEVAL_AFTER_RUN,,}" in
@@ -874,8 +917,8 @@ validate_scene_selection() {
             exit 2
         fi
         if [ "${CASE_SCOPE_BY_ID[$scene_id]:-single_room}" = "multi_room" ]; then
-            echo "ERROR: scene ID '$scene_id' is marked multi_room in $SCENEEVAL_ANNOTATIONS" >&2
-            echo "       This runner supports only SceneEval single_room cases." >&2
+            echo "ERROR: scene ID '$scene_id' is marked multi_room in the $CASE_SET registry" >&2
+            echo "       This runner supports only single_room cases." >&2
             exit 2
         fi
         if [[ "$seen" == *",$scene_id,"* ]]; then
@@ -971,6 +1014,66 @@ PY
     fi
 }
 
+load_prompt_csv_registry() {
+    if [ ! -f "$PROMPT_CSV" ]; then
+        echo "ERROR: prompt CSV not found: $PROMPT_CSV" >&2
+        exit 2
+    fi
+
+    # Reuse the normal difficulty/scope filters, but do not impose SceneEval's
+    # contiguous numeric ID contract on locally curated prompt suites.
+    mapfile -d '' -t CASES < <(
+        "$PYTHON_BIN" - "$PROMPT_CSV" <<'PY'
+import csv
+import sys
+
+path = sys.argv[1]
+with open(path, newline="", encoding="utf-8-sig") as handle:
+    rows = list(csv.DictReader(handle))
+
+required = {"ID", "Description", "Difficulty", "SceneScope"}
+if not rows or not required.issubset(rows[0]):
+    raise SystemExit(f"ERROR: prompt CSV must contain columns {sorted(required)}: {path}")
+
+seen_ids: set[str] = set()
+for line_number, row in enumerate(rows, start=2):
+    case_id = (row["ID"] or "").strip()
+    description = (row["Description"] or "").strip()
+    difficulty = (row["Difficulty"] or "").strip().lower()
+    scene_scope = (row["SceneScope"] or "").strip().lower()
+    critic_goal = (row.get("CriticGoal") or f"custom prompt {case_id}").strip()
+    if not case_id:
+        raise SystemExit(f"ERROR: prompt CSV row {line_number} has an empty ID")
+    if case_id in seen_ids:
+        raise SystemExit(f"ERROR: prompt CSV has duplicate ID {case_id!r}")
+    if not description:
+        raise SystemExit(f"ERROR: prompt CSV ID {case_id!r} has an empty Description")
+    if difficulty not in {"easy", "medium", "hard"}:
+        raise SystemExit(f"ERROR: prompt CSV ID {case_id!r} has invalid Difficulty {difficulty!r}")
+    if scene_scope not in {"single_room", "multi_room"}:
+        raise SystemExit(f"ERROR: prompt CSV ID {case_id!r} has invalid SceneScope {scene_scope!r}")
+    for field_name, value in {"ID": case_id, "Description": description, "CriticGoal": critic_goal}.items():
+        if "|" in value or "\x00" in value or "\n" in value or "\r" in value:
+            raise SystemExit(f"ERROR: prompt CSV ID {case_id!r} has an unsupported record separator in {field_name}")
+    seen_ids.add(case_id)
+    record = f"{case_id}|{critic_goal}|{description}|{scene_scope}|{difficulty}".encode("utf-8")
+    sys.stdout.buffer.write(record + b"\x00")
+PY
+    )
+    if [ "${#CASES[@]}" -eq 0 ]; then
+        echo "ERROR: prompt CSV contains no cases: $PROMPT_CSV" >&2
+        exit 2
+    fi
+    PROMPT_CSV_SHA256="$("$PYTHON_BIN" - "$PROMPT_CSV" <<'PY'
+import hashlib
+import sys
+
+with open(sys.argv[1], "rb") as stream:
+    print(hashlib.file_digest(stream, "sha256").hexdigest())
+PY
+)"
+}
+
 declare -A CASE_DIFFICULTY_BY_ID=()
 declare -A CASE_SCOPE_BY_ID=()
 SCENEEVAL_SINGLE_ROOM_COUNT=0
@@ -1003,6 +1106,9 @@ select_case_registry() {
         sceneeval100|sceneeval500)
             load_sceneeval_registry
             ;;
+        promptcsv)
+            load_prompt_csv_registry
+            ;;
         *)
             echo "ERROR: unsupported case set '$CASE_SET'" >&2
             exit 2
@@ -1012,7 +1118,7 @@ select_case_registry() {
     local case_entry case_id critic_goal prompt scene_scope difficulty
     CASE_SET_IDS=""
     for case_entry in "${CASES[@]}"; do
-        IFS='|' read -r case_id critic_goal prompt scene_scope <<< "$case_entry"
+        IFS='|' read -r case_id critic_goal prompt scene_scope difficulty <<< "$case_entry"
         scene_scope="${scene_scope:-single_room}"
         CASE_SCOPE_BY_ID["$case_id"]="$scene_scope"
         if [[ "$CASE_SET" == sceneeval* ]]; then
@@ -1028,6 +1134,9 @@ select_case_registry() {
                 SCENEEVAL_SINGLE_ROOM_COUNT=$((SCENEEVAL_SINGLE_ROOM_COUNT + 1))
             fi
             continue
+        fi
+        if [ "$CASE_SET" = "promptcsv" ]; then
+            CASE_DIFFICULTY_BY_ID["$case_id"]="$difficulty"
         fi
         if [ -n "$CASE_SET_IDS" ]; then
             CASE_SET_IDS+=", "
@@ -1063,6 +1172,23 @@ if [ "$BRANCH_FROM_SHARED_BASE" = "true" ]; then
     else
         echo "WARNING: reusable shared base has no .critic_on_case_set metadata; compatibility is inferred from batch files." >&2
     fi
+    if [ "$CASE_SET" = "promptcsv" ]; then
+        shared_base_prompt_sha_file="$SHARED_BASE_ROOT/.critic_on_prompt_csv_sha256"
+        if [ "$GENERATE_SHARED_BASE" = "true" ]; then
+            if [ "$DRY_RUN" = "false" ]; then
+                printf '%s\n' "$PROMPT_CSV_SHA256" > "$shared_base_prompt_sha_file"
+            fi
+        elif [ -f "$shared_base_prompt_sha_file" ]; then
+            shared_base_prompt_sha="$(tr -d '[:space:]' < "$shared_base_prompt_sha_file")"
+            if [ "$shared_base_prompt_sha" != "$PROMPT_CSV_SHA256" ]; then
+                echo "ERROR: shared base was generated from a different prompt CSV content hash." >&2
+                echo "       Regenerate the shared base or use the exact CSV that produced it." >&2
+                exit 2
+            fi
+        else
+            echo "WARNING: reusable prompt CSV shared base has no CSV hash metadata; compatibility is inferred from batch files." >&2
+        fi
+    fi
 fi
 
 # Parallel batches re-enter this script in a new session. Export every value
@@ -1070,7 +1196,7 @@ fi
 # the same run configuration as the parent.
 export SCENEEXPERT_EXPERIMENT="$EXPERIMENT"
 export PYTHON_BIN MODEL_NAME RUN_ID OUTPUT_ROOT CASE_SET CASE_SET_IDS
-export SCENEEVAL_SIZE SCENEEVAL_ANNOTATIONS DIFFICULTY_SELECTION
+export SCENEEVAL_SIZE SCENEEVAL_ANNOTATIONS PROMPT_CSV PROMPT_CSV_SHA256 DIFFICULTY_SELECTION
 export SCENE_BATCH_SIZE SCENE_WORKERS_PER_PROCESS SCENE_RETRY_ATTEMPTS
 export SHARED_BASE_BATCH_RETRIES SHARED_BASE_RETRY_PARALLELISM
 export CRITIC_PROBE_PARALLEL CRITIC_PROBE_INNER_PARALLELISM
@@ -1080,6 +1206,9 @@ export CRITIC_PROBE_SHUTDOWN_GRACE_SECONDS
 export CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE
 export CRITIC_PROBE_RENDER_FINAL_VIEWS
 export CRITIC_PROBE_FINAL_VIEW_PARALLELISM
+export CRITIC_PROBE_FINAL_VIEW_RESOLUTION
+export CRITIC_PROBE_FINAL_VIEW_SAMPLES
+export CRITIC_PROBE_FINAL_VIEW_ENGINE
 export FINAL_VIEW_PYTHON_BIN
 export PIPELINE_STOP_STAGE BRANCH_FROM_SHARED_BASE SHARED_BASE_STOP_STAGE
 export SHARED_BASE_ROOT GENERATE_SHARED_BASE MAX_CASES CASE_FILTER
@@ -1177,6 +1306,11 @@ if [[ "$CASE_SET" == sceneeval* ]]; then
     echo "SceneEval scope: single_room only ($SCENEEVAL_SINGLE_ROOM_COUNT supported, $SCENEEVAL_MULTI_ROOM_COUNT filtered)"
     echo "SceneEval filtered multi_room IDs: ${SCENEEVAL_MULTI_ROOM_IDS:-none}"
 fi
+if [ "$CASE_SET" = "promptcsv" ]; then
+    echo "Prompt CSV: $PROMPT_CSV"
+    echo "Prompt CSV SHA-256: $PROMPT_CSV_SHA256"
+    echo "Prompt CSV difficulty: $DIFFICULTY_SELECTION"
+fi
 echo "model: $MODEL_NAME"
 echo "OpenAI base URL: $OPENAI_BASE_URL"
 if [ -n "${SCENEEXPERT_MEMORY_EMBEDDING_MODEL_DIR:-}" ]; then
@@ -1189,6 +1323,7 @@ echo "shared-base failed-batch recovery attempts: $SHARED_BASE_BATCH_RETRIES (pa
 echo "port allocation: base=$CRITIC_PROBE_PORT_BASE block=$CRITIC_PROBE_PORT_BLOCK_SIZE"
 echo "continue after batch failure: $CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE"
 echo "final-view parallelism: $CRITIC_PROBE_FINAL_VIEW_PARALLELISM"
+echo "final-view quality: engine=$CRITIC_PROBE_FINAL_VIEW_ENGINE resolution=${CRITIC_PROBE_FINAL_VIEW_RESOLUTION}px samples=$CRITIC_PROBE_FINAL_VIEW_SAMPLES"
 echo "fail unresolved furniture hard constraints: $FAIL_STAGE_ON_UNRESOLVED_HARD_CONSTRAINTS"
 echo "quality failure policy: $QUALITY_FAILURE_POLICY"
 echo "critic-on scene failure policy: $SCENE_FAILURE_POLICY (shared-base: strict)"
@@ -1265,7 +1400,8 @@ echo "==============================================="
 
 difficulty_selected() {
     local case_id="$1" level
-    if [[ "$CASE_SET" != sceneeval* ]] || [ "$DIFFICULTY_SELECTION" = "all" ]; then
+    if { [[ "$CASE_SET" != sceneeval* ]] && [ "$CASE_SET" != "promptcsv" ]; } \
+        || [ "$DIFFICULTY_SELECTION" = "all" ]; then
         return 0
     fi
     IFS=',' read -r -a difficulty_levels <<< "$DIFFICULTY_SELECTION"
@@ -1617,6 +1753,9 @@ run_batch() {
             fi
             echo "[$run_kind/$batch_label] rendering final views for scene $(printf '%03d' "$scene_index")"
             if "$FINAL_VIEW_PYTHON_BIN" "$SCRIPT_DIR/render_critic_final_views.py" \
+                --resolution "$CRITIC_PROBE_FINAL_VIEW_RESOLUTION" \
+                --samples "$CRITIC_PROBE_FINAL_VIEW_SAMPLES" \
+                --engine "$CRITIC_PROBE_FINAL_VIEW_ENGINE" \
                 --parallelism 1 -- "$blend_path"; then
                 echo "[$run_kind/$batch_label] final views ready: $scene_dir/critic_final_views"
             else

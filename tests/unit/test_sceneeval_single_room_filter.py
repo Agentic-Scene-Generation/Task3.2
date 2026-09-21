@@ -130,7 +130,10 @@ def test_runner_rejects_explicit_multi_room_before_output_creation(
     )
 
     assert result.returncode == 2
-    assert "scene ID '49' is marked multi_room" in result.stderr
+    assert (
+        "scene ID '49' is marked multi_room in the sceneeval100 registry"
+        in result.stderr
+    )
     assert not (tmp_path / "output").exists()
 
 
@@ -158,6 +161,53 @@ def test_runner_rejects_invalid_scene_scope(tmp_path: Path) -> None:
 
     assert result.returncode == 2
     assert "SceneEval ID 0 has invalid SceneScope 'whole_house'" in result.stderr
+
+
+def test_runner_loads_custom_prompt_csv_without_sceneeval_id_contract(
+    tmp_path: Path,
+) -> None:
+    prompts = tmp_path / "style_prompts.csv"
+    with prompts.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(
+            stream,
+            fieldnames=["ID", "Description", "Difficulty", "SceneScope", "CriticGoal"],
+        )
+        writer.writeheader()
+        writer.writerows(
+            [
+                {
+                    "ID": "modern_lounge",
+                    "Description": "A modern living room with a sofa and coffee table.",
+                    "Difficulty": "medium",
+                    "SceneScope": "single_room",
+                    "CriticGoal": "modern furniture cohesion",
+                },
+                {
+                    "ID": "industrial_dining",
+                    "Description": "An industrial dining room with a table and chairs.",
+                    "Difficulty": "medium",
+                    "SceneScope": "single_room",
+                    "CriticGoal": "industrial furniture cohesion",
+                },
+            ]
+        )
+
+    result = _run_runner(
+        tmp_path,
+        "--prompt-csv",
+        str(prompts),
+        "--difficulty",
+        "medium",
+        "--parallelism",
+        "2",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "case set: promptcsv" in result.stdout
+    assert f"Prompt CSV: {prompts}" in result.stdout
+    assert "Prompt CSV SHA-256:" in result.stdout
+    assert "critic_on/batch_001" in result.stdout
+    assert "critic_on/batch_002" in result.stdout
 
 
 def test_runner_normalizes_output_root_to_nested_shared_base(tmp_path: Path) -> None:
