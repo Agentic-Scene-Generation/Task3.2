@@ -155,6 +155,7 @@ floor_plan_reservations:
 
 # Memory system
 memory:
+  read_only: ${oc.env:SCENEEXPERT_MEMORY_READ_ONLY,false}
   # Directory for persistent memory storage (relative to project root)
   dir: "${paths.memory_dir}"
   retriever_type: "${oc.env:SCENEEXPERT_MEMORY_RETRIEVER_TYPE,lexical}"

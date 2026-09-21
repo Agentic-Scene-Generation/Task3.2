@@ -358,12 +358,13 @@ class InitialPair:
         from scenesmith.agent_utils.stage_working_memory import (
             _extract_agent_result_trace,
         )
+        from scenesmith.scene_expert.schemas import SceneTaskSpec
         from scenesmith.scene_expert.slow_memory.paired_scoring import (
             SCORING_PROTOCOL,
             save_scoring_proof,
             score_raw_candidate,
         )
-        from scenesmith.scene_expert.schemas import SceneTaskSpec
+        from scenesmith.scene_expert.slow_memory.relative import report_profile
         from scenesmith.scene_expert.slow_memory.schemas import (
             PreferenceEvidence,
             TrajectoryOutcome,
@@ -433,7 +434,11 @@ class InitialPair:
                 authoritative=True,
                 quality_score=score,
                 report_ref="report.json",
-                details={"raw_state_sha256": raw_hash, "candidate": candidate},
+                details={
+                    "raw_state_sha256": raw_hash,
+                    "candidate": candidate,
+                    "relative_profile": report_profile(report),
+                },
             ),
             outcome=TrajectoryOutcome(
                 execution_complete=True,
@@ -593,6 +598,7 @@ async def run_shadow(group: Path) -> None:
 
     from agents import Runner
     from omegaconf import OmegaConf
+
     from scenesmith.agent_utils.house import HouseLayout, RoomGeometry
     from scenesmith.agent_utils.room import RoomScene
     from scenesmith.furniture_agents.stateful_furniture_agent import (

@@ -223,6 +223,11 @@ def rescore_pairs(
                     evaluation_state_sha256=proof["evaluation_state_sha256"],
                     restoration_proof_sha256=proof["restoration_proof_sha256"],
                 )
+                from scenesmith.scene_expert.slow_memory.relative import report_profile
+
+                record["evidence"]["details"]["relative_profile"] = report_profile(
+                    report
+                )
                 record["outcome"].update(
                     hard_passed=failures == 0,
                     hard_violation_count=failures,
