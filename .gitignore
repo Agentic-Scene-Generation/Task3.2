@@ -1,6 +1,7 @@
 # Virtual environments
 .venv/
 .mujoco_venv/
+.venv*/
 
 # Python
 *.egg-info/
