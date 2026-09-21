@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 
 from dataclasses import dataclass
@@ -468,6 +469,121 @@ def _categories_match_inventory(first: str, second: str) -> bool:
     return False
 
 
+def _task_spec_inventory_counts(task_spec: SceneTaskSpec) -> dict[str, int]:
+    """Return the compiler's explicit per-category inventory cardinality."""
+    counts: dict[str, int] = {}
+    for field in _TASK_SPEC_STAGE_FIELDS.values():
+        for label in getattr(task_spec, field):
+            category = _inventory_category(label)
+            if category and category not in _NON_OBJECT_INVENTORY_CATEGORIES:
+                counts[category] = counts.get(category, 0) + 1
+    return counts
+
+
+def _evidence_mentions_inventory_category(evidence: str, category: str) -> bool:
+    phrase = category.replace("_", " ")
+    return (
+        re.search(
+            rf"(?<![a-z0-9]){re.escape(phrase)}(?:s|es)?(?![a-z0-9])",
+            evidence,
+            re.IGNORECASE,
+        )
+        is not None
+    )
+
+
+def _reconcile_relation_counts_with_inventory(
+    contract: dict[str, Any], inventory_counts: dict[str, int]
+) -> None:
+    """Prevent relation selectors from inventing extra physical inventory.
+
+    A group relation may summarize a heterogeneous cohort in one selector, for
+    example ``sofa,count=3`` for one sofa plus two ottomans. Preserve a
+    two-category cohort explicitly; otherwise the compiler inventory remains
+    authoritative for categories it already declares. Categories absent from
+    that inventory can still be introduced by an explicit relation endpoint.
+    """
+    constraints = contract.get("constraints") if isinstance(contract, dict) else []
+    for constraint in constraints or []:
+        if (
+            not isinstance(constraint, dict)
+            or str(constraint.get("strength") or "hard").lower() != "hard"
+        ):
+            continue
+        relation = str(constraint.get("relation") or "")
+        if relation == "required_count":
+            subjects = constraint.get("subjects") or {}
+            category = _inventory_category(subjects.get("category"))
+            inventory_category = next(
+                (
+                    known
+                    for known in inventory_counts
+                    if _categories_match_inventory(category, known)
+                ),
+                None,
+            )
+            if (
+                str(constraint.get("source") or "") == "task_compiler_inventory"
+                and inventory_category is not None
+            ):
+                subjects["count"] = inventory_counts[inventory_category]
+                subjects["quantifier"] = "at_least"
+                constraint.pop("reconciliation_reason", None)
+            continue
+        evidence = " ".join(
+            str(constraint.get(key) or "")
+            for key in ("evidence_span", "inference_reason")
+        )
+        targets = constraint.get("targets") or {}
+        target_category = _inventory_category(targets.get("category"))
+        for endpoint in ("subjects", "targets"):
+            selector = constraint.get(endpoint)
+            if not isinstance(selector, dict) or selector.get("secondary_category"):
+                continue
+            category = _inventory_category(selector.get("category"))
+            inventory_category = next(
+                (
+                    known
+                    for known in inventory_counts
+                    if _categories_match_inventory(category, known)
+                ),
+                None,
+            )
+            if inventory_category is None:
+                continue
+            try:
+                relation_count = max(1, int(selector.get("count") or 1))
+            except (TypeError, ValueError):
+                relation_count = 1
+            inventory_count = inventory_counts[inventory_category]
+            if relation_count <= inventory_count:
+                continue
+
+            secondary_candidates = [
+                (known, count)
+                for known, count in inventory_counts.items()
+                if not _categories_match_inventory(known, inventory_category)
+                and not _categories_match_inventory(known, target_category)
+                and _evidence_mentions_inventory_category(evidence, known)
+            ]
+            missing_count = relation_count - inventory_count
+            if (
+                endpoint == "subjects"
+                and relation in {"surround", "distributed_evenly"}
+                and len(secondary_candidates) == 1
+                and secondary_candidates[0][1] == missing_count
+            ):
+                secondary_category, secondary_count = secondary_candidates[0]
+                selector["count"] = inventory_count
+                selector["secondary_category"] = secondary_category
+                selector["secondary_count"] = secondary_count
+                constraint["reconciliation_reason"] = "heterogeneous_inventory_group"
+                continue
+
+            selector["count"] = inventory_count
+            constraint["reconciliation_reason"] = "task_inventory_count_cap"
+
+
 def _contract_inventory_ownership(
     contract: dict[str, Any], existing_owners: dict[str, str]
 ) -> tuple[dict[str, tuple[str, int]], list[str]]:
@@ -526,6 +642,22 @@ def _contract_inventory_ownership(
                 else 2 if explicit_relation else 0
             )
             record(subject, subject_stage, priority=subject_priority)
+
+            secondary_subject = _inventory_category(subject.get("secondary_category"))
+            if secondary_subject:
+                record(
+                    {
+                        "category": secondary_subject,
+                        "count": subject.get("secondary_count") or 1,
+                    },
+                    generation_owner(
+                        secondary_subject,
+                        relation=relation,
+                        endpoint="subject",
+                        declared_owner=existing_owners.get(secondary_subject, ""),
+                    ),
+                    priority=subject_priority,
+                )
 
             if relation == "on_top_of":
                 target = constraint.get("targets") or {}
@@ -599,6 +731,8 @@ def _reconcile_task_spec_stage_ownership(
     the independent intent contract. Contract-covered categories, however, must
     not be generated or verified before their dependencies exist.
     """
+    inventory_counts = _task_spec_inventory_counts(task_spec)
+    _reconcile_relation_counts_with_inventory(contract, inventory_counts)
     existing_owners = {
         _inventory_category(label): stage
         for stage, field in _TASK_SPEC_STAGE_FIELDS.items()
@@ -673,6 +807,11 @@ def _reconcile_task_spec_stage_ownership(
             reconciled_endpoint_stage(subjects, "subject"),
             reconciled_endpoint_stage(targets, "target"),
         ]
+        secondary_subject = _inventory_category(subjects.get("secondary_category"))
+        if secondary_subject:
+            endpoint_stages.append(
+                reconciled_endpoint_stage({"category": secondary_subject}, "subject")
+            )
         constraint["stage"] = constraint_evaluation_stage(*endpoint_stages)
 
     reconciled = {stage: [] for stage in _TASK_SPEC_STAGE_FIELDS}
@@ -781,6 +920,15 @@ def _audit_stage_ownership(
             owner
             for owner in (
                 endpoint_owner(constraint.get("subjects"), relation, "subject"),
+                endpoint_owner(
+                    {
+                        "category": (constraint.get("subjects") or {}).get(
+                            "secondary_category"
+                        )
+                    },
+                    relation,
+                    "subject",
+                ),
                 endpoint_owner(constraint.get("targets"), relation, "target"),
             )
             if owner is not None

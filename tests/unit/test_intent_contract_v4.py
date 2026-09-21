@@ -427,6 +427,69 @@ def test_schema_canonicalizes_dining_aliases_and_derives_manipuland_stage() -> N
     assert constraints[3]["stage"] == "manipuland"
 
 
+def test_surround_evaluates_heterogeneous_subject_group() -> None:
+    constraint = {
+        "relation": "surround",
+        "constraint_id": "mixed_seating_around_table",
+        "stage": "furniture",
+        "strength": "hard",
+        "subjects": {
+            "category": "sofa",
+            "count": 1,
+            "quantifier": "exactly",
+            "secondary_category": "cube_ottoman",
+            "secondary_count": 2,
+        },
+        "targets": {
+            "category": "coffee_table",
+            "count": 1,
+            "quantifier": "exactly",
+        },
+        "source": "explicit_prompt",
+        "evidence_span": "a sofa and two cube ottomans surround the coffee table",
+        "reconciliation_reason": "heterogeneous_inventory_group",
+    }
+    objects = [
+        _record("coffee_table_0", "coffee_table", (0.0, 0.0), (1.0, 1.0, 0.5)),
+        _record("sofa_0", "sofa", (1.5, 0.0), (1.0, 0.8, 0.8)),
+        _record("cube_ottoman_0", "cube_ottoman", (-0.75, 1.3), (0.5, 0.5, 0.5)),
+        _record(
+            "cube_ottoman_1",
+            "cube_ottoman",
+            (-0.75, -1.3),
+            (0.5, 0.5, 0.5),
+        ),
+    ]
+
+    results = evaluate_intent_contract_extensions(
+        {
+            "stage": "furniture",
+            "intent_contract": _contract(constraint),
+            "scene_geometry": {"objects": objects},
+        }
+    )
+
+    result = next(row for row in results if row["relation_type"] == "surround")
+    assert result["label"] == "pass"
+    assert set(result["diagnostics"]["subject_ids"]) == {
+        "sofa_0",
+        "cube_ottoman_0",
+        "cube_ottoman_1",
+    }
+
+
+def test_v7_contract_migrates_to_group_aware_v8_schema() -> None:
+    result = validate_intent_contract(
+        {
+            "schema_version": "scenesmith.intent_contract.v7",
+            "prompt": "A sofa faces a coffee table.",
+            "constraints": [],
+        }
+    )
+
+    assert result["schema_version"] == INTENT_CONTRACT_SCHEMA_VERSION
+
+
 def test_schema_canonicalizes_instructional_surface_aliases_to_wall_stage() -> None:
     result = validate_intent_contract(
         {
