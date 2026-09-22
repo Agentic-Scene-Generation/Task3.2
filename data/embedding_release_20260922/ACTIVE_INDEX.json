@@ -1,0 +1,11 @@
+{
+  "collection": "/data/task3_2/share_data/scenesmith/embedding_release_20260922/restored_index",
+  "previous_collection_retained": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_gpu_shared_20260910",
+  "manifest": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_delivery_20260909/embedding_refresh_20260921/embedding_inputs.jsonl",
+  "portable_package": "/data/task3_2/share_data/scenesmith/embedding_release_20260922/portable",
+  "count": 34969,
+  "model_changed": false,
+  "vectors_changed": true,
+  "published_date": "2026-09-22",
+  "verification": "/data/task3_2/share_data/scenesmith/embedding_release_20260922/REBUILD_VERIFIED.json"
+}
