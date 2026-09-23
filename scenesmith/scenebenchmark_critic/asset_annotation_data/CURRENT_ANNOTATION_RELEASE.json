@@ -1,7 +1,9 @@
 {
-  "release": "front_and_style_fallback_20260921",
-  "manifest": "FRONT_STYLE_FALLBACK_20260921.json",
-  "documentation": "docs/ASSET_LIBRARY_CURRENT_STATUS_AND_FRONT_REVIEW_20260921_ZH.md",
-  "front_rejudgment_merged": false,
+  "release": "front_v3_release_20260923",
+  "manifest": "FRONT_V3_RELEASE_20260923.json",
+  "documentation": "docs/ASSET_LIBRARY_FRONT_V3_RELEASE_20260923_ZH.md",
+  "front_rejudgment_merged": true,
+  "front_candidates_are_not_canonical_replacements": false,
+  "generated_other_labels_are_candidates": true,
   "embedding_vectors_updated": false
 }
