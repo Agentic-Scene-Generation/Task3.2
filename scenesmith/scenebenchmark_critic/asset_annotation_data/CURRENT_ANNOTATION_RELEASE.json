@@ -5,5 +5,7 @@
   "front_rejudgment_merged": true,
   "front_candidates_are_not_canonical_replacements": false,
   "generated_other_labels_are_candidates": true,
-  "embedding_vectors_updated": false
+  "embedding_vectors_updated": false,
+  "generated_hssd_backfill_manifest": "GENERATED_HSSD_BACKFILL_RELEASE_20260928.json",
+  "generated_snapshot_count": 5511
 }
