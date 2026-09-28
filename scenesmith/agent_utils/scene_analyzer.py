@@ -23,6 +23,24 @@ if TYPE_CHECKING:
 console_logger = logging.getLogger(__name__)
 
 
+class VLMResponseFormatError(RuntimeError):
+    """Furniture analysis exhausted its invalid-response retry budget."""
+
+    stage = "manipuland"
+    reason = "invalid_model_response"
+
+    def __init__(
+        self, *, attempts: int, parse_error: str, response_preview: str
+    ) -> None:
+        self.attempts = attempts
+        self.parse_error = parse_error
+        self.response_preview = response_preview
+        super().__init__(
+            f"VLM returned invalid JSON after {attempts} attempts. "
+            f"Parse error: {parse_error}. Preview: {response_preview}"
+        )
+
+
 @dataclass
 class FurnitureSelection:
     """Selection result for a furniture piece to receive manipulands.
@@ -326,6 +344,7 @@ class SceneAnalyzer:
         max_retries = self.cfg.openai.furniture_analysis_max_retries
         response_str = ""
         analysis: dict[str, Any] = {}
+        furniture_selections: list[Any] = []
 
         for attempt in range(max_retries):
             try:
@@ -353,6 +372,13 @@ class SceneAnalyzer:
                 # Local/open models may wrap JSON in Markdown or emit minor
                 # formatting defects even when JSON output is requested.
                 analysis = parse_llm_json_object(response_str)
+                candidate_selections = analysis.get("furniture_selections")
+                if not isinstance(candidate_selections, list):
+                    raise ValueError(
+                        "Furniture analysis returned non-list furniture_selections: "
+                        f"{type(candidate_selections).__name__}"
+                    )
+                furniture_selections = candidate_selections
                 break  # Success.
             except (json.JSONDecodeError, ValueError) as e:
                 preview = preview_llm_json(response_str)
@@ -363,17 +389,11 @@ class SceneAnalyzer:
                     )
                     continue
                 # Final attempt failed.
-                raise RuntimeError(
-                    f"VLM returned invalid JSON after {max_retries} attempts. "
-                    f"Parse error: {e}. Preview: {preview}"
+                raise VLMResponseFormatError(
+                    attempts=max_retries,
+                    parse_error=str(e),
+                    response_preview=preview,
                 ) from e
-
-        furniture_selections = analysis.get("furniture_selections", [])
-        if not isinstance(furniture_selections, list):
-            raise ValueError(
-                "Furniture analysis returned non-list furniture_selections: "
-                f"{type(furniture_selections).__name__}"
-            )
 
         # Build valid IDs set for validation.
         valid_furniture_ids = {obj.object_id for obj in furniture_objects}

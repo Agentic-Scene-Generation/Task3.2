@@ -57,6 +57,9 @@ class HsmSupportSurfaceData:
     clearance_samples: tuple[float, ...] = ()
     """All finite HSM clearance samples used by policy-specific filtering."""
 
+    open_above: bool = False
+    """Whether the annotation has no finite obstacle-clearance samples."""
+
 
 def hssd_support_surface_path(mesh_id: str, data_dir: Path | None = None) -> Path:
     """Return the annotation path used by the HSSD support-surface loader."""
@@ -353,6 +356,7 @@ def _load_hsm_support_surfaces(
             corners=corners_hsm,
             clearance=clearance,
             clearance_samples=clearances,
+            open_above=not clearances,
         )
         surfaces.append(surface)
 
@@ -619,6 +623,7 @@ def load_hssd_support_surfaces(
                 bounding_box_max=bbox_max,
                 transform=transform,
                 mesh=surface_mesh,
+                open_above=hsm_surface.open_above,
             )
             support_surfaces.append(surface)
 

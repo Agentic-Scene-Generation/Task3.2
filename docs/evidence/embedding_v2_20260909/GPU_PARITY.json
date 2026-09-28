@@ -1,0 +1,113 @@
+{
+  "passed": true,
+  "worker_urls": [
+    "http://127.0.0.1:8020",
+    "http://127.0.0.1:8021",
+    "http://127.0.0.1:8022",
+    "http://127.0.0.1:8023"
+  ],
+  "min_cosine": 0.9971164026703104,
+  "cpu_resume_compatible": false,
+  "replica_min_cosine": 0.9999999999999999,
+  "tests": [
+    {
+      "asset_uid": "3dfuture:00030133-9c36-412d-bb48-6123ea2da899",
+      "views": 1,
+      "url": "http://127.0.0.1:8020",
+      "cpu_seconds": 2.232777905650437,
+      "gpu_seconds": 0.04404754564166069,
+      "cosine": 0.998699726300569
+    },
+    {
+      "asset_uid": "3dfuture:00030133-9c36-412d-bb48-6123ea2da899",
+      "views": 1,
+      "url": "http://127.0.0.1:8021",
+      "cpu_seconds": 2.232777905650437,
+      "gpu_seconds": 0.044828918762505054,
+      "cosine": 0.998699726300569
+    },
+    {
+      "asset_uid": "3dfuture:00030133-9c36-412d-bb48-6123ea2da899",
+      "views": 1,
+      "url": "http://127.0.0.1:8022",
+      "cpu_seconds": 2.232777905650437,
+      "gpu_seconds": 0.04532290808856487,
+      "cosine": 0.998699726300569
+    },
+    {
+      "asset_uid": "3dfuture:00030133-9c36-412d-bb48-6123ea2da899",
+      "views": 1,
+      "url": "http://127.0.0.1:8023",
+      "cpu_seconds": 2.232777905650437,
+      "gpu_seconds": 0.04564403835684061,
+      "cosine": 0.998699726300569
+    },
+    {
+      "asset_uid": "hssd:0001fb06b075a743e6289236cf049df3ad5dfa9c",
+      "views": 9,
+      "url": "http://127.0.0.1:8020",
+      "cpu_seconds": 25.804780393838882,
+      "gpu_seconds": 0.5651830034330487,
+      "cosine": 0.9971164026703104
+    },
+    {
+      "asset_uid": "hssd:0001fb06b075a743e6289236cf049df3ad5dfa9c",
+      "views": 9,
+      "url": "http://127.0.0.1:8021",
+      "cpu_seconds": 25.804780393838882,
+      "gpu_seconds": 0.5636526281014085,
+      "cosine": 0.9971164026703104
+    },
+    {
+      "asset_uid": "hssd:0001fb06b075a743e6289236cf049df3ad5dfa9c",
+      "views": 9,
+      "url": "http://127.0.0.1:8022",
+      "cpu_seconds": 25.804780393838882,
+      "gpu_seconds": 0.5815147645771503,
+      "cosine": 0.9971164026703104
+    },
+    {
+      "asset_uid": "hssd:0001fb06b075a743e6289236cf049df3ad5dfa9c",
+      "views": 9,
+      "url": "http://127.0.0.1:8023",
+      "cpu_seconds": 25.804780393838882,
+      "gpu_seconds": 0.5833299290388823,
+      "cosine": 0.9971164026703104
+    },
+    {
+      "asset_uid": "others:gso:11pro_SL_TRX_FG",
+      "views": 9,
+      "url": "http://127.0.0.1:8020",
+      "cpu_seconds": 25.534776585176587,
+      "gpu_seconds": 0.5526230428367853,
+      "cosine": 0.9987442205019991
+    },
+    {
+      "asset_uid": "others:gso:11pro_SL_TRX_FG",
+      "views": 9,
+      "url": "http://127.0.0.1:8021",
+      "cpu_seconds": 25.534776585176587,
+      "gpu_seconds": 0.5511324722319841,
+      "cosine": 0.9987442205019991
+    },
+    {
+      "asset_uid": "others:gso:11pro_SL_TRX_FG",
+      "views": 9,
+      "url": "http://127.0.0.1:8022",
+      "cpu_seconds": 25.534776585176587,
+      "gpu_seconds": 0.5495795020833611,
+      "cosine": 0.9987442205019991
+    },
+    {
+      "asset_uid": "others:gso:11pro_SL_TRX_FG",
+      "views": 9,
+      "url": "http://127.0.0.1:8023",
+      "cpu_seconds": 25.534776585176587,
+      "gpu_seconds": 0.5530343977734447,
+      "cosine": 0.9987442205019991
+    }
+  ],
+  "timestamp": 1788938085.7415967,
+  "signature_note": "Independent CUDA collection; CPU vectors retained separately, never mixed.",
+  "gpu_binary_sha256": "aad9eb82a3a7bd07d73f04c1f62a2d31c442290635295cf2b282d676b502afc4"
+}

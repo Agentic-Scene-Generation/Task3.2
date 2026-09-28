@@ -3,20 +3,123 @@ import tempfile
 import unittest
 
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import numpy as np
 import trimesh
 
 from omegaconf import OmegaConf
+from pydrake.all import RigidTransform
 
-from scenesmith.agent_utils.room import SupportSurface
+from scenesmith.agent_utils.room import SupportSurface, UniqueID
 from scenesmith.agent_utils.support_surface_extraction import (
     SupportSurfaceExtractionConfig,
+    _compute_clearance_via_raycasting,
+    extract_support_surfaces_articulated,
     extract_support_surfaces_from_mesh,
 )
 from tests.test_data.gltf_assets import missing_gltf_buffers
 
 console_logger = logging.getLogger(__name__)
+
+
+class TestClearanceProvenance(unittest.TestCase):
+    def test_clearance_marks_no_hit_surface_open(self):
+        surface_mesh = Mock(vertices=np.array([[0.0, 0.0, 0.5]]))
+        full_mesh = Mock(vertices=np.array([[0.0, 0.0, 0.0]]))
+        full_mesh.ray.intersects_location.return_value = (
+            np.empty((0, 3)),
+            np.array([], dtype=int),
+            np.array([], dtype=int),
+        )
+
+        clearance, open_above = _compute_clearance_via_raycasting(
+            surface_mesh,
+            full_mesh,
+            SupportSurfaceExtractionConfig(),
+            default_clearance=0.5,
+        )
+
+        self.assertEqual(clearance, 0.5)
+        self.assertTrue(open_above)
+
+    def test_clearance_marks_obstacle_hit_surface_bounded(self):
+        surface_mesh = Mock(vertices=np.array([[0.0, 0.0, 0.5]]))
+        full_mesh = Mock(vertices=np.array([[0.0, 0.0, 0.0]]))
+        full_mesh.ray.intersects_location.return_value = (
+            np.array([[0.0, 0.0, 0.8]]),
+            np.array([0], dtype=int),
+            np.array([0], dtype=int),
+        )
+
+        clearance, open_above = _compute_clearance_via_raycasting(
+            surface_mesh,
+            full_mesh,
+            SupportSurfaceExtractionConfig(),
+            default_clearance=0.5,
+        )
+
+        self.assertAlmostEqual(clearance, 0.3)
+        self.assertFalse(open_above)
+
+    def test_clearance_ignores_only_self_intersection_hits(self):
+        surface_mesh = Mock(vertices=np.array([[0.0, 0.0, 0.5]]))
+        full_mesh = Mock(vertices=np.array([[0.0, 0.0, 0.0]]))
+        config = SupportSurfaceExtractionConfig(self_intersection_threshold_m=0.001)
+        full_mesh.ray.intersects_location.return_value = (
+            np.array([[0.0, 0.0, 0.501]]),
+            np.array([0], dtype=int),
+            np.array([0], dtype=int),
+        )
+
+        clearance, open_above = _compute_clearance_via_raycasting(
+            surface_mesh,
+            full_mesh,
+            config,
+            default_clearance=0.5,
+        )
+
+        self.assertEqual(clearance, 0.5)
+        self.assertTrue(open_above)
+
+    def test_articulated_recomputation_updates_stored_clearance(self):
+        surface = SupportSurface(
+            surface_id=UniqueID("S_0"),
+            bounding_box_min=np.array([-0.5, -0.5, 0.01]),
+            bounding_box_max=np.array([0.5, 0.5, 0.51]),
+            transform=RigidTransform(p=[0.0, 0.0, 0.5]),
+            open_above=True,
+        )
+        combined_mesh = Mock()
+        combined_mesh.ray.intersects_location.return_value = (
+            np.array([[-0.5, -0.5, 0.7]]),
+            np.array([0], dtype=int),
+            np.array([0], dtype=int),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            sdf_dir = Path(tmp_dir)
+            (sdf_dir / "drawer_combined.gltf").touch()
+            (sdf_dir / "combined_scene.gltf").touch()
+            with (
+                patch(
+                    "scenesmith.agent_utils.support_surface_extraction."
+                    "_load_and_prepare_mesh",
+                    return_value=combined_mesh,
+                ),
+                patch(
+                    "scenesmith.agent_utils.support_surface_extraction."
+                    "extract_support_surfaces_from_mesh",
+                    return_value=[surface],
+                ),
+            ):
+                surfaces = extract_support_surfaces_articulated(sdf_dir)
+
+        self.assertEqual(surfaces, [surface])
+        self.assertFalse(surface.open_above)
+        self.assertAlmostEqual(
+            surface.bounding_box_max[2] - surface.bounding_box_min[2], 0.2
+        )
 
 
 class TestSupportSurfaceExtraction(unittest.TestCase):

@@ -513,7 +513,7 @@ def test_case_pack_attachment_does_not_reparse_compiled_prompt_semantics() -> No
     prompt = "A sideboard against the wall behind the chairs."
     contract = validate_intent_contract(
         {
-            "schema_version": "scenesmith.intent_contract.v7",
+            "schema_version": "scenesmith.intent_contract.v8",
             "prompt": prompt,
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "constraints": [

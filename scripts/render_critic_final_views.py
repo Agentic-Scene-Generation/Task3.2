@@ -41,6 +41,7 @@ from scenesmith.agent_utils.blender.params import RenderParams
 from scenesmith.agent_utils.blender.render_dataclasses import OverlayRenderingSetup
 from scenesmith.agent_utils.blender.render_settings import (
     apply_render_settings,
+    setup_cycles_gpu_rendering,
     setup_metric_world,
 )
 from scenesmith.agent_utils.blender.renderer import BlenderRenderer
@@ -55,7 +56,11 @@ def parse_args() -> argparse.Namespace:
         separator = raw_argv.index("--")
         # Blender places one separator before the script arguments; direct
         # venv execution places it after the options and input path.
-        argv = raw_argv[1:] if separator == 0 else raw_argv[:separator] + raw_argv[separator + 1 :]
+        argv = (
+            raw_argv[1:]
+            if separator == 0
+            else raw_argv[:separator] + raw_argv[separator + 1 :]
+        )
     else:
         argv = raw_argv
     parser = argparse.ArgumentParser(description=__doc__)
@@ -64,7 +69,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--resolution", type=int, default=1536)
     parser.add_argument("--samples", type=int, default=4)
-    parser.add_argument("--side", choices=("north", "east", "south", "west"), default=None)
+    parser.add_argument(
+        "--engine",
+        choices=("eevee", "cycles"),
+        default="eevee",
+        help="Render engine. Cycles attempts NVIDIA GPU rendering then falls back safely.",
+    )
+    parser.add_argument(
+        "--side", choices=("north", "east", "south", "west"), default=None
+    )
     parser.add_argument("--include-shared-base", action="store_true")
     parser.add_argument(
         "--parallelism",
@@ -84,7 +97,11 @@ def blend_files(input_path: Path, include_shared_base: bool) -> list[Path]:
     files = sorted(input_path.rglob("combined_house/house.blend"))
     if include_shared_base or "shared_base" in input_path.parts:
         return files
-    return [path for path in files if "shared_base" not in path.relative_to(input_path).parts]
+    return [
+        path
+        for path in files
+        if "shared_base" not in path.relative_to(input_path).parts
+    ]
 
 
 def sha256(path: Path) -> str:
@@ -114,7 +131,9 @@ def make_params(blend_path: Path, resolution: int) -> RenderParams:
     )
 
 
-def install_loaded_blend_setup(renderer: BlenderRenderer, blend_path: Path) -> None:
+def install_loaded_blend_setup(
+    renderer: BlenderRenderer, blend_path: Path, args: argparse.Namespace
+) -> None:
     """Adapt production setup to a loaded .blend instead of an incoming GLTF.
 
     The remainder of ``render_agent_observation_views`` is intentionally used
@@ -146,33 +165,39 @@ def install_loaded_blend_setup(renderer: BlenderRenderer, blend_path: Path) -> N
         setup_metric_world()
 
         scene = bpy.context.scene
-        scene.render.engine = "BLENDER_EEVEE_NEXT"
         scene.render.film_transparent = True
         scene.render.image_settings.color_mode = "RGBA"
         scene.render.image_settings.color_depth = "8"
         scene.render.resolution_percentage = 100
 
-        # Match _setup_overlay_rendering in the furniture-stage renderer.
-        try:
-            scene.eevee.taa_render_samples = self._taa_samples
-        except AttributeError:
-            pass
-        for attribute, value in (
-            ("use_gtao", False),
-            ("use_bloom", False),
-            ("use_ssr", False),
-            ("use_volumetric_shadows", False),
-            ("use_shadows", False),
-        ):
+        if args.engine == "cycles":
+            scene.render.engine = "CYCLES"
+            setup_cycles_gpu_rendering()
+            scene.cycles.samples = args.samples
+            scene.cycles.use_denoising = True
+        else:
+            scene.render.engine = "BLENDER_EEVEE_NEXT"
+            # Match _setup_overlay_rendering in the furniture-stage renderer.
             try:
-                setattr(scene.eevee, attribute, value)
+                scene.eevee.taa_render_samples = self._taa_samples
             except AttributeError:
                 pass
-        for light in bpy.data.lights:
-            try:
-                light.use_shadow = False
-            except AttributeError:
-                pass
+            for attribute, value in (
+                ("use_gtao", False),
+                ("use_bloom", False),
+                ("use_ssr", False),
+                ("use_volumetric_shadows", False),
+                ("use_shadows", False),
+            ):
+                try:
+                    setattr(scene.eevee, attribute, value)
+                except AttributeError:
+                    pass
+            for light in bpy.data.lights:
+                try:
+                    light.use_shadow = False
+                except AttributeError:
+                    pass
 
         camera_distance = calculate_camera_distance(
             camera_obj=camera_obj, max_dim=max_dim, margin_scale=margin_scale
@@ -232,7 +257,7 @@ def render_one(blend_path: Path, args: argparse.Namespace) -> Path:
 
     renderer = BlenderRenderer()
     renderer._taa_samples = args.samples
-    install_loaded_blend_setup(renderer, blend_path)
+    install_loaded_blend_setup(renderer, blend_path, args)
     original_wall_visibility = install_geometry_wall_visibility()
 
     resolution = args.resolution
@@ -253,7 +278,12 @@ def render_one(blend_path: Path, args: argparse.Namespace) -> Path:
     )
     side_start_azimuth = None
     if args.side:
-        side_start_azimuth = {"north": 90.0, "east": 0.0, "south": 270.0, "west": 180.0}[args.side]
+        side_start_azimuth = {
+            "north": 90.0,
+            "east": 0.0,
+            "south": 270.0,
+            "west": 180.0,
+        }[args.side]
 
     temp_dir = Path(tempfile.mkdtemp(prefix="critic_final_furniture_renderer_"))
     try:
@@ -274,7 +304,10 @@ def render_one(blend_path: Path, args: argparse.Namespace) -> Path:
         )
         output_dir = blend_path.parent.parent / "critic_final_views"
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_paths = {"0_top": output_dir / "00_top.png", "0_side": output_dir / "01_side.png"}
+        output_paths = {
+            "0_top": output_dir / "00_top.png",
+            "0_side": output_dir / "01_side.png",
+        }
         for source in rendered:
             stem = source.stem
             if stem in output_paths:
@@ -282,8 +315,10 @@ def render_one(blend_path: Path, args: argparse.Namespace) -> Path:
         manifest = {
             "input": str(blend_path),
             "renderer": "BlenderRenderer.render_agent_observation_views",
+            "engine": args.engine,
             "resolution": resolution,
             "taa_samples": args.samples,
+            "samples": args.samples,
             "side": args.side or "production_default_corner",
             "renders": [str(path) for path in output_paths.values()],
         }
@@ -319,6 +354,8 @@ def main() -> None:
                 str(args.resolution),
                 "--samples",
                 str(args.samples),
+                "--engine",
+                args.engine,
                 "--parallelism",
                 "1",
             ]

@@ -424,6 +424,239 @@ class TestSceneTaskIsolation(unittest.TestCase):
             )
         )
 
+    def test_invalid_vlm_response_is_bounded_retryable_and_not_recordable(
+        self,
+    ) -> None:
+        error = scene_generation.VLMResponseFormatError(
+            attempts=2,
+            parse_error="Expected top-level JSON object but got list",
+            response_preview="[]",
+        )
+        failure = scene_generation._scene_failure_record(error, attempt=1)
+        payload = {
+            "schema_version": "scenesmith.scene_status.v3",
+            "scene_id": 7,
+            "status": "failed",
+            "attempt": 1,
+            "run_id": "current-run",
+            "failure": failure,
+        }
+
+        self.assertEqual(failure["failure_class"], "scene_runtime_failure")
+        self.assertEqual(failure["stage"], "manipuland")
+        self.assertEqual(failure["error_type"], "VLMResponseFormatError")
+        self.assertEqual(failure["reason"], "invalid_model_response")
+        self.assertEqual(failure["provenance"]["analysis_attempts"], 2)
+        self.assertTrue(failure["retryable"])
+        self.assertFalse(failure["recordable"])
+        self.assertTrue(
+            scene_generation._is_retryable_scene_failure(
+                payload,
+                scene_id=7,
+                attempt=1,
+                retry_budget=1,
+                run_id="current-run",
+            )
+        )
+        self.assertFalse(
+            scene_generation._is_retryable_scene_failure(
+                payload,
+                scene_id=7,
+                attempt=1,
+                retry_budget=0,
+                run_id="current-run",
+            )
+        )
+        recordable, _ = scene_generation._recordable_scene_failure(
+            payload,
+            scene_id=7,
+            attempt=1,
+            run_id="current-run",
+        )
+        self.assertFalse(recordable)
+        with self.assertRaisesRegex(RuntimeError, "not recordable"):
+            scene_generation._apply_scene_failure_policy(
+                policy="record",
+                failures=[
+                    {
+                        "scene_id": 7,
+                        "attempt": 1,
+                        "status": payload,
+                        "status_path": "scene_007/scene_status.json",
+                        "error": str(error),
+                    }
+                ],
+                total_scenes=1,
+                run_id="current-run",
+            )
+
+    def test_max_turns_child_failure_is_retryable_but_never_recordable(self) -> None:
+        error = scene_generation.PlannerStageFailure(
+            reason="child_failure",
+            stage="wall_mounted",
+            workflow_calls=1,
+            successful_mutations=0,
+            operation="request_initial_design",
+            retryable=True,
+            root_error_type="MaxTurnsExceeded",
+            root_error_message="Max turns (20) exceeded",
+        )
+        failure = scene_generation._scene_failure_record(error, attempt=1)
+        payload = {
+            "schema_version": "scenesmith.scene_status.v3",
+            "scene_id": 8,
+            "status": "failed",
+            "attempt": 1,
+            "run_id": "current-run",
+            "failure": failure,
+        }
+
+        self.assertEqual(failure["failure_class"], "scene_runtime_failure")
+        self.assertEqual(failure["root_error_type"], "MaxTurnsExceeded")
+        self.assertTrue(failure["retryable"])
+        self.assertFalse(failure["recordable"])
+        self.assertTrue(
+            scene_generation._is_retryable_scene_failure(
+                payload,
+                scene_id=8,
+                attempt=1,
+                retry_budget=1,
+                run_id="current-run",
+            )
+        )
+        self.assertFalse(
+            scene_generation._is_retryable_scene_failure(
+                payload,
+                scene_id=8,
+                attempt=1,
+                retry_budget=0,
+                run_id="current-run",
+            )
+        )
+        recordable, _ = scene_generation._recordable_scene_failure(
+            payload,
+            scene_id=8,
+            attempt=1,
+            run_id="current-run",
+        )
+        self.assertFalse(recordable)
+        with self.assertRaisesRegex(RuntimeError, "not recordable"):
+            scene_generation._apply_scene_failure_policy(
+                policy="record",
+                failures=[
+                    {
+                        "scene_id": 8,
+                        "attempt": 1,
+                        "status": payload,
+                        "status_path": "scene_008/scene_status.json",
+                        "error": str(error),
+                    }
+                ],
+                total_scenes=1,
+                run_id="current-run",
+            )
+
+    def test_typed_runtime_failures_reenter_the_isolated_worker_loop(self) -> None:
+        cases = (
+            (
+                7,
+                scene_generation.VLMResponseFormatError(
+                    attempts=2,
+                    parse_error="Expected top-level JSON object but got list",
+                    response_preview="[]",
+                ),
+            ),
+            (
+                8,
+                scene_generation.PlannerStageFailure(
+                    reason="child_failure",
+                    stage="wall_mounted",
+                    workflow_calls=1,
+                    successful_mutations=0,
+                    operation="request_initial_design",
+                    retryable=True,
+                    root_error_type="MaxTurnsExceeded",
+                    root_error_message="Max turns (20) exceeded",
+                ),
+            ),
+        )
+
+        for scene_id, error in cases:
+            with self.subTest(error_type=type(error).__name__):
+                attempts = []
+
+                def fake_run(tasks, max_workers, return_values=False):
+                    kwargs = tasks[0][2]
+                    attempts.append(kwargs["attempt"])
+                    if kwargs["attempt"] == 1:
+                        scene_generation._write_scene_status(
+                            output_dir=self.output_dir,
+                            scene_id=kwargs["scene_id"],
+                            prompt=kwargs["prompt"],
+                            status="failed",
+                            attempt=kwargs["attempt"],
+                            run_id=kwargs["experiment_run_id"],
+                            error=str(error),
+                            failure=scene_generation._scene_failure_record(
+                                error, attempt=kwargs["attempt"]
+                            ),
+                        )
+                        return {tasks[0][0]: (False, str(error))}
+                    return {tasks[0][0]: (True, None)}
+
+                with patch(
+                    "scenesmith.experiments.indoor_scene_generation."
+                    "run_parallel_isolated",
+                    side_effect=fake_run,
+                ):
+                    recorded = self.experiment._run_isolated_scene_generation(
+                        prompts_with_ids=[(scene_id, "A bedroom")],
+                        cfg_dict=self.cfg_dict,
+                        experiment_run_id="current-run",
+                        num_workers=1,
+                        capture_logs=False,
+                    )
+
+                self.assertEqual(recorded, [])
+                self.assertEqual(attempts, [1, 2])
+                archived_attempts = list(
+                    (self.output_dir / "failed_attempts").glob(
+                        f"scene_{scene_id:03d}_attempt_01_*"
+                    )
+                )
+                self.assertEqual(len(archived_attempts), 1)
+
+    def test_max_turns_does_not_enable_checkpoint_degraded_continuation(
+        self,
+    ) -> None:
+        state_path = self.output_dir / "scene_state.json"
+        state_path.write_text(
+            json.dumps({"objects": {"chair_0": {}}}), encoding="utf-8"
+        )
+        scene = MagicMock()
+        scene.metadata = {
+            "scenesmith_runtime_failure": {
+                "error_type": "MaxTurnsExceeded",
+                "recovered": False,
+                "checkpoint": {
+                    "path": str(state_path),
+                    "scene_hash": "current-hash",
+                    "validation": "passed",
+                },
+            }
+        }
+        scene.content_hash.return_value = "current-hash"
+
+        self.assertIsNone(
+            scene_generation._checkpoint_degraded_continuation(
+                scene=scene,
+                stage="wall_mounted",
+                cfg_dict={
+                    "experiment": {"runtime_failure_policy": "checkpoint_degraded"}
+                },
+            )
+        )
+
     def test_unclassified_runtime_failure_has_valid_nonempty_reason(self) -> None:
         failure = scene_generation._scene_failure_record(
             RuntimeError("support surface extraction failed"), attempt=1

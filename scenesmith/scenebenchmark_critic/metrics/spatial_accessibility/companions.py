@@ -11,6 +11,7 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.semantics im
 from scenesmith.scenebenchmark_critic.intent_contract import (
     bound_ids,
     contract_constraints,
+    grouped_bound_ids,
 )
 from scenesmith.scenebenchmark_critic.core.geometry import is_small_object
 
@@ -133,7 +134,7 @@ def _contract_companion_pairs(
     ):
         if str(constraint.get("strength") or "hard").lower() != "hard":
             continue
-        subject_ids = bound_ids(constraint.get("subjects"), rows)
+        subject_ids = grouped_bound_ids(constraint.get("subjects"), rows)
         target_ids = bound_ids(constraint.get("targets"), rows)
         if len(target_ids) != 1:
             continue

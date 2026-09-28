@@ -133,6 +133,21 @@ class TestSupportSurface(unittest.TestCase):
         np.testing.assert_array_equal(surface.bounding_box_min, bbox_min)
         np.testing.assert_array_equal(surface.bounding_box_max, bbox_max)
         self.assertEqual(surface.transform, transform)
+        self.assertFalse(surface.open_above)
+
+    def test_content_hash_includes_open_above(self):
+        """Open and bounded surfaces must not share a cache identity."""
+        kwargs = {
+            "surface_id": UniqueID.generate(),
+            "bounding_box_min": np.array([0.0, 0.0, 0.0]),
+            "bounding_box_max": np.array([1.0, 1.0, 0.5]),
+            "transform": RigidTransform(),
+        }
+
+        bounded = SupportSurface(**kwargs)
+        opened = SupportSurface(**kwargs, open_above=True)
+
+        self.assertNotEqual(bounded.content_hash(), opened.content_hash())
 
     def test_to_world_pose_identity_transform(self):
         """Test SE(2) to SE(3) conversion with identity surface transform."""
@@ -544,6 +559,7 @@ class TestSceneObject(unittest.TestCase):
             bounding_box_min=np.array([0.0, 0.0, 0.0]),
             bounding_box_max=np.array([1.0, 2.0, 0.1]),
             transform=RigidTransform(p=np.array([0.5, 1.0, 0.8])),
+            open_above=True,
         )
 
         obj = SceneObject(
@@ -562,7 +578,32 @@ class TestSceneObject(unittest.TestCase):
         self.assertEqual(surf_dict["surface_id"], str(surface.surface_id))
         self.assertEqual(surf_dict["bounding_box_min"], [0.0, 0.0, 0.0])
         self.assertEqual(surf_dict["bounding_box_max"], [1.0, 2.0, 0.1])
+        self.assertTrue(surf_dict["open_above"])
         self.assertIn("transform", surf_dict)
+
+    def test_from_dict_legacy_support_surface_defaults_to_bounded(self):
+        """Checkpoints written before open_above fail closed."""
+        surface = SupportSurface(
+            surface_id=UniqueID.generate(),
+            bounding_box_min=np.array([0.0, 0.0, 0.0]),
+            bounding_box_max=np.array([1.0, 2.0, 0.1]),
+            transform=RigidTransform(),
+            open_above=True,
+        )
+        obj = SceneObject(
+            object_id=self.object_id,
+            object_type=ObjectType.FURNITURE,
+            name="Test Object",
+            description="A test object",
+            transform=self.transform,
+            support_surfaces=[surface],
+        )
+        payload = obj.to_dict()
+        payload["support_surfaces"][0].pop("open_above")
+
+        restored = SceneObject.from_dict(payload)
+
+        self.assertFalse(restored.support_surfaces[0].open_above)
 
     def test_from_dict_minimal(self):
         """Test deserialization of SceneObject with minimal fields."""
@@ -668,6 +709,7 @@ class TestSceneObject(unittest.TestCase):
             bounding_box_max=np.array([1.0, 2.0, 0.1]),
             transform=RigidTransform(p=np.array([0.5, 1.0, 0.8])),
             link_name="E_drawer_1",  # For articulated FK transforms.
+            open_above=True,
         )
 
         original = SceneObject(
@@ -711,6 +753,7 @@ class TestSceneObject(unittest.TestCase):
         )
         # Verify link_name is preserved for articulated FK transforms.
         self.assertEqual(restored.support_surfaces[0].link_name, surface.link_name)
+        self.assertTrue(restored.support_surfaces[0].open_above)
         self.assertEqual(restored.metadata, original.metadata)
         np.testing.assert_array_almost_equal(restored.bbox_min, original.bbox_min)
         np.testing.assert_array_almost_equal(restored.bbox_max, original.bbox_max)

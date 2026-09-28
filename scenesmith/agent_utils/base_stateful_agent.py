@@ -3046,6 +3046,7 @@ class BaseStatefulAgent(ABC):
             "APITimeoutError",
             "APIConnectionError",
             "ConnectionError",
+            "MaxTurnsExceeded",
             "Timeout",
             "TimeoutError",
         }

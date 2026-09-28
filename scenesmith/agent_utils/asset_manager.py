@@ -238,6 +238,28 @@ def _get_hssd_front_axis_annotation_record(
     return get_hssd_asset_annotations(hssd_id)
 
 
+def _get_scenebenchmark_front_axis_annotation_record(
+    asset_id: str, lookup_path: str | Path | None = None
+) -> dict[str, Any] | None:
+    """Load a front-axis record for either HSSD or a namespaced all-assets ID.
+
+    The all-assets retrieval server deliberately returns its namespaced ID through
+    the legacy ``hssd_id`` field.  Keep custom HSSD lookup paths working as-is,
+    but route 3D-FUTURE IDs to the synchronized multi-source release.
+    """
+    normalized = str(asset_id or "").strip()
+    if normalized.lower().startswith("3dfuture:"):
+        from scenesmith.scenebenchmark_critic.current_asset_annotations import (
+            get_current_asset_annotation,
+        )
+
+        try:
+            return get_current_asset_annotation(normalized)
+        except (KeyError, OSError, ValueError):
+            return None
+    return _get_hssd_front_axis_annotation_record(normalized, lookup_path)
+
+
 def _normalize_axis_string(value: Any) -> str | None:
     text = str(value or "").strip().upper().replace(" ", "")
     if text in _VALID_HORIZONTAL_FRONT_AXES:
@@ -1119,7 +1141,7 @@ class AssetManager:
             )
             return None
 
-        record = _get_hssd_front_axis_annotation_record(hssd_id, lookup_path)
+        record = _get_scenebenchmark_front_axis_annotation_record(hssd_id, lookup_path)
         if record is None:
             console_logger.warning(
                 "No SceneBenchmark HSSD annotation found for %s; keeping VLM front axis",
@@ -1172,7 +1194,7 @@ class AssetManager:
         source, lookup_path = self._hssd_front_axis_config()
         if source not in _HSSD_FRONT_AXIS_SOURCES or not hssd_id:
             return physics_analysis
-        record = _get_hssd_front_axis_annotation_record(hssd_id, lookup_path)
+        record = _get_scenebenchmark_front_axis_annotation_record(hssd_id, lookup_path)
         if record is None:
             console_logger.warning(
                 "No SceneBenchmark HSSD annotation found for %s; keeping analyzed values",
@@ -2536,9 +2558,10 @@ class AssetManager:
             additional_metadata["hssd_mesh_id"] = generated.hssd_id
         if generated.asset_source == "hssd":
             additional_metadata["requested_dimensions"] = list(item.dimensions)
-            additional_metadata["requested_dimension_fit_applied"] = bool(
-                item.dimensions
-            ) and self._should_scale_hssd_to_requested_dimensions()
+            additional_metadata["requested_dimension_fit_applied"] = (
+                bool(item.dimensions)
+                and self._should_scale_hssd_to_requested_dimensions()
+            )
         if retrieved_floor_covering:
             actual_dimensions = bbox_max - bbox_min
             additional_metadata.update(

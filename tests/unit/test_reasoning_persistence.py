@@ -5,6 +5,9 @@ import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import pytest
+
+from openai import omit
 from openai.types.chat import ChatCompletion
 
 import scenesmith.utils.openai as openai_utils
@@ -94,6 +97,81 @@ class _InterruptedAsyncChunkStream:
             "peer closed connection without sending complete message body "
             "(incomplete chunked read)"
         )
+
+
+def _function_tool(name: str):
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": f"Call {name}",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+
+
+def _qwen_stream_chunks():
+    return [
+        {
+            "id": "chatcmpl-qwen-stream",
+            "created": 456,
+            "model": "Qwen/Qwen3.8-27B",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "reasoning_content": "private ",
+                        "content": "visible ",
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call-observe",
+                                "type": "function",
+                                "function": {
+                                    "name": "observe_scene",
+                                    "arguments": '{"camera":',
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        },
+        {
+            "id": "chatcmpl-qwen-stream",
+            "created": 456,
+            "model": "Qwen/Qwen3.8-27B",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "reasoning_content": "reasoning",
+                        "content": "answer",
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "function": {"arguments": '"top"}'},
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+        },
+        {
+            "id": "chatcmpl-qwen-stream",
+            "created": 456,
+            "model": "Qwen/Qwen3.8-27B",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "total_tokens": 18,
+            },
+        },
+    ]
 
 
 def _table_count(db_path, table: str) -> int:
@@ -314,8 +392,7 @@ def test_openrouter_reasoning_content_alias_is_persisted(tmp_path):
 
     with sqlite3.connect(db_path) as conn:
         source_type, summary, raw_json = conn.execute(
-            "SELECT source_type, summary, raw_json "
-            "FROM agent_reasoning_artifacts"
+            "SELECT source_type, summary, raw_json " "FROM agent_reasoning_artifacts"
         ).fetchone()
     assert source_type == "openrouter_reasoning_content"
     assert summary == "Readable alias summary"
@@ -586,7 +663,7 @@ def test_async_openrouter_reasoning_stream_returns_standard_chat_completion(
                                 "type": "function",
                                 "function": {
                                     "name": "create_room",
-                                    "arguments": "{\"width\":",
+                                    "arguments": '{"width":',
                                 },
                             }
                         ],
@@ -648,3 +725,235 @@ def test_async_openrouter_reasoning_stream_returns_standard_chat_completion(
     request_kwargs = raw_client.chat.completions.create.call_args.kwargs
     assert request_kwargs["stream"] is True
     assert request_kwargs["stream_options"] == {"include_usage": True}
+
+
+def test_sync_generic_stream_assembles_qwen_chat_completion(monkeypatch, tmp_path):
+    monkeypatch.setenv("SCENEEXPERT_CHAT_COMPLETIONS_STREAM", "true")
+    configure_reasoning_persistence(enabled=True, provider="qwen")
+    raw_client = Mock()
+    raw_client.chat.completions.create.return_value = iter(_qwen_stream_chunks())
+    raw_client.responses.create = Mock()
+    client = ReasoningPersistenceOpenAIClient(client=raw_client)
+    db_path = tmp_path / "designer.db"
+
+    async def run():
+        async with reasoning_persistence_context("designer", db_path):
+            return client.chat.completions.create(
+                model="Qwen/Qwen3.8-27B",
+                messages=[{"role": "user", "content": "inspect the scene"}],
+                stream=omit,
+                stream_options={"continuous_usage_stats": True},
+            )
+
+    response = asyncio.run(run())
+
+    assert isinstance(response, ChatCompletion)
+    assert response.choices[0].message.content == "visible answer"
+    assert response.choices[0].message.reasoning_content == "private reasoning"
+    tool_call = response.choices[0].message.tool_calls[0]
+    assert tool_call.id == "call-observe"
+    assert tool_call.function.name == "observe_scene"
+    assert tool_call.function.arguments == '{"camera":"top"}'
+    assert response.choices[0].finish_reason == "tool_calls"
+    assert response.usage.total_tokens == 18
+    request_kwargs = raw_client.chat.completions.create.call_args.kwargs
+    assert request_kwargs["stream"] is True
+    assert request_kwargs["stream_options"] == {
+        "continuous_usage_stats": True,
+        "include_usage": True,
+    }
+    with sqlite3.connect(db_path) as conn:
+        persisted = conn.execute(
+            "SELECT session_id, thinking FROM agent_thinking"
+        ).fetchone()
+    assert persisted == ("designer", "private reasoning")
+
+
+def test_async_generic_stream_normalizes_named_tool_choice(monkeypatch):
+    monkeypatch.setenv("SCENEEXPERT_CHAT_COMPLETIONS_STREAM", "true")
+    tools = [_function_tool("observe_scene"), _function_tool("move_object")]
+    original_tools = json.loads(json.dumps(tools))
+    raw_client = Mock()
+    raw_client.chat.completions.create = AsyncMock(
+        return_value=_AsyncChunkStream(_qwen_stream_chunks())
+    )
+    raw_client.responses.create = AsyncMock()
+    client = ReasoningPersistenceAsyncOpenAIClient(client=raw_client)
+
+    response = asyncio.run(
+        client.chat.completions.create(
+            model="Qwen/Qwen3.8-27B",
+            messages=[],
+            tools=tools,
+            tool_choice={
+                "type": "function",
+                "function": {"name": "observe_scene"},
+            },
+        )
+    )
+
+    assert isinstance(response, ChatCompletion)
+    request_kwargs = raw_client.chat.completions.create.call_args.kwargs
+    assert request_kwargs["tool_choice"] == "required"
+    assert request_kwargs["tools"] == [_function_tool("observe_scene")]
+    assert request_kwargs["stream"] is True
+    assert tools == original_tools
+
+
+def test_generic_stream_policy_defaults_off_and_can_be_disabled(monkeypatch):
+    response = _chat_response()
+    raw_client = _sync_client(response)
+    client = ReasoningPersistenceOpenAIClient(client=raw_client)
+
+    monkeypatch.delenv("SCENEEXPERT_CHAT_COMPLETIONS_STREAM", raising=False)
+    assert client.chat.completions.create(model="qwen") is response
+    assert "stream" not in raw_client.chat.completions.create.call_args.kwargs
+
+    monkeypatch.setenv("SCENEEXPERT_CHAT_COMPLETIONS_STREAM", "false")
+    assert client.chat.completions.create(model="qwen", stream=False) is response
+    assert raw_client.chat.completions.create.call_args.kwargs["stream"] is False
+
+
+def test_generic_stream_policy_rejects_invalid_value_before_request(monkeypatch):
+    monkeypatch.setenv("SCENEEXPERT_CHAT_COMPLETIONS_STREAM", "sometimes")
+    raw_client = _sync_client(_chat_response())
+    client = ReasoningPersistenceOpenAIClient(client=raw_client)
+
+    with pytest.raises(
+        ValueError,
+        match="SCENEEXPERT_CHAT_COMPLETIONS_STREAM must be true or false",
+    ):
+        client.chat.completions.create(model="qwen")
+
+    raw_client.chat.completions.create.assert_not_called()
+
+
+def test_explicit_raw_stream_contract_is_not_assembled(monkeypatch):
+    monkeypatch.setenv("SCENEEXPERT_CHAT_COMPLETIONS_STREAM", "true")
+    raw_stream = iter(_qwen_stream_chunks())
+    raw_client = Mock()
+    raw_client.chat.completions.create.return_value = raw_stream
+    raw_client.responses.create = Mock()
+    client = ReasoningPersistenceOpenAIClient(client=raw_client)
+
+    response = client.chat.completions.create(model="qwen", stream=True)
+
+    assert response is raw_stream
+    assert raw_client.chat.completions.create.call_args.kwargs["stream"] is True
+
+
+def test_generic_stream_rejects_clean_eof_without_finish_reason(monkeypatch):
+    monkeypatch.setenv("SCENEEXPERT_CHAT_COMPLETIONS_STREAM", "true")
+    incomplete_chunks = _qwen_stream_chunks()[:1]
+
+    sync_client = Mock()
+    sync_client.chat.completions.create.return_value = iter(incomplete_chunks)
+    sync_client.responses.create = Mock()
+    sync_wrapper = ReasoningPersistenceOpenAIClient(client=sync_client)
+
+    with pytest.raises(RuntimeError, match="before a finish_reason was received"):
+        sync_wrapper.chat.completions.create(model="qwen")
+
+    async_client = Mock()
+    async_client.chat.completions.create = AsyncMock(
+        return_value=_AsyncChunkStream(incomplete_chunks)
+    )
+    async_client.responses.create = AsyncMock()
+    async_wrapper = ReasoningPersistenceAsyncOpenAIClient(client=async_client)
+
+    with pytest.raises(RuntimeError, match="before a finish_reason was received"):
+        asyncio.run(async_wrapper.chat.completions.create(model="qwen"))
+
+
+def test_named_tool_choice_does_not_narrow_later_requests():
+    response = _chat_response()
+    raw_client = _sync_client(response)
+    client = ReasoningPersistenceOpenAIClient(client=raw_client)
+    tools = [_function_tool("observe_scene"), _function_tool("move_object")]
+
+    client.chat.completions.create(
+        model="qwen",
+        tools=tools,
+        tool_choice={
+            "type": "function",
+            "function": {"name": "observe_scene"},
+        },
+    )
+    first_kwargs = raw_client.chat.completions.create.call_args.kwargs
+    client.chat.completions.create(model="qwen", tools=tools, tool_choice=omit)
+    second_kwargs = raw_client.chat.completions.create.call_args.kwargs
+
+    assert first_kwargs["tool_choice"] == "required"
+    assert first_kwargs["tools"] == [_function_tool("observe_scene")]
+    assert second_kwargs["tools"] is tools
+    assert second_kwargs["tool_choice"] is omit
+    assert len(tools) == 2
+
+
+def test_string_tool_choices_pass_through_unchanged():
+    response = _chat_response()
+    raw_client = _sync_client(response)
+    client = ReasoningPersistenceOpenAIClient(client=raw_client)
+    tools = [_function_tool("observe_scene")]
+
+    for choice in ("auto", "required", "none"):
+        assert (
+            client.chat.completions.create(
+                model="qwen",
+                tools=tools,
+                tool_choice=choice,
+            )
+            is response
+        )
+        request_kwargs = raw_client.chat.completions.create.call_args.kwargs
+        assert request_kwargs["tool_choice"] == choice
+        assert request_kwargs["tools"] is tools
+
+
+@pytest.mark.parametrize(
+    ("tool_choice", "tools", "error_match"),
+    [
+        (
+            {"type": "function", "function": {}},
+            [_function_tool("observe_scene")],
+            "exactly one non-empty 'name' field",
+        ),
+        (
+            {
+                "type": "function",
+                "function": {"name": "observe_scene"},
+            },
+            [],
+            "found 0",
+        ),
+        (
+            {
+                "type": "function",
+                "function": {"name": "observe_scene"},
+            },
+            [_function_tool("observe_scene"), _function_tool("observe_scene")],
+            "found 2",
+        ),
+        (
+            {"type": "custom", "name": "observe_scene"},
+            [_function_tool("observe_scene")],
+            "exactly 'type' and 'function' fields",
+        ),
+    ],
+)
+def test_invalid_named_tool_choices_fail_before_request(
+    tool_choice,
+    tools,
+    error_match,
+):
+    raw_client = _sync_client(_chat_response())
+    client = ReasoningPersistenceOpenAIClient(client=raw_client)
+
+    with pytest.raises(ValueError, match=error_match):
+        client.chat.completions.create(
+            model="qwen",
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+
+    raw_client.chat.completions.create.assert_not_called()

@@ -21,6 +21,7 @@ from scenesmith.scenebenchmark_critic.intent_contract import (
     _normalize_selector_category,
     bound_ids,
     contract_constraints,
+    grouped_bound_ids,
     relation_candidate_ids,
     selected_ids,
     semantic_selector_matches,
@@ -2207,7 +2208,7 @@ def _evaluate_group_distribution(
     constraint: dict[str, Any], objects: list[dict[str, Any]], tier: str
 ) -> dict[str, Any] | None:
     relation = str(constraint.get("relation") or "")
-    subject_ids = bound_ids(constraint.get("subjects"), objects)
+    subject_ids = grouped_bound_ids(constraint.get("subjects"), objects)
     target_ids = bound_ids(constraint.get("targets"), objects)
     by_id = {str(obj["id"]): obj for obj in objects}
     centers = [
