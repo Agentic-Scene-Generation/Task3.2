@@ -148,7 +148,12 @@ train/validation pool, with the same source/model/memory settings. This is a
 planned 152-group pool, not a promise of 152 usable DPO pairs. Do not train while
 the same single H100 is occupied by collection services.
 
-Packaging after any collection invocation:
+The campaign launcher now automatically packages and verifies a review archive
+after each invocation, including nonzero collector exits. It records collection
+and packaging exit codes separately under `tmp/acp_logs/<run_id>/<invocation>/`.
+The unique archive and its packaging log are under `tmp/results/slow_memory/`.
+Packaging does not turn a failed collection into a successful run. For an extra
+manual snapshot, or to retry packaging without rerunning collection:
 
 ```bash
 set -euo pipefail
@@ -166,6 +171,13 @@ It omits weights, meshes, databases and replay asset copies; its manifest record
 checksums, omissions and truncation. Full replay data and training data stay on the
 server. An archive taken during collection is a progress snapshot, not completion
 evidence.
+
+On 2026-09-28, SSH inspection verified the 019d smoke archive again (19 archived
+files, 77,429 bytes; all package checksums passed) and its successful training exit.
+No SceneEval 019 campaign directory or active collection process existed; the H100
+was idle. All 589 checked source/config/launcher/data files matched the local code
+before adding automatic packaging. The smoke result establishes executable training
+and saved finite adapter tensors, not scene-generation improvement or bulk data yield.
 
 ## Training ACP after collection services have stopped
 
