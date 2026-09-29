@@ -48,7 +48,10 @@ def apply_training_profile(config: dict[str, Any], profile: str) -> dict[str, An
         num_train_epochs=2.0,
         gradient_accumulation_steps=4,
         eval_steps=8,
-        save_steps=8,
+        # Save full optimizer/RNG state before another expensive step starts.
+        save_steps=1,
+        eval_strategy="no",  # One final evaluation, after saving the adapter.
+        disable_tqdm=True,
         use_liger_kernel=True,
         precompute_ref_log_probs=False,
         prediction_loss_only=True,

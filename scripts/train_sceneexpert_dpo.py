@@ -38,6 +38,9 @@ from scenesmith.scene_expert.slow_memory.training import (
     validate_training_request,
 )
 from scenesmith.scene_expert.trace_logger import collect_code_provenance
+from scenesmith.scene_expert.slow_memory.training_lifecycle import (
+    checkpoint_complete, make_progress_callback, write_json,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -396,7 +399,8 @@ def _training_args(
         "optim": str(train.get("optim", "adamw_8bit")),
         "max_grad_norm": float(train.get("max_grad_norm", 1.0)),
         "logging_steps": int(train.get("logging_steps", 1)),
-        "eval_strategy": "steps" if has_eval else "no",
+        "disable_tqdm": bool(train.get("disable_tqdm", False)),
+        "eval_strategy": str(train.get("eval_strategy", "steps")) if has_eval else "no",
         "eval_steps": int(train.get("eval_steps", 25)) if has_eval else None,
         "save_strategy": "steps",
         "save_steps": int(train.get("save_steps", 25)),
@@ -450,6 +454,27 @@ def main() -> int:
         return 0
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    resume = args.resume_from_checkpoint or train_cfg.get("resume_from_checkpoint")
+    identity_training = {
+        key: value for key, value in train_cfg.items()
+        if key not in {"output_dir", "run_name", "resume_from_checkpoint", "report_to"}
+    }
+    dataset_snapshot = {
+        name: _file_sha256(dataset_dir / name)
+        for name in ("manifest.json", "train.jsonl", "validation.jsonl", "test.jsonl")
+    }
+    identity = {
+        "model": preflight["model_name_or_path"], "model_config": config["model"],
+        "lora": config["lora"], "training": identity_training,
+        "dataset_snapshot": dataset_snapshot, "profile": args.profile,
+    }
+    if resume:
+        checkpoint = Path(resume)
+        checkpoint_complete(checkpoint)
+        previous_identity = json.loads((checkpoint.parent / "training_identity.json").read_text())
+        if previous_identity != identity:
+            raise ValueError("resume model, dataset, profile or training settings differ")
+    write_json(output_dir / "training_identity.json", identity)
     for name, payload in (
         ("effective_config.json", config),
         ("preflight.json", preflight),
@@ -491,6 +516,7 @@ def main() -> int:
         "train_dataset": train_dataset,
         "eval_dataset": eval_dataset,
         "processing_class": processor,
+        "callbacks": [make_progress_callback(output_dir)],
     }
     if peft_config is not None:
         trainer_kwargs["peft_config"] = peft_config
@@ -512,9 +538,10 @@ def main() -> int:
         trainer.liger_loss = completion_only_fused_loss(
             trainer.liger_loss, offload_context=offload_context
         )
-    resume = args.resume_from_checkpoint or train_cfg.get("resume_from_checkpoint")
     train_result = trainer.train(resume_from_checkpoint=resume or None)
     train_metrics = dict(train_result.metrics)
+    if trainer.state.max_steps < 1 or trainer.state.global_step != trainer.state.max_steps:
+        raise RuntimeError("DPO returned before completing the optimizer schedule")
     if trainer.state.global_step < 1 or not math.isfinite(
         float(train_metrics.get("train_loss", float("nan")))
     ):
@@ -528,12 +555,19 @@ def main() -> int:
     )
     if not changed_lora_tensors:
         raise RuntimeError("optimizer completed but all LoRA B tensors remain zero")
+    if not all(bool(torch.isfinite(value.detach()).all().item())
+               for name, value in trainer.model.named_parameters() if "lora_" in name):
+        raise RuntimeError("adapter contains nonfinite parameters")
     train_metrics.update(
         optimizer_steps=trainer.state.global_step,
         nonzero_lora_b_tensors=changed_lora_tensors,
         peak_cuda_memory_gib=torch.cuda.max_memory_allocated() / 1024**3,
     )
     trainer.save_metrics("train", train_metrics)
+    # A slow or interrupted evaluation must not erase completed training work.
+    adapter_dir = output_dir / "adapter"
+    trainer.save_model(str(adapter_dir))
+    processor.save_pretrained(adapter_dir)
     evaluation_metrics: dict[str, Any] = {}
     if eval_dataset is not None:
         evaluation_metrics = dict(trainer.evaluate())
@@ -541,9 +575,6 @@ def main() -> int:
         if not math.isfinite(float(evaluation_metrics.get("eval_loss", float("nan")))):
             raise RuntimeError("DPO validation did not report a finite loss")
 
-    adapter_dir = output_dir / "adapter"
-    trainer.save_model(str(adapter_dir))
-    processor.save_pretrained(adapter_dir)
     promotion = evaluate_training_promotion(
         config,
         evaluation_metrics=evaluation_metrics,
@@ -564,21 +595,19 @@ def main() -> int:
 
     manifest = {
         "schema_version": "sceneexpert.dpo_training_run.v2",
+        "execution_id": os.environ.get("SCENEEXPERT_TRAIN_EXECUTION_ID", ""),
+        "completion": {
+            "completed": True,
+            "optimizer_steps": trainer.state.global_step,
+            "expected_optimizer_steps": trainer.state.max_steps,
+        },
         "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "training_profile": args.profile,
         "code_provenance": collect_code_provenance(include_git=False),
         "config_path": str(args.config.resolve()),
         "config_fingerprint": preflight["config_fingerprint"],
         "dataset_manifest": str((dataset_dir / "manifest.json").resolve()),
-        "dataset_snapshot": {
-            name: _file_sha256(dataset_dir / name)
-            for name in (
-                "manifest.json",
-                "train.jsonl",
-                "validation.jsonl",
-                "test.jsonl",
-            )
-        },
+        "dataset_snapshot": dataset_snapshot,
         "dataset_features": dataset_features,
         "capacity_probe": capacity_probe,
         "template_boundary_audit": template_audit,
@@ -614,11 +643,7 @@ def main() -> int:
             "selects a checkpoint implicitly."
         ),
     }
-    (output_dir / "training_manifest.json").write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-        newline="\n",
-    )
+    write_json(output_dir / "training_manifest.json", manifest)
     print(json.dumps(manifest, indent=2, ensure_ascii=False))
     if args.profile == "pipeline_smoke":
         print("Pipeline smoke completed; this adapter is not an effectiveness result.")
