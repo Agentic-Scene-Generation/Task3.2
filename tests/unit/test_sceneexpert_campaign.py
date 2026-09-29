@@ -216,6 +216,62 @@ def test_initial_training_profile_removes_unsupported_coverage_without_affecting
     )["promotable"]
 
 
+@pytest.mark.parametrize("accuracy,passed", [(1.0, True), (0.4, False)])
+def test_pilot_reduces_sample_floor_but_never_promotes(accuracy, passed):
+    original = {"publish": {"push_to_hub": True}}
+    pilot = apply_training_profile(original, "furniture_initial_pilot")
+    assert original == {"publish": {"push_to_hub": True}}
+    assert pilot["data"]["minimum_train_pairs"] == 8
+    assert pilot["data"]["minimum_validation_pairs"] == 4
+    assert pilot["data"]["allow_unsafe_small_dataset"] is False
+    assert pilot["quality_gate"]["require_validation"] is True
+    assert pilot["publish"]["push_to_hub"] is False
+    result = evaluate_training_promotion(
+        pilot, evaluation_metrics={"eval_rewards/accuracies": accuracy, "eval_loss": 0.6}
+    )
+    assert result["offline_validation_passed"] is passed
+    assert not result["promotable"]
+    assert result["status"] == "pilot_only"
+
+
+def test_pilot_preflight_preserves_context_and_completion_contract(tmp_path):
+    from scenesmith.scene_expert.slow_memory.training import validate_training_request
+
+    source = tmp_path / "trajectories.jsonl"
+    rows, assignments = [], {}
+    for index in range(12):
+        task = f"pilot_task_{index}"
+        assignments[task] = "train" if index < 8 else "validation"
+        for side, score, failures in (("a", 1.0, 0), ("b", 0.5, 3)):
+            row = record(f"{index}_{side}", score=score, failures=failures)
+            row.task_id = task
+            rows.append(row.model_dump_json())
+    source.write_text("\n".join(rows), encoding="utf-8")
+    output = tmp_path / "dataset"
+    export_dpo_dataset(
+        trajectory_sources=[source], output_dir=output,
+        split_assignments=assignments, completion_view="first_turn",
+    )
+    config = apply_training_profile({
+        "model": {"name_or_path": "Qwen/test", "max_length": 4096},
+        "lora": {"target_modules": ["q_proj"]},
+        "training": {"output_dir": str(tmp_path / "training")},
+    }, "furniture_initial_pilot")
+    assert validate_training_request(config, dataset_dir=output)["valid"]
+    config["data"]["minimum_validation_pairs"] = 5
+    assert any("at least 5" in error for error in
+               validate_training_request(config, dataset_dir=output)["errors"])
+    config["data"]["minimum_validation_pairs"] = 4
+    path = output / "manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["completion_view"] = "full"
+    manifest["pairing_policy"]["same_context_required"] = False
+    path.write_text(json.dumps(manifest))
+    errors = validate_training_request(config, dataset_dir=output)["errors"]
+    assert any("first_turn" in error for error in errors)
+    assert any("same_context_required" in error for error in errors)
+
+
 def test_memory_is_initialized_once_and_verified_on_resume(tmp_path):
     plan = prepare_campaign(
         Path("scripts/assets/annotations.csv"), train=2, validation=1, test=1
