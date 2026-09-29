@@ -1,0 +1,533 @@
+{
+  "period": {
+    "start": "2026-09-11",
+    "end": "2026-09-29"
+  },
+  "code_cutoff": "5bec2cfc8852a170ae3af49e635bba5b3ef4ff67",
+  "remote_checked_at_utc": "2026-09-29T11:22:37Z",
+  "reference_ppt": {
+    "source": "C:/Users/admin/Documents/！scene_expert相关/0911进展汇报.pptx",
+    "sha256": "b86d32db544dff46e64fb257861f47607800eff46bf080595ad6c98946fe3b39",
+    "slide_count": 5,
+    "baseline_slide": 4,
+    "fast_memory_prior_result": {
+      "off": {
+        "completed": 10,
+        "total": 15
+      },
+      "on": {
+        "completed": 12,
+        "total": 15
+      },
+      "common_completed": 10,
+      "new_completed": 2,
+      "completed_to_failed": 0
+    },
+    "scope": "previous report baseline, not a new result in the current period"
+  },
+  "remote_evidence": {
+    "checked_at_utc": "2026-09-29T11:22:37Z",
+    "head": "5bec2cfc8852a170ae3af49e635bba5b3ef4ff67",
+    "pilot_020_exists": false,
+    "sources": {
+      "campaign": {
+        "project_path": "outputs/slow_memory/qwen38_sceneeval_dpo_019/campaign.json",
+        "sha256": "cff0490851f3ad5356e547a4a8289c16a20cc4a8e555f4afdbde9a3957826a1d"
+      },
+      "campaign_audit": {
+        "project_path": "outputs/slow_memory/qwen38_sceneeval_dpo_019/campaign_audit.json",
+        "sha256": "e920cbec6026366fa6aec13d7efb56b2e726be208a94f0beb99ef52e405b0301"
+      },
+      "strict_stats": {
+        "project_path": "outputs/slow_memory/qwen38_sceneeval_dpo_019/datasets/strict/stats.json",
+        "sha256": "f5a77e8baf25b488e23d8bf3af76589e5858007cc3a71db9dd037d7e6cea85a9"
+      },
+      "relative_stats": {
+        "project_path": "outputs/slow_memory/qwen38_sceneeval_dpo_019/datasets/verified_relative_v1/stats.json",
+        "sha256": "3358e070de96655d58e17889e4e64f3acfd67c6d94582cdd041530a0bc803817"
+      },
+      "capacity_manifest": {
+        "project_path": "outputs/slow_memory/qwen38_dpo_capacity_019g/training_manifest.json",
+        "sha256": "61cc61976e0bf185b0c58b6e4a8126cc7e69587b25310abfaca49e8c42451f19"
+      },
+      "capacity_probe": {
+        "project_path": "outputs/slow_memory/qwen38_dpo_capacity_019g/capacity_probe.json",
+        "sha256": "6dce3c4080505cd150bd9b6ae0e71a34229375e55cc8259ef6f56f9142dcaa9b"
+      }
+    },
+    "data": {
+      "campaign": {
+        "schema_version": "sceneexpert.sceneeval_campaign.v1",
+        "seed": 42,
+        "counts": {
+          "test": 32,
+          "validation": 24,
+          "train": 128
+        },
+        "excluded_prior_id_range": [
+          0,
+          99
+        ],
+        "selection": "stratified_without_observed_labels"
+      },
+      "campaign_audit": {
+        "schema_version": "sceneexpert.campaign_audit.v1",
+        "updated_at": 1790651766.4320266,
+        "completed_task_count": 55,
+        "planned_collection_tasks": 152,
+        "generation_exit": 0,
+        "selected_task_ids": [
+          "task_8d9c06b62bb36dd5",
+          "task_9049ef3c2d103739",
+          "task_66ce31173f0dfe02",
+          "task_ce2cda2d775a9803",
+          "task_fb36daf749b4151b",
+          "task_1988558db6e8bd1d",
+          "task_8e159679a34d9824",
+          "task_195636bc11fb44ef",
+          "task_1dc51393526f1d44",
+          "task_9d49e49952075a74",
+          "task_ccfd328d5cfa55f5",
+          "task_c5b7dafe01b470e4",
+          "task_5d6bfefe7d75175f",
+          "task_6259947b63d5bf27",
+          "task_5971e432cc40a152",
+          "task_66437335ab340009",
+          "task_d05e735ec5ec4cd1",
+          "task_6f4c12dcea6a2665",
+          "task_e70e1d1d3134e173",
+          "task_47f839b5ebcf45ea",
+          "task_89d15ca51a147d94",
+          "task_951d9e2e6178b180",
+          "task_f728fa0de19eebab",
+          "task_b977984a8dea16e1",
+          "task_dddc8901f2482dd8",
+          "task_f3650fbf8e31c9f0",
+          "task_d2151cb61a9d66d1",
+          "task_8d6bf6f3e1274691",
+          "task_ddb9b519dd5d351a",
+          "task_66f34602a10517f6",
+          "task_d7687d289169e57a",
+          "task_a56b64e087787d19",
+          "task_325002057f311dcf",
+          "task_b977b40519d00bcf",
+          "task_187a3dea73e73879",
+          "task_e8068ff93977d8fc",
+          "task_7475efd7a85c96e2",
+          "task_e9fb3a248c77fc39",
+          "task_b5f8823f9cdbd441",
+          "task_0e1cedb527c382be",
+          "task_c7e0e62d011c6efd",
+          "task_7a468b0068d7130d",
+          "task_5a6267d3f057351d",
+          "task_e49768ab67d012dd",
+          "task_118a17210aefa59e",
+          "task_d488e4e4bddf2952",
+          "task_fedf35b4d1204923",
+          "task_2342a781f5768138",
+          "task_5f5e7076dd969ae9",
+          "task_4dfe371d613c6086",
+          "task_3a88d3ffb1e9ce72",
+          "task_3539a2b832d342e3",
+          "task_eedcaef1da1a4cab",
+          "task_42675ea652bc7711",
+          "task_957473d45aa517f0",
+          "task_693f75e288bef2d7",
+          "task_d5591156d16390e8",
+          "task_eebf1c2d5bfda543",
+          "task_e31be045e18d1e17",
+          "task_a52afc21fd795c3d",
+          "task_6c1763c0585b7789",
+          "task_cea309ef47d84ea2",
+          "task_c2d69579af55655d",
+          "task_b0b9b587be6af399",
+          "task_fadfcae92c504f1b",
+          "task_3a23978d9dafbc15",
+          "task_e379694af33cc5e0",
+          "task_793e570b70ee276f"
+        ],
+        "selected_missing_task_ids": [
+          "task_9049ef3c2d103739",
+          "task_8e159679a34d9824",
+          "task_66437335ab340009",
+          "task_dddc8901f2482dd8",
+          "task_f3650fbf8e31c9f0",
+          "task_8d6bf6f3e1274691",
+          "task_325002057f311dcf",
+          "task_e8068ff93977d8fc",
+          "task_7475efd7a85c96e2",
+          "task_0e1cedb527c382be",
+          "task_d488e4e4bddf2952",
+          "task_4dfe371d613c6086",
+          "task_957473d45aa517f0",
+          "task_693f75e288bef2d7",
+          "task_a52afc21fd795c3d",
+          "task_fadfcae92c504f1b",
+          "task_3a23978d9dafbc15"
+        ]
+      },
+      "strict_stats": {
+        "schema_version": "sceneexpert.dpo_stats.v2",
+        "generated_at": "2026-09-29T03:16:05Z",
+        "trajectory_count": 110,
+        "raw_preference_pair_count": 12,
+        "completion_view": "first_turn",
+        "eligible_pair_count": 11,
+        "diagnostic_count": 44,
+        "diagnostic_reasons": {
+          "no_accepted_candidate": 36,
+          "no_distinct_first_assistant_turn": 1,
+          "no_eligible_preference_contrast": 7
+        },
+        "pairs_by_stage": {
+          "furniture": 11
+        },
+        "pairs_by_role": {
+          "designer": 11
+        },
+        "pairs_by_task_type": {
+          "designer_initial": 11
+        },
+        "pairs_by_evidence": {
+          "deterministic": 11
+        },
+        "pairs_by_preference_basis": {
+          "accepted_vs_rejected_outcome": 11
+        },
+        "tool_pair_count": 11,
+        "multimodal_pair_count": 0,
+        "split_counts": {
+          "train": 7,
+          "validation": 4,
+          "test": 0
+        },
+        "unique_leakage_groups": 11,
+        "quality_margin": {
+          "minimum_required": 0.05,
+          "minimum_observed": 0.05,
+          "maximum_observed": 0.2727272727272727
+        },
+        "serialized_chars": {
+          "max_prompt": 60167,
+          "max_chosen": 359,
+          "max_rejected": 355
+        }
+      },
+      "relative_stats": {
+        "schema_version": "sceneexpert.dpo_stats.v2",
+        "generated_at": "2026-09-29T03:16:06Z",
+        "trajectory_count": 110,
+        "raw_preference_pair_count": 27,
+        "completion_view": "first_turn",
+        "eligible_pair_count": 22,
+        "diagnostic_count": 33,
+        "diagnostic_reasons": {
+          "no_accepted_candidate": 21,
+          "no_distinct_first_assistant_turn": 5,
+          "no_eligible_preference_contrast": 7
+        },
+        "pairs_by_stage": {
+          "furniture": 22
+        },
+        "pairs_by_role": {
+          "designer": 22
+        },
+        "pairs_by_task_type": {
+          "designer_initial": 22
+        },
+        "pairs_by_evidence": {
+          "deterministic": 22
+        },
+        "pairs_by_preference_basis": {
+          "accepted_vs_rejected_outcome": 11,
+          "verified_relative_v1": 11
+        },
+        "tool_pair_count": 22,
+        "multimodal_pair_count": 0,
+        "split_counts": {
+          "train": 15,
+          "validation": 7,
+          "test": 0
+        },
+        "unique_leakage_groups": 22,
+        "quality_margin": {
+          "minimum_required": 0.03,
+          "minimum_observed": 0.03,
+          "maximum_observed": 0.2727272727272727
+        },
+        "serialized_chars": {
+          "max_prompt": 65093,
+          "max_chosen": 374,
+          "max_rejected": 460
+        }
+      },
+      "capacity_manifest": {
+        "finished_at": "2026-09-29T10:21:39Z",
+        "training_profile": "pipeline_smoke",
+        "capacity_probe": {
+          "source_train_row_index": 6,
+          "source_train_pair_count": 15,
+          "padded_text_sequence_tokens": 19273,
+          "selected_train_pair_count": 1
+        },
+        "template_boundary_audit": {
+          "pair_count": 1,
+          "max_text_prompt_tokens": 19190,
+          "max_text_completion_tokens": 83
+        },
+        "train_metrics": {
+          "train_runtime": 321.2377,
+          "train_samples_per_second": 0.006,
+          "train_steps_per_second": 0.006,
+          "total_flos": 1.2138317107694208e+16,
+          "train_loss": 0.6931471824645996,
+          "epoch": 2.0,
+          "optimizer_steps": 2,
+          "nonzero_lora_b_tensors": 256,
+          "peak_cuda_memory_gib": 54.74433708190918
+        },
+        "evaluation_metrics": {},
+        "promotion_gate": {
+          "promotable": false,
+          "status": "candidate_rejected",
+          "offline_validation_passed": true,
+          "reasons": [
+            "pipeline_smoke verifies infrastructure only and cannot be promoted"
+          ],
+          "observed_preference_accuracy": null,
+          "minimum_preference_accuracy": 0.55,
+          "observed_eval_loss": null,
+          "scene_level_gate_required": true,
+          "scene_level_gate_note": "Offline DPO metrics are necessary but insufficient. Promote the served adapter only after paired SceneEval runs improve hard-pass and relation metrics without regressing Main critic success."
+        },
+        "dataset_snapshot": {
+          "manifest.json": "473c9bb5228821e5995d23d4a17c6c9435c8c0b456ccb4559d78abd493296633",
+          "train.jsonl": "11042ec83d53c48a2abfb22a23ba641d442f6c2ac84051fe87efdaf620fdc730",
+          "validation.jsonl": "440daa75e6acb1d009d21af3ab07d9f110eab77864e2c32b86aa26c4eea54607",
+          "test.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      },
+      "capacity_probe": {
+        "source_train_row_index": 6,
+        "source_train_pair_count": 15,
+        "padded_text_sequence_tokens": 19273,
+        "selected_train_pair_count": 1
+      }
+    }
+  },
+  "independent_audit": {
+    "audit_elapsed_s": 411.0040464401245,
+    "complete_unique_tasks": 55,
+    "trajectory_files": 110,
+    "fixed_splits_match": true,
+    "train_validation_overlap": [],
+    "test_pair_count": 0
+  },
+  "training_context": {
+    "pair_count": 22,
+    "max_text_prompt_tokens": 19190,
+    "max_text_completion_tokens": 103,
+    "features": {
+      "has_tools": true,
+      "has_images": false
+    }
+  },
+  "adapter_cpu_check": {
+    "tensor_count": 512,
+    "all_finite": true,
+    "nonzero_lora_b_tensors": 256,
+    "adapter_bytes": 318843864,
+    "runtime_imports_passed": true
+  },
+  "rebase": {
+    "final_verified.json": {
+      "head": "5bec2cfc8852a170ae3af49e635bba5b3ef4ff67",
+      "origin_dev": "5bec2cfc8852a170ae3af49e635bba5b3ef4ff67",
+      "origin_main": "8646102701d90274de44d82acab8f9cbc7c660a3",
+      "clean": true,
+      "tracked_files_verified": 1098,
+      "pilot020_absent": true
+    },
+    "baseline_comparison.json": {
+      "rebase_failures": 21,
+      "main_failures": 21,
+      "same_failure_names": true,
+      "same_failure_messages": true
+    },
+    "dpo_status.json": {
+      "phase": "dpo",
+      "exit_code": 0,
+      "elapsed_seconds": 27.899072010070086
+    },
+    "native_status.json": {
+      "phase": "native",
+      "exit_code": 1,
+      "elapsed_seconds": 346.42150171659887
+    }
+  },
+  "figures": [
+    {
+      "file": "assets/20260929/office_A_process_top.png",
+      "server_project_path": "outputs/slow_memory/qwen38_initial_pairs_new3_014/runs/paired_initial/group_000/A/raw_scene/room_office/scene_renders/furniture/renders_002/0_top.png",
+      "sha256": "b7a7b3feb04f7e16ef853b11538086001df6d46690f06b45921f61ebad97acba",
+      "bytes": 484002,
+      "meaning": "candidate execution screenshot; not a trained-model comparison; labels come from independent raw-state evidence"
+    },
+    {
+      "file": "assets/20260929/office_B_process_top.png",
+      "server_project_path": "outputs/slow_memory/qwen38_initial_pairs_new3_014/runs/paired_initial/group_000/B/raw_scene/room_office/scene_renders/furniture/renders_002/0_top.png",
+      "sha256": "81c946b48fd99bc7c9bc1a717ceb7a832cacbd15fbe216b8fa4eec5dd074ce1e",
+      "bytes": 486734,
+      "meaning": "candidate execution screenshot; not a trained-model comparison; labels come from independent raw-state evidence"
+    }
+  ],
+  "development_commits": [
+    {
+      "commit": "ce787a8",
+      "author_date": "2026-09-11",
+      "title": "Chore(slow-memory): Define Qwen-only paired recollection protocol"
+    },
+    {
+      "commit": "4c363c4",
+      "author_date": "2026-09-11",
+      "title": "Feat(acp-collection): Add bounded Qwen3.8 Slow Memory recollection entrypoint"
+    },
+    {
+      "commit": "da8f49a",
+      "author_date": "2026-09-11",
+      "title": "Fix(acp-collection): Resolve Qwen3.8 GGUF model paths"
+    },
+    {
+      "commit": "09ec282",
+      "author_date": "2026-09-11",
+      "title": "Fix(acp-runtime): Isolate Qwen overrides from embedding service"
+    },
+    {
+      "commit": "212f0e2",
+      "author_date": "2026-09-11",
+      "title": "Fix(floor-plan-critic): Separate Qwen evidence collection from structured scoring"
+    },
+    {
+      "commit": "a8e3d42",
+      "author_date": "2026-09-12",
+      "title": "Fix(intent-contract): Align deferred manipuland ownership with support readiness"
+    },
+    {
+      "commit": "f2668ec",
+      "author_date": "2026-09-13",
+      "title": "Fix(slow-memory): Audit Qwen recollection and deduplicate archived trajectories"
+    },
+    {
+      "commit": "1b70f1d",
+      "author_date": "2026-09-14",
+      "title": "Feat(slow-memory): Add isolated Qwen furniture initial candidate collection"
+    },
+    {
+      "commit": "49bad37",
+      "author_date": "2026-09-14",
+      "title": "Fix(slow-memory): Remove the Git dependency from ACP pair collection"
+    },
+    {
+      "commit": "6b627db",
+      "author_date": "2026-09-14",
+      "title": "Feat(scene-expert): Add lightweight experiment review packaging"
+    },
+    {
+      "commit": "f05ed44",
+      "author_date": "2026-09-14",
+      "title": "Fix(slow-memory): Preserve SDK timeout settings in initial candidate snapshots"
+    },
+    {
+      "commit": "b159472",
+      "author_date": "2026-09-15",
+      "title": "Fix(slow-memory): Refresh raw candidate physics before preference scoring"
+    },
+    {
+      "commit": "282afdc",
+      "author_date": "2026-09-15",
+      "title": "Fix(slow-memory): Verify native restoration without rejecting quaternion roundoff"
+    },
+    {
+      "commit": "7fa4bbc",
+      "author_date": "2026-09-15",
+      "title": "Fix(slow-memory): Separate rescore completion from preference dataset readiness"
+    },
+    {
+      "commit": "895fbfe",
+      "author_date": "2026-09-15",
+      "title": "Feat(slow-memory): Add isolated evidence audits and document 011 collection blockers"
+    },
+    {
+      "commit": "892a637",
+      "author_date": "2026-09-15",
+      "title": "Fix(slow-memory): Calibrate candidate labels against explicit scene contracts"
+    },
+    {
+      "commit": "4415da2",
+      "author_date": "2026-09-15",
+      "title": "Fix(slow-memory): Preserve tool failure evidence before candidate quarantine"
+    },
+    {
+      "commit": "e26e5c4",
+      "author_date": "2026-09-16",
+      "title": "Fix(slow-memory): Distinguish partial review snapshots from finalized runs"
+    },
+    {
+      "commit": "24b9141",
+      "author_date": "2026-09-16",
+      "title": "Chore(slow-memory): Document the verified office pair and missing-task collection plan"
+    },
+    {
+      "commit": "df735f0",
+      "author_date": "2026-09-17",
+      "title": "Fix(slow-memory): Reject malformed furniture asset batches before budget accounting"
+    },
+    {
+      "commit": "f3898c6",
+      "author_date": "2026-09-21",
+      "title": "Fix(slow-memory): Ground floor support and complete seating layouts in candidate labels"
+    },
+    {
+      "commit": "96d4ca9",
+      "author_date": "2026-09-21",
+      "title": "Feat(slow-memory): Enable resumable SceneEval collection and verified Qwen DPO training"
+    },
+    {
+      "commit": "b554984",
+      "author_date": "2026-09-21",
+      "title": "Chore(repo): Ignore local virtual environment directories"
+    },
+    {
+      "commit": "3307d12",
+      "author_date": "2026-09-28",
+      "title": "Feat(slow-memory): Automatically package and verify campaign results after collection"
+    },
+    {
+      "commit": "f580f9c",
+      "author_date": "2026-09-29",
+      "title": "Feat(slow-memory): Add audited pilot training and automatic result packaging"
+    },
+    {
+      "commit": "7ac66ec",
+      "author_date": "2026-09-29",
+      "title": "Fix(slow-memory): Offload long-context activations and prioritize batch diagnostics"
+    },
+    {
+      "commit": "b6e4cab",
+      "author_date": "2026-09-29",
+      "title": "Fix(slow-memory): Isolate fused DPO loss from activation offload hooks"
+    },
+    {
+      "commit": "5bec2cf",
+      "author_date": "2026-09-29",
+      "title": "Fix(slow-memory): Finalize capacity validation and portable ACP runtime setup"
+    }
+  ],
+  "interpretation_notes": [
+    "The 22 relative-policy eligible pairs include the 11 strict pairs; do not add them.",
+    "55 completed furniture decision groups do not imply 55 completed five-stage scenes.",
+    "019g is an infrastructure-only two-step probe with no offline evaluation; its historical offline_validation_passed=true field is not evidence of validation. The current code records null when validation is absent.",
+    "No 020 pilot directory existed at the evidence cutoff.",
+    "Rebase tests include 21 failures independently reproduced with identical messages on main; do not claim a fully passing shared suite."
+  ]
+}
