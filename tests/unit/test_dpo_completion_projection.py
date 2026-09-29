@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from scenesmith.scene_expert.slow_memory.fused_policy import completion_only_fused_loss
+from scenesmith.scene_expert.slow_memory.fused_policy import (
+    FusedLossOffloadContext,
+    completion_only_fused_loss,
+)
 
 torch = pytest.importorskip("torch")
 
@@ -54,3 +57,71 @@ def test_empty_candidate_target_is_rejected():
     loss = completion_only_fused_loss(DenseDPOLoss())
     with pytest.raises(ValueError, match="no supervised"):
         loss(torch.zeros(3, 2), torch.zeros(2, 4, 2), torch.full((2, 4), -100))
+
+
+def test_fused_functional_ad_with_offload_preserves_model_gradients_and_hooks():
+    class FunctionalLoss(DenseDPOLoss):
+        def forward(
+            self, weight, hidden, labels, bias, ref_hidden, ref_weight, ref_bias
+        ):
+            def objective(states):
+                return DenseDPOLoss.forward(
+                    self, weight, states, labels, bias, ref_hidden, ref_weight, ref_bias
+                )
+
+            return torch.func.grad_and_value(objective)(hidden)[1]
+
+    torch.manual_seed(8)
+    x = torch.randn(2, 7, 3, requires_grad=True)
+    y = x.detach().clone().requires_grad_()
+    weight = torch.randn(5, 3)
+    ref = torch.randn(2, 7, 3)
+    labels = torch.tensor([[-100] * 4 + [1, 2, 3], [-100] * 4 + [2, 1, -100]])
+    expected = completion_only_fused_loss(FunctionalLoss())(
+        weight, x.cumsum(1).square(), labels, None, ref, weight
+    )
+    expected.backward()
+    packed = []
+
+    def pack(tensor):
+        packed.append(tensor.shape)
+        return tensor.detach().clone()
+
+    context = FusedLossOffloadContext(
+        torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor)
+    )
+    with context:
+        hidden = y.cumsum(1).square()
+        assert packed
+        actual = completion_only_fused_loss(FunctionalLoss(), offload_context=context)(
+            weight, hidden, labels, None, ref, weight
+        )
+        count = len(packed)
+        # Registration must be restored before model backward / checkpoint replay.
+        unused = y.square()
+        assert len(packed) > count
+        del unused
+        actual.backward()
+    assert not context.active
+    assert torch.allclose(actual, expected, atol=1e-6)
+    assert torch.allclose(x.grad, y.grad, atol=1e-6)
+    assert y.grad[:, :4].abs().sum() > 0
+
+
+def test_fused_offload_pause_restores_hooks_after_exception():
+    packed = []
+    context = FusedLossOffloadContext(
+        torch.autograd.graph.saved_tensors_hooks(
+            lambda tensor: (packed.append(True), tensor)[1], lambda tensor: tensor
+        )
+    )
+    with context:
+        with pytest.raises(ValueError, match="probe"):
+            with context.pause_for_fused_loss():
+                raise ValueError("probe")
+        torch.ones(2, requires_grad=True).square()
+        assert packed
+    assert not context.active
+    # The same adapter is valid during evaluation without an entered offloader.
+    with context.pause_for_fused_loss():
+        torch.func.grad(lambda x: x.square().sum())(torch.ones(2))

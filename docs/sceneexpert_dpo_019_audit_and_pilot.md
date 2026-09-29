@@ -97,6 +97,13 @@ and per-attempt summaries, exit markers, failures and ACP logs before bulky raw
 records. Omissions remain explicit; a bounded review archive is not a complete
 training dataset or a substitute for server-side replay auditing.
 
+The refreshed `qwen38_sceneeval_dpo_019_review_complete_20260929.tar.gz` is
+68,603,800 bytes (65.4 MiB), contains 5,219 verified members and includes all six
+existing per-attempt `run_metrics.json` files. It was downloaded and independently
+verified locally. The original CCI attempt stopped before producing its metrics
+file; its four pair groups were audited directly. Refreshing the archive took
+74.5 seconds and did not rerun collection or change source results.
+
 ## Next ACP: exploratory training
 
 The longest-pair CCI probe `qwen38_dpo_capacity_019e` caught a backward-pass OOM
@@ -107,7 +114,12 @@ offloading to CPU alongside checkpointing and completion-only fused projection.
 This changes activation storage, not the retained context or the DPO objective.
 See the [TRL memory guide](https://huggingface.co/docs/trl/reducing_memory_usage)
 and the pinned local DPOConfig implementation. The generic full profile retains
-its prior setting. A fresh longest-pair check is required before the pilot ACP.
+its prior setting. The next probe 019f confirmed a TRL composition issue: its fused loss uses
+`torch.func`, which rejects active saved-tensor hooks. The SceneExpert adapter
+pauses only hook registration around the compact fused loss while retaining the
+offloader tracker and streams for model backward. It restores registration on
+exceptions and leaves evaluation without an entered offloader unchanged. A fresh
+longest-pair check is required before the pilot ACP.
 
 Use one H100 80 GB. The pilot is estimated to exceed one hour and therefore must
 run through ACP. The two-step capacity probe is a separate, nonpromotable CCI
