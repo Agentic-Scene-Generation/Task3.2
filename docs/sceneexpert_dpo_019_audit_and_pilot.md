@@ -48,6 +48,11 @@ train/validation task intersection is empty. These checks address exact-task
 leakage and evidence integrity, not semantic independence of all natural-language
 tasks. Full replay assets remain on the server.
 
+This collection intentionally stops at furniture. Complete decision groups do
+not mean complete five-stage scenes. The run-level full-scene/critic comparison
+flags are therefore not effectiveness evidence; candidate preferences use their
+own deterministic execution evidence.
+
 Sources: `outputs/slow_memory/qwen38_sceneeval_dpo_019/campaign_audit.json`,
 `datasets/*/{manifest,stats}.json`, per-attempt `pair_audit.json`, `run_metrics.json`,
 and `tmp/review_20260929/{independent_audit,training_context_audit}.json`.
@@ -121,11 +126,30 @@ offloader tracker and streams for model backward. It restores registration on
 exceptions and leaves evaluation without an entered offloader unchanged. A fresh
 longest-pair check is required before the pilot ACP.
 
-Use one H100 80 GB. The pilot is estimated to exceed one hour and therefore must
+That check is now complete: `qwen38_dpo_capacity_019g`, on commit `e992f4b`,
+finished with exit 0 in 587.1 seconds. It retained the full 19,273-token longest
+training pair, completed two optimizer steps in 321.2 seconds, updated 256 LoRA
+B tensors and saved the adapter. Peak CUDA allocation was 54.74 GiB. This
+establishes capacity and gradient flow; it did not run validation or establish
+learning gains. Missing offline validation is now explicitly recorded as null
+rather than a passed validation flag. The two earlier failed probes are retained.
+
+Use one H100 80 GB, with a conservative host-RAM allocation of at least 128 GiB
+for activation offloading. The CCI test had ample host RAM; exact process peak
+RAM was not recorded, so this allocation is a planning estimate. The pilot is
+estimated to exceed one hour and therefore must
 run through ACP. The two-step capacity probe is a separate, nonpromotable CCI
 check on the longest training pair; validation examples are never used by it.
 The training pilot below always starts from the original safetensors base, not
 from a capacity-probe adapter. Keep collection/inference services off this GPU.
+
+The same standalone CPython 3.11.15 is copied to the shared project directory
+`.venv_dpo_python`; setup now prefers it when present. Delivery includes rebinding
+the training environment to this shared interpreter and checking dependency
+imports, so ACP does not depend on CCI's private `/root` interpreter directory.
+The scene-generation `.venv` is untouched. Runtime artifacts are environments,
+not Git source files; the check is recorded in
+`tmp/review_20260929/portable_environment.json`.
 
 ```bash
 set -euo pipefail
@@ -171,9 +195,10 @@ this command.
 | --- | --- | --- | --- | --- |
 | Pilot: 15 train, 7 validation, two epochs | 3–5 min to submit | 1.5–2.5 h | 10–20 min | 1–5 min automatically |
 
-Runtime is extrapolated from the earlier 019d H100 smoke (282.9 seconds for two
-pair microsteps, plus about 2.8 minutes loading), allowing for longer inputs,
-gradient accumulation, two validation passes, saving and shared-filesystem I/O.
+Runtime is extrapolated from the 019g H100 capacity check (321.2 seconds for two
+pair microsteps, 587.1 seconds for the complete workflow), allowing for gradient
+accumulation, two validation passes, saving and shared-filesystem I/O. Thirty
+pair microsteps alone project to about 80 minutes at this measured rate.
 The current maximum prompt has 19,190 tokens, versus 17,976 in 019d. These are
 estimates, not guarantees. The user need only submit this ACP and return the
 lightweight archive; there is no need to repeat the completed collection batch.

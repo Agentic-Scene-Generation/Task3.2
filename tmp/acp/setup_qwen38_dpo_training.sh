@@ -2,7 +2,12 @@
 # Install into a separate environment; preserve the scene-generation runtime.
 set -euo pipefail
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}"
-BOOTSTRAP_PYTHON="${BOOTSTRAP_PYTHON:-$PROJECT_ROOT/.venv/bin/python}"
+if [[ -x "$PROJECT_ROOT/.venv_dpo_python/bin/python3.11" ]]; then
+  DEFAULT_BOOTSTRAP="$PROJECT_ROOT/.venv_dpo_python/bin/python3.11"
+else
+  DEFAULT_BOOTSTRAP="$PROJECT_ROOT/.venv/bin/python"
+fi
+BOOTSTRAP_PYTHON="${BOOTSTRAP_PYTHON:-$DEFAULT_BOOTSTRAP}"
 TRAIN_ENV="${TRAIN_ENV:-$PROJECT_ROOT/.venv_dpo}"
 REQUIREMENTS_FILE="${REQUIREMENTS_FILE:-$PROJECT_ROOT/configurations/slow_memory/requirements_train.txt}"
 # Ignore host-wide extra indexes (the ACP image may contain an unreachable NGC

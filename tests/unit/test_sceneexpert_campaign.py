@@ -215,6 +215,9 @@ def test_initial_training_profile_removes_unsupported_coverage_without_affecting
     assert not evaluate_training_promotion(
         smoke, evaluation_metrics={"eval_rewards/accuracies": 1.0}
     )["promotable"]
+    assert evaluate_training_promotion(
+        smoke, evaluation_metrics={}
+    )["offline_validation_passed"] is None
 
 
 @pytest.mark.parametrize("accuracy,passed", [(1.0, True), (0.4, False)])

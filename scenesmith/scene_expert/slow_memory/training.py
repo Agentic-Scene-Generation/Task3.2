@@ -401,7 +401,9 @@ def evaluate_training_promotion(
         )
     if eval_loss is not None and not math.isfinite(eval_loss):
         reasons.append("validation loss is not finite")
-    offline_validation_passed = not reasons
+    offline_validation_passed = (
+        None if accuracy is None or eval_loss is None else not reasons
+    )
     profile = config.get("training_profile")
     if profile == "pipeline_smoke":
         reasons.append(
