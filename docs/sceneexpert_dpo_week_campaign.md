@@ -1,5 +1,11 @@
 # SceneEval Qwen3.8 DPO campaign — 2026-09-21
 
+**2026-09-29 update:** collection 019 is finished with partial success. Use the
+[audited 019 results and pilot ACP](sceneexpert_dpo_019_audit_and_pilot.md) for the
+next run. The historical 72-task collection/resume commands below are retained
+for provenance; do not rerun 019 against changed source fingerprints. Its 15
+training pairs require the new explicit pilot profile for the immediate experiment.
+
 ## Decision and scope
 
 Move from repeated single-scene rescoring to a bounded, resumable collection campaign.
@@ -61,9 +67,10 @@ The distinction follows the preference-learning objective in the
   were copied from the adjacent environment without modifying it, then checked by
   pip against `configurations/slow_memory/requirements_train.txt`. Versions are
   recorded in `.venv_dpo/sceneexpert_requirements.lock.txt`.
-- Training smoke uses an isolated source copy under `tmp/slow_memory_setup_019/source`;
-  this does not synchronize the operator's production checkout. Manually synchronize
-  the final delivered code before starting the campaign.
+- The historical training smoke used an isolated source copy under
+  `tmp/slow_memory_setup_019/source`. Subsequent production checkout synchronization
+  is performed and verified by Codex using committed offline bundles, as required
+  by `AGENTS.md`; a smoke source copy alone is not synchronization.
 - The warm seed bank passed read-only loading and known source-task leakage checks:
   47 success cases, 46 failure cases and 23 skills (one active, 22 candidate skills).
 

@@ -207,6 +207,7 @@ def test_initial_training_profile_removes_unsupported_coverage_without_affecting
     assert initial["data"]["minimum_train_pairs"] == 16
     assert initial["quality_gate"]["require_validation"] is True
     assert initial["training"]["loss_type"] == "sigmoid"
+    assert initial["training"]["activation_offloading"] is True
     smoke = apply_training_profile(original, "pipeline_smoke")
     assert smoke["training"]["max_steps"] == 2
     assert smoke["data"]["minimum_train_pairs"] == 1

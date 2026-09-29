@@ -52,6 +52,7 @@ def apply_training_profile(config: dict[str, Any], profile: str) -> dict[str, An
         use_liger_kernel=True,
         precompute_ref_log_probs=False,
         prediction_loss_only=True,
+        activation_offloading=True,
     )
     if smoke or pilot:
         result.setdefault("publish", {})["push_to_hub"] = False
