@@ -388,6 +388,7 @@ def _training_args(
         "tf32": bool(train.get("tf32", True)),
         "gradient_checkpointing": bool(train.get("gradient_checkpointing", True)),
         "gradient_checkpointing_kwargs": {"use_reentrant": False},
+        "activation_offloading": bool(train.get("activation_offloading", False)),
         "max_length": None if multimodal else int(model_cfg.get("max_length", 8192)),
         "truncation_mode": str(train.get("truncation_mode", "keep_start")),
         "loss_type": train.get("loss_type", ["sigmoid", "sft"]),
@@ -556,6 +557,7 @@ def main() -> int:
         "capacity_probe": capacity_probe,
         "template_boundary_audit": template_audit,
         "use_liger_kernel": trainer.args.use_liger_kernel,
+        "activation_offloading": trainer.args.activation_offloading,
         "loss_projection": (
             "completion_positions_only"
             if trainer.args.use_liger_kernel

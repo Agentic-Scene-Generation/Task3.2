@@ -155,6 +155,22 @@ def test_campaign_keeps_service_logs_under_original_project_paths(tmp_path: Path
     assert all(not name.endswith(".obj") for name in content)
 
 
+def test_campaign_budget_keeps_late_attempt_summaries_before_early_payloads(tmp_path):
+    early = f"{RESULTS}/attempts/attempt_001/payload.json"
+    late = f"{RESULTS}/attempts/attempt_006/runs/metrics/run_metrics.json"
+    failure = f"{RESULTS}/attempts/attempt_006/failure.json"
+    status = f"{LOGS}/late/workflow_exit_status.env"
+    log = f"{LOGS}/late/collection.log"
+    _write(tmp_path, early, b"x" * 150)
+    for name in (late, failure, status, log):
+        _write(tmp_path, name, b"a" * 20)
+    summary, manifest, content = _bundle(tmp_path, max_total_bytes=100)
+    assert all(name in content for name in (late, failure, status, log))
+    assert early not in content
+    assert summary["selected_bytes"] == 80
+    assert any(row["path"] == early for row in manifest["omitted"])
+
+
 def test_intermediate_campaign_audit_is_not_a_finalization_marker(tmp_path: Path):
     _write(tmp_path, f"{RESULTS}/campaign.json")
     _write(tmp_path, f"{RESULTS}/campaign_audit.json")

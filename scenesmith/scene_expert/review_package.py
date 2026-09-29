@@ -28,6 +28,12 @@ TEXT_SUFFIXES = {
 }
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 SKIP_DIRS = {".git", ".venv", "__pycache__", ".cache"}
+SUMMARY_FILES = {
+    "campaign.json", "campaign_audit.json", "run_metrics.json", "stats.json",
+    "manifest.json", "training_manifest.json", "train_results.json", "eval_results.json",
+    "effective_config.json", "preflight.json", "capacity_probe.json",
+    "pair_audit.json", "rescore_status.json", "summary.csv",
+}
 
 
 def _policy(path: Path, relative: Path) -> tuple[int | None, str]:
@@ -42,10 +48,16 @@ def _policy(path: Path, relative: Path) -> tuple[int | None, str]:
         return None, "cache_or_environment"
     suffix = path.suffix.lower()
     if suffix in TEXT_SUFFIXES:
+        # Global summaries must survive the size cap even when early attempts
+        # contain many large prompt/trace copies that sort before later attempts.
+        if path.name in SUMMARY_FILES or "exit_status" in path.name:
+            return 0, "run_summary"
+        if path.name in {"failure.json", "status.json", "tool_execution_failure.json"}:
+            return 1, "failure_or_status"
         if "llm_payloads" in parts:
             return 80, "raw_debug_payload"
         if suffix in {".log", ".out", ".err", ".txt"}:
-            return 30, "log"
+            return (5 if "acp_logs" in parts else 30), "log"
         return 10, "structured_evidence"
     if suffix in IMAGE_SUFFIXES:
         # Include original model-input/tool media and exported DPO images.
@@ -306,7 +318,7 @@ def package_results(
                                 "reason": "per_file_limit",
                             }
                         )
-                        if priority in {10, 40}:
+                        if priority in {0, 1, 10, 40}:
                             manifest["warnings"].append(f"{kind}_omitted: {key}")
                         continue
                     data = _log_excerpt(path)
