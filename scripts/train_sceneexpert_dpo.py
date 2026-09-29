@@ -53,11 +53,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--resume-from-checkpoint", default="")
     parser.add_argument(
         "--profile",
-        choices=("full", "furniture_initial", "furniture_initial_pilot", "pipeline_smoke"),
+        choices=(
+            "full",
+            "furniture_initial",
+            "furniture_initial_pilot",
+            "pipeline_smoke",
+        ),
         default="full",
     )
     parser.add_argument(
-        "--capacity-probe", action="store_true",
+        "--capacity-probe",
+        action="store_true",
         help="Smoke only: train on the longest rendered training pair, without validation.",
     )
     parser.add_argument(
@@ -196,16 +202,27 @@ def _select_capacity_pair(processor: Any, dataset: Any) -> tuple[Any, dict[str, 
     lengths = []
     for row in dataset:
         if row.get("images"):
-            raise ValueError("text capacity probing does not estimate image token expansion")
+            raise ValueError(
+                "text capacity probing does not estimate image token expansion"
+            )
         tools = row.get("tools")
         tools = json.loads(tools) if isinstance(tools, str) else tools
-        lengths.append(max(
-            len(tokenizer.encode(processor.apply_chat_template(
-                row["prompt"] + row[side], tokenize=False, tools=tools,
-                **(row.get("chat_template_kwargs") or {}),
-            ), add_special_tokens=False))
-            for side in ("chosen", "rejected")
-        ))
+        lengths.append(
+            max(
+                len(
+                    tokenizer.encode(
+                        processor.apply_chat_template(
+                            row["prompt"] + row[side],
+                            tokenize=False,
+                            tools=tools,
+                            **(row.get("chat_template_kwargs") or {}),
+                        ),
+                        add_special_tokens=False,
+                    )
+                )
+                for side in ("chosen", "rejected")
+            )
+        )
     if not lengths:
         raise ValueError("capacity probing requires a training pair")
     index = max(range(len(lengths)), key=lengths.__getitem__)
@@ -482,10 +499,19 @@ def main() -> int:
     trainer = DPOTrainer(**trainer_kwargs)
     if trainer.args.use_liger_kernel:
         from scenesmith.scene_expert.slow_memory.fused_policy import (
+            FusedLossOffloadContext,
             completion_only_fused_loss,
         )
 
-        trainer.liger_loss = completion_only_fused_loss(trainer.liger_loss)
+        offload_context = None
+        if trainer.args.activation_offloading:
+            offload_context = FusedLossOffloadContext(
+                trainer.maybe_activation_offload_context
+            )
+            trainer.maybe_activation_offload_context = offload_context
+        trainer.liger_loss = completion_only_fused_loss(
+            trainer.liger_loss, offload_context=offload_context
+        )
     resume = args.resume_from_checkpoint or train_cfg.get("resume_from_checkpoint")
     train_result = trainer.train(resume_from_checkpoint=resume or None)
     train_metrics = dict(train_result.metrics)
@@ -598,7 +624,9 @@ def main() -> int:
         print("Pipeline smoke completed; this adapter is not an effectiveness result.")
         return 0
     if args.profile == "furniture_initial_pilot":
-        print("Exploratory pilot completed; inspect validation metrics. Adapter is not promotable.")
+        print(
+            "Exploratory pilot completed; inspect validation metrics. Adapter is not promotable."
+        )
         return 0
     return 0 if promotion["promotable"] else 3
 
