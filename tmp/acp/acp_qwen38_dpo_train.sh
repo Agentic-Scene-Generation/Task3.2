@@ -10,6 +10,7 @@ BASE_MODEL="${BASE_MODEL:-/mnt/afs/task3_2/share_model/Qwen/Qwen3.8-27B}"
 [[ -f "$BASE_MODEL/config.json" ]] || { echo "Missing local base model: $BASE_MODEL" >&2; exit 2; }
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}" TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 export TOKENIZERS_PARALLELISM=false
+export PYTHONUNBUFFERED=1
 DATASET_DIR="${DATASET_DIR:-$PROJECT_ROOT/outputs/slow_memory/$CAMPAIGN_ID/datasets/verified_relative_v1}"
 OUTPUT_DIR="$PROJECT_ROOT/outputs/slow_memory/$RUN_ID"
 PROFILE="${PROFILE:-furniture_initial}"
@@ -28,10 +29,29 @@ if [[ -n "${RESUME_CHECKPOINT:-}" ]]; then
 else
   mkdir "$OUTPUT_DIR" || { echo 'Use a fresh RUN_ID or an explicit RESUME_CHECKPOINT.' >&2; exit 2; }
 fi
+supervisor_pid=""
+interrupt_training() {
+  local code="$1"
+  trap '' TERM INT HUP
+  if [[ -n "$supervisor_pid" ]]; then
+    kill -TERM "$supervisor_pid" 2>/dev/null || true
+    wait "$supervisor_pid" 2>/dev/null || true
+  fi
+  exit "$code"
+}
+trap 'interrupt_training 143' TERM
+trap 'interrupt_training 130' INT
+trap 'interrupt_training 129' HUP
 finish() {
   local training_exit=$? package_exit=0
   trap - EXIT
   set +e
+  # A shell/platform exit of zero is not proof that Python reached finalization.
+  if [[ "$training_exit" == 0 ]]; then
+    "$TRAIN_PYTHON" -u scripts/supervise_sceneexpert_dpo.py --output-dir "$OUTPUT_DIR" --check \
+      > "$OUTPUT_DIR/completion_check.json" 2>&1
+    training_exit=$?
+  fi
   printf 'exit_code=%s\n' "$training_exit" > "$OUTPUT_DIR/exit_status.env"
   local invocation package_path
   invocation="$(date -u +%Y%m%dT%H%M%SZ)_$$"
@@ -59,10 +79,14 @@ finish() {
   exit "$package_exit"
 }
 trap finish EXIT
-"$TRAIN_PYTHON" scripts/train_sceneexpert_dpo.py \
+"$TRAIN_PYTHON" -u scripts/train_sceneexpert_dpo.py \
   --model "$BASE_MODEL" --dataset-dir "$DATASET_DIR" --output-dir "$OUTPUT_DIR" \
   --profile "$PROFILE" "${probe_args[@]}" --dry-run 2>&1 | tee "$OUTPUT_DIR/preflight.log"
-"$TRAIN_PYTHON" scripts/train_sceneexpert_dpo.py \
+"$TRAIN_PYTHON" -u scripts/supervise_sceneexpert_dpo.py --output-dir "$OUTPUT_DIR" -- \
+  "$TRAIN_PYTHON" -u scripts/train_sceneexpert_dpo.py \
   --model "$BASE_MODEL" --dataset-dir "$DATASET_DIR" --output-dir "$OUTPUT_DIR" \
   --profile "$PROFILE" "${probe_args[@]}" "${resume_args[@]}" \
-  2>&1 | tee "$OUTPUT_DIR/train.log"
+  &
+supervisor_pid=$!
+wait "$supervisor_pid"
+supervisor_pid=""

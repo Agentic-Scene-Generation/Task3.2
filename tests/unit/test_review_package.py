@@ -120,6 +120,15 @@ def test_pair_snapshot_reports_missing_end_markers_without_claiming_success(
     ) is not finalized
 
 
+def test_interrupted_training_is_classified_with_missing_final_manifest(tmp_path: Path):
+    _write(tmp_path, f"{RESULTS}/effective_config.json")
+    _write(tmp_path, f"{RESULTS}/exit_status.env", b"exit_code=0\n")
+    summary, manifest, _ = _bundle(tmp_path)
+    assert summary['finalization']['mode'] == 'dpo_training'
+    assert summary['finalization']['state'] == 'finalization_markers_missing'
+    assert f"{RESULTS}/training_manifest.json" in manifest['finalization']['missing_from_package']
+
+
 @pytest.mark.parametrize("mode", ["rescore", "audit"])
 def test_short_jobs_do_not_require_collection_end_markers(tmp_path: Path, mode: str):
     pair = f"{RESULTS}/runs/paired_initial"
