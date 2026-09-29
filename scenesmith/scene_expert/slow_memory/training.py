@@ -21,16 +21,19 @@ def apply_training_profile(config: dict[str, Any], profile: str) -> dict[str, An
     result = deepcopy(config)
     if profile == "full":
         return result
-    if profile not in {"furniture_initial", "pipeline_smoke"}:
+    if profile not in {"furniture_initial", "furniture_initial_pilot", "pipeline_smoke"}:
         raise ValueError("unknown training profile")
     smoke = profile == "pipeline_smoke"
+    pilot = profile == "furniture_initial_pilot"
+    minimum_train = 1 if smoke else (8 if pilot else 16)
     result["training_profile"] = profile
     result.setdefault("data", {}).update(
-        minimum_train_pairs=1 if smoke else 16,
-        minimum_unique_train_groups=1 if smoke else 16,
+        minimum_train_pairs=minimum_train,
+        minimum_unique_train_groups=minimum_train,
+        minimum_validation_pairs=4 if pilot else 0,
         minimum_unique_train_stages=1,
         required_task_types=["designer_initial"],
-        minimum_pairs_per_required_task_type=1 if smoke else 16,
+        minimum_pairs_per_required_task_type=minimum_train,
         maximum_single_task_type_ratio=1.0,
         allow_unsafe_small_dataset=False,
     )
@@ -50,11 +53,12 @@ def apply_training_profile(config: dict[str, Any], profile: str) -> dict[str, An
         precompute_ref_log_probs=False,
         prediction_loss_only=True,
     )
+    if smoke or pilot:
+        result.setdefault("publish", {})["push_to_hub"] = False
     if smoke:
         result["training"].update(
             max_steps=2, gradient_accumulation_steps=1, save_steps=2
         )
-        result.setdefault("publish", {})["push_to_hub"] = False
     return result
 
 
@@ -258,6 +262,12 @@ def validate_training_request(
         errors.append("quality gate requires a non-empty validation split")
     if gate_cfg.get("require_test", True) and split_stats["test"]["pair_count"] == 0:
         errors.append("quality gate requires a non-empty held-out test split")
+    minimum_validation = int(data_cfg.get("minimum_validation_pairs", 0) or 0)
+    if split_stats["validation"]["pair_count"] < minimum_validation:
+        errors.append(
+            f"validation split has {split_stats['validation']['pair_count']} pairs; "
+            f"at least {minimum_validation} are required"
+        )
 
     manifest_path = dataset_dir / "manifest.json"
     manifest: dict[str, Any] = {}
@@ -289,6 +299,7 @@ def validate_training_request(
                     errors.append(f"dataset pairing policy does not enforce {key}")
             if config.get("training_profile") in {
                 "furniture_initial",
+                "furniture_initial_pilot",
                 "pipeline_smoke",
             }:
                 if manifest.get("completion_view") != "first_turn":
@@ -378,10 +389,6 @@ def evaluate_training_promotion(
     eval_loss = evaluation_metrics.get("eval_loss")
     eval_loss = float(eval_loss) if isinstance(eval_loss, (int, float)) else None
     reasons: list[str] = []
-    if config.get("training_profile") == "pipeline_smoke":
-        reasons.append(
-            "pipeline_smoke verifies infrastructure only and cannot be promoted"
-        )
     if gate.get("require_validation", True) and accuracy is None:
         reasons.append("TRL validation preference accuracy was not reported")
     minimum_accuracy = float(gate.get("minimum_preference_accuracy", 0.55))
@@ -393,9 +400,24 @@ def evaluate_training_promotion(
         )
     if eval_loss is not None and not math.isfinite(eval_loss):
         reasons.append("validation loss is not finite")
+    offline_validation_passed = not reasons
+    profile = config.get("training_profile")
+    if profile == "pipeline_smoke":
+        reasons.append(
+            "pipeline_smoke verifies infrastructure only and cannot be promoted"
+        )
+    if profile == "furniture_initial_pilot":
+        reasons.append(
+            "furniture_initial_pilot is exploratory small-data training; "
+            "it cannot be promoted or establish scene-generation effectiveness"
+        )
     return {
         "promotable": not reasons,
-        "status": "candidate_accepted" if not reasons else "candidate_rejected",
+        "status": (
+            "pilot_only" if profile == "furniture_initial_pilot"
+            else ("candidate_accepted" if not reasons else "candidate_rejected")
+        ),
+        "offline_validation_passed": offline_validation_passed,
         "reasons": reasons,
         "observed_preference_accuracy": accuracy,
         "minimum_preference_accuracy": minimum_accuracy,

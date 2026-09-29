@@ -53,15 +53,22 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--resume-from-checkpoint", default="")
     parser.add_argument(
         "--profile",
-        choices=("full", "furniture_initial", "pipeline_smoke"),
+        choices=("full", "furniture_initial", "furniture_initial_pilot", "pipeline_smoke"),
         default="full",
+    )
+    parser.add_argument(
+        "--capacity-probe", action="store_true",
+        help="Smoke only: train on the longest rendered training pair, without validation.",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Validate config and dataset without importing CUDA libraries.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.capacity_probe and args.profile != "pipeline_smoke":
+        parser.error("--capacity-probe requires --profile pipeline_smoke")
+    return args
 
 
 def _file_sha256(path: Path) -> str:
@@ -181,6 +188,33 @@ def _audit_template_boundaries(processor: Any, datasets: list[Any]) -> dict[str,
                 stats["max_text_completion_tokens"], *(len(x) for x in completions)
             )
     return stats
+
+
+def _select_capacity_pair(processor: Any, dataset: Any) -> tuple[Any, dict[str, int]]:
+    """Probe the longest text training pair without ever training on validation."""
+    tokenizer = getattr(processor, "tokenizer", processor)
+    lengths = []
+    for row in dataset:
+        if row.get("images"):
+            raise ValueError("text capacity probing does not estimate image token expansion")
+        tools = row.get("tools")
+        tools = json.loads(tools) if isinstance(tools, str) else tools
+        lengths.append(max(
+            len(tokenizer.encode(processor.apply_chat_template(
+                row["prompt"] + row[side], tokenize=False, tools=tools,
+                **(row.get("chat_template_kwargs") or {}),
+            ), add_special_tokens=False))
+            for side in ("chosen", "rejected")
+        ))
+    if not lengths:
+        raise ValueError("capacity probing requires a training pair")
+    index = max(range(len(lengths)), key=lengths.__getitem__)
+    return dataset.select([index]), {
+        "source_train_row_index": index,
+        "source_train_pair_count": len(lengths),
+        "padded_text_sequence_tokens": lengths[index],
+        "selected_train_pair_count": 1,
+    }
 
 
 def _build_model_and_processor(
@@ -412,6 +446,13 @@ def main() -> int:
         config, preflight["model_name_or_path"]
     )
     _verify_processing_contract(processor, dataset_features=dataset_features)
+    capacity_probe = None
+    if args.capacity_probe:
+        train_dataset, capacity_probe = _select_capacity_pair(processor, train_dataset)
+        eval_dataset = None
+        (output_dir / "capacity_probe.json").write_text(
+            json.dumps(capacity_probe, indent=2), encoding="utf-8"
+        )
     template_audit = _audit_template_boundaries(
         processor, [train_dataset, eval_dataset]
     )
@@ -470,6 +511,8 @@ def main() -> int:
     if eval_dataset is not None:
         evaluation_metrics = dict(trainer.evaluate())
         trainer.save_metrics("eval", evaluation_metrics)
+        if not math.isfinite(float(evaluation_metrics.get("eval_loss", float("nan")))):
+            raise RuntimeError("DPO validation did not report a finite loss")
 
     adapter_dir = output_dir / "adapter"
     trainer.save_model(str(adapter_dir))
@@ -510,6 +553,7 @@ def main() -> int:
             )
         },
         "dataset_features": dataset_features,
+        "capacity_probe": capacity_probe,
         "template_boundary_audit": template_audit,
         "use_liger_kernel": trainer.args.use_liger_kernel,
         "loss_projection": (
@@ -550,6 +594,9 @@ def main() -> int:
     print(json.dumps(manifest, indent=2, ensure_ascii=False))
     if args.profile == "pipeline_smoke":
         print("Pipeline smoke completed; this adapter is not an effectiveness result.")
+        return 0
+    if args.profile == "furniture_initial_pilot":
+        print("Exploratory pilot completed; inspect validation metrics. Adapter is not promotable.")
         return 0
     return 0 if promotion["promotable"] else 3
 

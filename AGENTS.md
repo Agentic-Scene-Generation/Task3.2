@@ -645,13 +645,24 @@ explicitly requested branch change. Stage only the intended task changes. Verify
 the push result and report any failure rather than claiming synchronization.
 This convention does not authorize force-pushing or overwriting unrelated work.
 
-ACP/server run commands must contain no Git operations. The user manually
-synchronizes the server code; collection must work without Git access or `.git`
-metadata. Use source-content fingerprints for runtime reproducibility instead
-of requiring a clean Git checkout. Local development commit/push delivery above
-remains in effect.
+ACP experiment commands must contain no Git operations; collection must work
+without Git access or `.git` metadata. Use source-content fingerprints for runtime
+reproducibility instead of requiring a clean Git checkout.
+
+For maintenance, synchronize local changes to CCI before each round of remote
+validation or experiments. Verify both tracked file contents and the commit/index
+state, not just copied files. When server Git networking is unavailable, transfer
+an offline bundle of the committed changes and fast-forward the server checkout.
+Preserve and reconcile any remote edits into an English local commit and push;
+never discard them or leave file-only changes uncommitted. Report synchronization
+only after matching HEADs and a clean intended worktree have been verified.
 
 ## Experiment Delivery Convention
+
+Autonomous CCI work is limited to at most one GPU and an estimated elapsed time
+of at most one hour. Work requiring more GPUs or more time must be delivered as
+an ACP command for the user to submit. Do not start a long job on CCI merely
+because it can run unattended.
 
 Every next-step experiment plan must include its runnable ACP command and a
 matching lightweight results-packaging command/script. ACP commands must contain
