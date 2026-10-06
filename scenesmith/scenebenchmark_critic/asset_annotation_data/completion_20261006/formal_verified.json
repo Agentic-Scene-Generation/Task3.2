@@ -1,0 +1,16 @@
+{
+  "counts": {
+    "embedding_unknown_implicit_no_style_text": 2605,
+    "front_nonempty_and_current": 37186,
+    "unknown_has_actual_max5_record": 2618,
+    "shared_style_record_sha_verified": 4786
+  },
+  "total": 37186,
+  "style_ids_match_active_embedding": true,
+  "embedding_comparison_policy": "explicit_style_ids_exact_match; absence_of_style_text_disclosed_as_unknown_not_explicit_fallback_encoding",
+  "non_generated_style_contract_valid": true,
+  "live_front_manifest_current": true,
+  "semantic_acceptance_complete": false,
+  "pending_asset_count": 2350,
+  "category_embedding_refresh_required_for_this_metadata_change": 34
+}

@@ -1,0 +1,62 @@
+{
+  "schema_version": "formal_annotation_completion@1.0",
+  "time": 1791240083.374706,
+  "total": 37186,
+  "by_source": {
+    "hssd": {
+      "total": 10963,
+      "missing_value_fields": {
+        "operation_space_ref": 9545
+      }
+    },
+    "3dfuture": {
+      "total": 14823,
+      "missing_value_fields": {}
+    },
+    "others": {
+      "total": 5564,
+      "missing_value_fields": {}
+    },
+    "generated": {
+      "total": 5836,
+      "missing_value_fields": {
+        "affordance_ref": 391,
+        "interaction_clearance": 1574,
+        "operation_space_ref": 1574,
+        "asset_physics": 1574
+      }
+    }
+  },
+  "style_counts": {
+    "unknown_style": 2618,
+    "explicit": 34568
+  },
+  "source_sha256": {
+    "hssd_annotation_lookup.json.gz": "8ba6dcca2c0e3727630c1af209b664eaf5ef6db342fb08fde83542cb3b505393",
+    "3dfuture/3dfuture_annotation_lookup.json.gz": "af0187c3608bbe647db9b59f35be08cc10947ef160fb09d9e54aa1f3464a46b2",
+    "external/others_annotation_lookup.json.gz": "f6c39dbb9d66a12f9c93063a3197a22d56513dc48f1070e39a807a1707a7ab14",
+    "generated_annotations.json.gz": "8d13d8d818fb5a3f971d20078f408b759aa3da96774bd095eaf0cf24abff96e5",
+    "asset_style_annotations_v2.shared.json.gz": "0e37f8776c63be6bdcc30b0efc299e49c296bc4a7eef1f29bcdf7baf684ad703"
+  },
+  "formal_view": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_delivery_20260909/formal_annotation_completion_20261004/all_asset_formal_annotations.json.gz",
+  "formal_view_sha256": "f97685f52d7a133b54c780733f904016b946f078550c1bb734d8f98a6c32ae57",
+  "embedding_active_index": {
+    "collection": "/data/task3_2/share_data/scenesmith/embedding_release_20261003/restored_index",
+    "previous_collection_retained": "/data/task3_2/share_data/scenesmith/embedding_release_20260922/restored_index",
+    "manifest": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_delivery_20260909/embedding_refresh_20261003/embedding_inputs.jsonl",
+    "portable_package": "/data/task3_2/share_data/scenesmith/embedding_release_20261003/portable",
+    "count": 37186,
+    "model_changed": false,
+    "vectors_changed": true,
+    "published_date": "2026-10-04",
+    "verification": "/data/task3_2/share_data/scenesmith/embedding_release_20261003/REBUILD_VERIFIED.json"
+  },
+  "semantic_acceptance_complete": false,
+  "frozen_non_generated_lookups_not_overwritten": true,
+  "rolling_generated_lookup_backfilled": true,
+  "pending_asset_count": 2350,
+  "not_applicable_counts": {
+    "hssd_static_operation_space_ref": 8934
+  },
+  "pending_annotation_queue": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_delivery_20260909/formal_annotation_completion_20261004/PENDING_ANNOTATION_QUEUE.json.gz"
+}

@@ -1,0 +1,10 @@
+{
+ "schema_version": "asset_source_registry@1.0",
+ "all_semantics": "annotation-complete sources only; use registered for every cataloged source",
+ "sources": {
+  "hssd": {"lookup": "hssd_annotation_lookup.json.gz", "included_in_all": true, "integration_status": "annotation_complete"},
+  "3dfuture": {"lookup": "3dfuture/3dfuture_annotation_lookup.json.gz", "included_in_all": true, "integration_status": "annotation_complete"},
+  "others": {"lookup": "external/others_annotation_lookup.json.gz", "included_in_all": true, "integration_status": "annotation_complete"},
+  "generated": {"lookup": "generated_annotations.json.gz", "included_in_all": false, "integration_status": "annotation_pending_acceptance"}
+ }
+}
