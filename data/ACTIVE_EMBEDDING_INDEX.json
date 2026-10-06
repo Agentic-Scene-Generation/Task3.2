@@ -1,0 +1,15 @@
+{
+  "collection": "/data/task3_2/share_data/scenesmith/embedding_release_20261003/restored_index",
+  "previous_collection_retained": "/data/task3_2/share_data/scenesmith/embedding_release_20260922/restored_index",
+  "manifest": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_delivery_20260909/embedding_refresh_20261003/embedding_inputs.jsonl",
+  "portable_package": "/data/task3_2/share_data/scenesmith/embedding_release_20261003/portable",
+  "count": 37186,
+  "model_changed": false,
+  "vectors_changed": true,
+  "published_date": "2026-10-04",
+  "verification": "/data/task3_2/share_data/scenesmith/embedding_release_20261003/REBUILD_VERIFIED.json",
+  "portable_repository_path": "data/embedding_release_20261003/portable",
+  "annotation_publication": "annotation_completion_20261006",
+  "category_text_refresh_pending": 34,
+  "new_metric_candidate_paths_not_rebound": true
+}

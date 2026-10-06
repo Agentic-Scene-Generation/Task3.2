@@ -1,0 +1,191 @@
+{
+  "schema": "portable_embedding@1",
+  "count": 37186,
+  "dimension": 2048,
+  "dtype": "float32",
+  "signature": {
+    "input_sha256": "2a758e3674758358060325f024a05e863ebe7f0844de776f7ef98a9269652699",
+    "model_id": "Qwen3-VL-Embedding-2B-Q8_0_llamacpp_0b5be7e4_cuda12_sm90",
+    "dimension": 2048,
+    "base_url": "http://127.0.0.1:8020"
+  },
+  "files": [
+    {
+      "name": "records.jsonl.gz",
+      "sha256": "1db84b1ada9c842f7308829b009b146745cd8a7657707457260180d02346b4ba"
+    },
+    {
+      "name": "vectors_000.npy",
+      "sha256": "dfbb7cb5b5fbb4e18b07c8ba9e0cac684d680afec39d80ebdcd88aaf75ec2b42"
+    },
+    {
+      "name": "vectors_001.npy",
+      "sha256": "277dcae25afd0ce5f5c04c4c2534408b2830f2a15ee7767b79f70d61126dfce5"
+    },
+    {
+      "name": "vectors_002.npy",
+      "sha256": "548621089eea3ebbef990ce36a842ed4dccb6ebfdc662a4f55e54e49bdd8cc4b"
+    },
+    {
+      "name": "vectors_003.npy",
+      "sha256": "0643f137cb575a849cc3d2f01b0c4ba413557d1715519c08755aa652cbfe59af"
+    },
+    {
+      "name": "vectors_004.npy",
+      "sha256": "aa5948e85de8d0c281444adb0eec093edc9400807b629b5b5b068a33dd408bdd"
+    },
+    {
+      "name": "vectors_005.npy",
+      "sha256": "e72e847f6fb78d275f26ca9e3beb47c3c3c495b056f5e277bbf654b52f76948f"
+    },
+    {
+      "name": "vectors_006.npy",
+      "sha256": "f0e89a2cb49860844a4e59056bc8d718e59c509c58fc424995549f4c3d9f5340"
+    },
+    {
+      "name": "vectors_007.npy",
+      "sha256": "6f0bdbb8809657bccd30096ad9288eb342a0ca3d10f5b04cc7c8ca22e99a8194"
+    },
+    {
+      "name": "vectors_008.npy",
+      "sha256": "28314f00da8354f9f326701edf6236e7974e3eec711d642a0c0d14bc087956ad"
+    },
+    {
+      "name": "vectors_009.npy",
+      "sha256": "70b1dca1ae5f65ca847e84cdc808f6f3de71fd8ba893fc5e25db3b3e9fbcc6ed"
+    },
+    {
+      "name": "vectors_010.npy",
+      "sha256": "99d1411fd735c2641152e91f6a5d375048d85649777452ada17793d6a49d0ec1"
+    },
+    {
+      "name": "vectors_011.npy",
+      "sha256": "1876a727f435104827adaa78a2b4bd186ac669225d64890bfdecd85522fd65de"
+    },
+    {
+      "name": "vectors_012.npy",
+      "sha256": "15345baa28c212b7c7764a9bd156665aabed97088af0c0ed16ec175a403ee44a"
+    },
+    {
+      "name": "vectors_013.npy",
+      "sha256": "043d7faf6b0c90e7bad9c11bb07ac0b35c202030b964c67ba6d4e271b4e18fb4"
+    },
+    {
+      "name": "vectors_014.npy",
+      "sha256": "df99491d72f5a1e7c352b432db1975da99fd506a7e85be465f32955e4a334d9d"
+    },
+    {
+      "name": "vectors_015.npy",
+      "sha256": "f2db329543660ab98ae8e519837e5a8256dc5010004bf8ef5e7f70410f426c7a"
+    },
+    {
+      "name": "vectors_016.npy",
+      "sha256": "d35df07ad62b5dbe0fe52984ec837408c87768034d5da941ee8b2303d5a0a134"
+    },
+    {
+      "name": "vectors_017.npy",
+      "sha256": "9ad0ccdfbc1459ca2386b6f09e2847beb0c26e083db457cc3e8ebd58d1383efb"
+    },
+    {
+      "name": "vectors_018.npy",
+      "sha256": "763cebfe117bf581fb88d70595691ce5a6df64341df9ab4f656960488163c1c3"
+    }
+  ],
+  "shards": [
+    {
+      "file": "vectors_000.npy",
+      "start": 0,
+      "count": 2048
+    },
+    {
+      "file": "vectors_001.npy",
+      "start": 2048,
+      "count": 2048
+    },
+    {
+      "file": "vectors_002.npy",
+      "start": 4096,
+      "count": 2048
+    },
+    {
+      "file": "vectors_003.npy",
+      "start": 6144,
+      "count": 2048
+    },
+    {
+      "file": "vectors_004.npy",
+      "start": 8192,
+      "count": 2048
+    },
+    {
+      "file": "vectors_005.npy",
+      "start": 10240,
+      "count": 2048
+    },
+    {
+      "file": "vectors_006.npy",
+      "start": 12288,
+      "count": 2048
+    },
+    {
+      "file": "vectors_007.npy",
+      "start": 14336,
+      "count": 2048
+    },
+    {
+      "file": "vectors_008.npy",
+      "start": 16384,
+      "count": 2048
+    },
+    {
+      "file": "vectors_009.npy",
+      "start": 18432,
+      "count": 2048
+    },
+    {
+      "file": "vectors_010.npy",
+      "start": 20480,
+      "count": 2048
+    },
+    {
+      "file": "vectors_011.npy",
+      "start": 22528,
+      "count": 2048
+    },
+    {
+      "file": "vectors_012.npy",
+      "start": 24576,
+      "count": 2048
+    },
+    {
+      "file": "vectors_013.npy",
+      "start": 26624,
+      "count": 2048
+    },
+    {
+      "file": "vectors_014.npy",
+      "start": 28672,
+      "count": 2048
+    },
+    {
+      "file": "vectors_015.npy",
+      "start": 30720,
+      "count": 2048
+    },
+    {
+      "file": "vectors_016.npy",
+      "start": 32768,
+      "count": 2048
+    },
+    {
+      "file": "vectors_017.npy",
+      "start": 34816,
+      "count": 2048
+    },
+    {
+      "file": "vectors_018.npy",
+      "start": 36864,
+      "count": 322
+    }
+  ]
+}
