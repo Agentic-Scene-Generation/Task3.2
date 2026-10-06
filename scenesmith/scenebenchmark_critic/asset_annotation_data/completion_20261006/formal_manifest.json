@@ -1,6 +1,6 @@
 {
   "schema_version": "formal_annotation_completion@1.0",
-  "time": 1791240083.374706,
+  "time": 1791281920.3614306,
   "total": 37186,
   "by_source": {
     "hssd": {
@@ -32,14 +32,14 @@
     "explicit": 34568
   },
   "source_sha256": {
-    "hssd_annotation_lookup.json.gz": "8ba6dcca2c0e3727630c1af209b664eaf5ef6db342fb08fde83542cb3b505393",
-    "3dfuture/3dfuture_annotation_lookup.json.gz": "af0187c3608bbe647db9b59f35be08cc10947ef160fb09d9e54aa1f3464a46b2",
-    "external/others_annotation_lookup.json.gz": "f6c39dbb9d66a12f9c93063a3197a22d56513dc48f1070e39a807a1707a7ab14",
-    "generated_annotations.json.gz": "8d13d8d818fb5a3f971d20078f408b759aa3da96774bd095eaf0cf24abff96e5",
+    "hssd_annotation_lookup.json.gz": "37a6de030a170b0b82af067985bb79eb36e0c59fc379ce77aa2dd8637dcd9724",
+    "3dfuture/3dfuture_annotation_lookup.json.gz": "06eb017f39632f7dce43ffbd3b3a13dc5c4a6dc39b09fd4fb104cb54e718ddbb",
+    "external/others_annotation_lookup.json.gz": "1b0f2bd0ac02e52ca5574eb863a46dfd9d837c2515f3861db688cd6598e560b2",
+    "generated_annotations.json.gz": "bd0e2f2bc5811906d630b4dbbb3e59f4550cbb578ae0e41f40221729493783f7",
     "asset_style_annotations_v2.shared.json.gz": "0e37f8776c63be6bdcc30b0efc299e49c296bc4a7eef1f29bcdf7baf684ad703"
   },
   "formal_view": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_delivery_20260909/formal_annotation_completion_20261004/all_asset_formal_annotations.json.gz",
-  "formal_view_sha256": "f97685f52d7a133b54c780733f904016b946f078550c1bb734d8f98a6c32ae57",
+  "formal_view_sha256": "5955f2c6afa03c009a09d04c265712ed6f2d7d227087e0ac19391ff386cc4a2c",
   "embedding_active_index": {
     "collection": "/data/task3_2/share_data/scenesmith/embedding_release_20261003/restored_index",
     "previous_collection_retained": "/data/task3_2/share_data/scenesmith/embedding_release_20260922/restored_index",
@@ -54,7 +54,7 @@
   "semantic_acceptance_complete": false,
   "frozen_non_generated_lookups_not_overwritten": true,
   "rolling_generated_lookup_backfilled": true,
-  "pending_asset_count": 2350,
+  "pending_asset_count": 2840,
   "not_applicable_counts": {
     "hssd_static_operation_space_ref": 8934
   },

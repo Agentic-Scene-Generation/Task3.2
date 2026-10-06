@@ -1,0 +1,17 @@
+# Front定向复核正式覆盖（2026-10-06）
+
+用户授权将尚未正式覆盖的4,449件复核全部回填，随后发布。本次不是重新请求Luna，不改变风格或模型几何。
+
+正式回填HSSD1,522、3DFuture1,203、Others967、生成757件；实际水平轴改变678件。全库37,186件真实资产均保留非空Front，另2件gcheck不入库存。
+
+本批：语义水平单正面2,692、多个合理水平面选择代表339、明确固有竖直面但水平摆放fallback579、无唯一正面398、不确定405、多合理但没有水平候选36。所有原始判断、多个合理选项、竖直固有面、置信度、fallback原因和共享证据路径保留；不能把非语义fallback当已确认正面。
+
+原正式标签保留在canonical_front_v6_previous；修改前字节备份位于/mnt/aoss2/codex_backup/front_v6_release_20261006/。逐项发布清单与冻结正式文件在共享根front_v6_release_20261006/。原result.json中的canonical_overwritten=false只表示请求产出时尚未回填，当前以PUBLISHED.json及正式发布指针为准，不倒改原始API证据。
+
+436件已有米制候选的生成资产，以实际GLB顶点和新Front重算规则净空/操作空间，并转换为normalized asset-local Y-up。模型、掩码、物理值和风格不变，空间仍是待独立语义验收的候选。方向变化的其他空间/关系参数若未复验，front_dependent_annotations_status显式标记待复验，正式合并视图的待验收队列亦保留该状态；本次不声称所有空间标注验收齐全。
+
+正式消费：asset_library/data/四来源lookup和canonical_front_required.json.gz。CURRENT_ANNOTATION_RELEASE.json保留原全库release兼容入口，增加FRONT_V6_REVISION_20261006.json增量正式修订，不把未复核的其他资产再次降级。front_roles_v2_vertical_overlay同步，避免旧竖直面覆盖新结果。
+
+验证：4,449件prompt/图片证据哈希关联、规范化重算和坐标链；全部资产方向非空且lookup与overlay逐项一致；实际摄像机矩阵方向、真实图像与模型及消费旋转抽验。它不等价于全库独立准确率认证。已有长期AssetLibrary对象或lru_cache可能仍缓存旧数据，后续消费应新建对象或清理本进程缓存；本次不停止或重启场景/训练/渲染任务。
+
+发布地点：本地共享目录；Task3.2/dev_yz；K-Chronofox/hssd-annotations/main。中文文档均为docs/FRONT_V6_PUBLICATION_20261006_ZH.md。Embedding不重新计算，旧包保留。
