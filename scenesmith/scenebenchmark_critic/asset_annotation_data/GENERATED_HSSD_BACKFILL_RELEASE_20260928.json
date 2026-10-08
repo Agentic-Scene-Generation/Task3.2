@@ -1,0 +1,43 @@
+{
+  "time": 1790576868.6315644,
+  "release": "generated_hssd_candidate_backfill_20260928",
+  "generated_records": 5511,
+  "all_assets": 36861,
+  "field_coverage": {
+    "canonical_front": 5511,
+    "category": 5475,
+    "placement_dof": 5475,
+    "environment_anchors": 5475,
+    "relation_priors": 5475,
+    "geometry_ref": 3624,
+    "affordance_ref": 2266,
+    "self_emission": 3624,
+    "asset_physics": 3624,
+    "asset_quality": 3624,
+    "interaction_clearance": 0,
+    "operation_space_ref": 0
+  },
+  "nonfront_status": {
+    "pending_normalized_annotation": 34,
+    "measured_candidate_pending_semantic_acceptance": 3624,
+    "category_prior_pending_metric_scale_and_semantic_acceptance": 1851,
+    "migration_validation": 2
+  },
+  "snapshot_sha256": {
+    "generated_annotations.json.gz": "2dc688bdcceb37e08cc90cddb6fa4dfb327d06069433683ca8968e66288ccded",
+    "canonical_front_required.json.gz": "3455dfb78a842d81a614423870a0f9ab80c5ef42f204da70407019179d488896",
+    "generated_hssd_parity_candidates.json.gz": "9475163dc4d2a5be22e205df0ef00eaaf731d6f034a0aa22b3ba345227607864",
+    "generated_hssd_candidate_summary.json": "f578b44781e584b994a7c3f2eaedfa975c301556a18b614d1bb823345fddac77",
+    "generated_hssd_stage2_raw_audit.json": "d181441c0ec2d7752049658ab0a07998956741850e4956a45f45ef064aee0bab"
+  },
+  "file_layout": "snapshot files are in the same directory as this manifest",
+  "stage2_raw_audit": {
+    "expected_assets": 2266,
+    "issue_count": 0
+  },
+  "formal_semantic_acceptance": false,
+  "default_scene_route": false,
+  "front_rejudgment_remaining_candidate_not_promoted": true,
+  "embedding_vectors_updated": false,
+  "large_mesh_and_mask_payloads": "shared filesystem only; not Git payload"
+}

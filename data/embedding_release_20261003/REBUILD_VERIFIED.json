@@ -1,0 +1,8 @@
+{
+  "passed": true,
+  "total": 37186,
+  "reused_exact_vectors": 34771,
+  "computed_delta": 2415,
+  "model_unchanged": true,
+  "formal_styles_match_freeze": true
+}

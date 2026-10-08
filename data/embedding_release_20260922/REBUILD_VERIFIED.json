@@ -1,0 +1,7 @@
+{
+  "passed": true,
+  "count": 34969,
+  "all_vectors_equal": true,
+  "all_fields_equal": true,
+  "ann_probes": 9
+}

@@ -1,0 +1,13 @@
+{
+  "root": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_delivery_20260909/generated_hssd_parity_20260927",
+  "expected_assets": 2266,
+  "counts": {
+    "mask_regions": 6890,
+    "empty_masks": 28,
+    "whole_masks": 0,
+    "audited_assets": 2266
+  },
+  "issue_count": 0,
+  "issues": [],
+  "scope": "raw Stage2 masks/labels/points only; no coordinate, metric-scale, relation or semantic acceptance"
+}

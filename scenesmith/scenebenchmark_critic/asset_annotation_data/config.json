@@ -1,0 +1,48 @@
+{
+  "data_root_version": "hssd_asset_library_v1_20260706",
+  "style_overlay_v2": "asset_style_annotations_v2.shared.json.gz",
+  "geometry_roots": {
+    "hssd_materialized": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_assets_20260910",
+    "pm_root": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_assets_20260910/articulated_models",
+    "affordance_glb_root": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_assets_20260910",
+    "3dfuture_raw": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_assets_20260910",
+    "gso_raw": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_assets_20260910",
+    "ycb_raw": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_assets_20260910",
+    "polyhaven_raw": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_assets_20260910",
+    "abo_raw": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_assets_20260910",
+    "objaverse_raw": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_assets_20260910",
+    "smithsonian_raw": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_assets_20260910",
+    "shared_assets": "/data/task3_2/share_data/scenesmith"
+  },
+  "external_annotation_roots": {
+    "operation_space": "/data/task3_2/share_data/scenesmith/all_assets_style_v2_delivery_20260909/asset_library/data/operation_space_external"
+  },
+  "families": [
+    "affordance_labels",
+    "affordance_masks",
+    "part_affordances",
+    "access_directions",
+    "clearance",
+    "relations",
+    "dof",
+    "whitelist_partner",
+    "operation_space",
+    "post_replacement",
+    "canonical_front",
+    "environment_anchors",
+    "self_emission",
+    "asset_physics",
+    "asset_quality",
+    "mesh_topology",
+    "physics_proxy",
+    "asset_style"
+  ],
+  "note": "Annotations are self-contained in this root. Heavy GLB/PM meshes and the operation_space layer stay by reference; rebind via geometry_roots / external_annotation_roots for a different host.",
+  "bundled": {
+    "asset_physics": true,
+    "asset_quality": true,
+    "mesh_topology": true,
+    "physics_proxy": true,
+    "asset_style": true
+  }
+}

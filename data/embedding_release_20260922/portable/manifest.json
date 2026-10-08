@@ -1,0 +1,182 @@
+{
+  "schema": "portable_embedding@1",
+  "count": 34969,
+  "dimension": 2048,
+  "dtype": "float32",
+  "signature": {
+    "input_sha256": "39df357c66486016270bc73c9c3d060f663d94e6c24d8439320540643133110f",
+    "model_id": "Qwen3-VL-Embedding-2B-Q8_0_llamacpp_0b5be7e4_cuda12_sm90",
+    "dimension": 2048,
+    "base_url": "http://127.0.0.1:8020"
+  },
+  "files": [
+    {
+      "name": "records.jsonl.gz",
+      "sha256": "4bf7d9ced98c036801067724f4aabe3da40791fb3966e3614ad8077d8e63bd71"
+    },
+    {
+      "name": "vectors_000.npy",
+      "sha256": "a645fcf9a74e8593333a5566905dfe9ae5b721b50043f180c82ecf3143e5c9d6"
+    },
+    {
+      "name": "vectors_001.npy",
+      "sha256": "1a6a8239a62653a10ee292c36d1d0d1b0cea8a13b262f2216376f8dbe0db805c"
+    },
+    {
+      "name": "vectors_002.npy",
+      "sha256": "342e3f1fdb1794dda3a0ad7b59a1792cf373b064a2814c477911e08c7c164eb9"
+    },
+    {
+      "name": "vectors_003.npy",
+      "sha256": "ba39eee3f735eab20d218b5cbbee19396f7a157352d25a0e152e3ff34d6ee36e"
+    },
+    {
+      "name": "vectors_004.npy",
+      "sha256": "c1b05d67539bcce1d5556219505bbdb645ed41835ad822e33b44c8b03d69205e"
+    },
+    {
+      "name": "vectors_005.npy",
+      "sha256": "1a880cc89bc7b9305772aaead6b02c3a2df6082f62c34357df8621b964a82128"
+    },
+    {
+      "name": "vectors_006.npy",
+      "sha256": "91b63217eab0bb4508074b1d5c300d5c9644da20d17a97861249891865a0c422"
+    },
+    {
+      "name": "vectors_007.npy",
+      "sha256": "9f640506ad84707bdcbe5c98fbfe7b7e2671476299cab79eba1f4a95be05dfc9"
+    },
+    {
+      "name": "vectors_008.npy",
+      "sha256": "1eb1960a913787fb5b4b5ecdc68b4062570b7aef546672acf02037b346c9e20f"
+    },
+    {
+      "name": "vectors_009.npy",
+      "sha256": "418626064910f86777a27f25665b33bbff1e1c44cdcda2e34a0c04cead319ea5"
+    },
+    {
+      "name": "vectors_010.npy",
+      "sha256": "61ac5396b34ffdb64448ddd19090d618b7254fbefb49609608c9930602549b1f"
+    },
+    {
+      "name": "vectors_011.npy",
+      "sha256": "07b4af9aab73165ff3866f0fe2ae33535cbb20e610df089f059b82a024383d69"
+    },
+    {
+      "name": "vectors_012.npy",
+      "sha256": "01c9478aed99c585cbba3af2dff8e8f643835cd04cc4699c2d4aa15e1c364f2d"
+    },
+    {
+      "name": "vectors_013.npy",
+      "sha256": "12923ac7d231443f367642a5ab63e986a18e3ce40f0a94a2da6c1953fd1d7ebc"
+    },
+    {
+      "name": "vectors_014.npy",
+      "sha256": "fc47ba7fb9455844e369acb17577a852c7f37433daf6e97c52c0c71744824aca"
+    },
+    {
+      "name": "vectors_015.npy",
+      "sha256": "e097526a9c9ab80833e9eb8d39ed5349c814139a2b779993758bb648b88e8766"
+    },
+    {
+      "name": "vectors_016.npy",
+      "sha256": "abc3acbcfcdaf9ca7ce932e0ae214bd9e2ca47dcae84cc000fb3415cac250dbf"
+    },
+    {
+      "name": "vectors_017.npy",
+      "sha256": "87a0cb7d5442eec3823158f4c76d570a8689cf8eefe59ee5f58c89033a5cec0a"
+    }
+  ],
+  "shards": [
+    {
+      "file": "vectors_000.npy",
+      "start": 0,
+      "count": 2048
+    },
+    {
+      "file": "vectors_001.npy",
+      "start": 2048,
+      "count": 2048
+    },
+    {
+      "file": "vectors_002.npy",
+      "start": 4096,
+      "count": 2048
+    },
+    {
+      "file": "vectors_003.npy",
+      "start": 6144,
+      "count": 2048
+    },
+    {
+      "file": "vectors_004.npy",
+      "start": 8192,
+      "count": 2048
+    },
+    {
+      "file": "vectors_005.npy",
+      "start": 10240,
+      "count": 2048
+    },
+    {
+      "file": "vectors_006.npy",
+      "start": 12288,
+      "count": 2048
+    },
+    {
+      "file": "vectors_007.npy",
+      "start": 14336,
+      "count": 2048
+    },
+    {
+      "file": "vectors_008.npy",
+      "start": 16384,
+      "count": 2048
+    },
+    {
+      "file": "vectors_009.npy",
+      "start": 18432,
+      "count": 2048
+    },
+    {
+      "file": "vectors_010.npy",
+      "start": 20480,
+      "count": 2048
+    },
+    {
+      "file": "vectors_011.npy",
+      "start": 22528,
+      "count": 2048
+    },
+    {
+      "file": "vectors_012.npy",
+      "start": 24576,
+      "count": 2048
+    },
+    {
+      "file": "vectors_013.npy",
+      "start": 26624,
+      "count": 2048
+    },
+    {
+      "file": "vectors_014.npy",
+      "start": 28672,
+      "count": 2048
+    },
+    {
+      "file": "vectors_015.npy",
+      "start": 30720,
+      "count": 2048
+    },
+    {
+      "file": "vectors_016.npy",
+      "start": 32768,
+      "count": 2048
+    },
+    {
+      "file": "vectors_017.npy",
+      "start": 34816,
+      "count": 153
+    }
+  ]
+}
