@@ -2,7 +2,7 @@
 # Read-only policy diagnostics; never starts training or scene tools.
 set -euo pipefail
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}"
-RUN_ID="${RUN_ID:-qwen38_dpo_policy_audit_023}"
+RUN_ID="${RUN_ID:-qwen38_dpo_policy_audit_024}"
 TRAIN_RUN_ID="${TRAIN_RUN_ID:-qwen38_dpo_pilot_021}"
 [[ "$RUN_ID" =~ ^[a-zA-Z0-9_-]+$ && "$TRAIN_RUN_ID" =~ ^[a-zA-Z0-9_-]+$ ]] || exit 2
 cd "$PROJECT_ROOT"

@@ -66,6 +66,11 @@ def load_diagnostic_source(training_run: Path) -> tuple[dict[str, Any], list[dic
         actual = hashlib.sha256((dataset_dir / name).read_bytes()).hexdigest()
         if actual != expected:
             raise ValueError(f"source dataset changed after training: {name}")
+    validation_scores = manifest.get("evaluation_pair_scores")
+    if validation_scores:
+        path = (training_run / validation_scores["path"]).resolve()
+        if not path.is_relative_to(training_run) or hashlib.sha256(path.read_bytes()).hexdigest() != validation_scores["sha256"]:
+            raise ValueError("source validation pair-score evidence changed after training")
     rows = []
     for split in ("train", "validation"):
         for line in (dataset_dir / f"{split}.jsonl").read_text().splitlines():
@@ -196,3 +201,23 @@ def validation_reproduction(
             passed=abs(loss_difference) <= 0.002 and abs(accuracy_difference) < 1e-8,
         )
     return result
+
+
+def diagnostic_outcome(*, scored_count: int, expected_count: int, fidelity: dict[str, Any]) -> dict[str, Any]:
+    """An audit completes when it measures all pairs, including adverse results.
+
+    Historical reproduction is a reported finding, not a policy promotion gate.
+    Dataset/adapter integrity, finite loss and agreement with native evaluation
+    are mandatory checks performed before this outcome can be constructed.
+    """
+    complete = expected_count > 0 and scored_count == expected_count
+    warnings = (
+        ["historical_validation_reproduction_mismatch"]
+        if fidelity.get("checked") and not fidelity.get("passed") else []
+    )
+    return {
+        "completed": complete, "execution_completed": complete,
+        "status": "incomplete" if not complete else "completed_with_warnings" if warnings else "completed",
+        "failure_reasons": [] if complete else ["selected_pairs_not_fully_evaluated"],
+        "warnings": warnings, "historical_reproduction_blocks_completion": False,
+    }
