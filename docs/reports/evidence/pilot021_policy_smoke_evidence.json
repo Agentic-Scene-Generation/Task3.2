@@ -1,0 +1,27 @@
+{
+  "schema_version": "sceneexpert.dpo_policy_diagnostic.v1",
+  "completed": true,
+  "full_dataset_evaluated": false,
+  "summary": {
+    "pair_count": 1,
+    "target_scope_counts": {
+      "observation_or_plan": 2
+    },
+    "splits": {
+      "train": {
+        "pair_count": 1,
+        "shift_correct_count": 1,
+        "shift_accuracy": 1.0,
+        "mean_shift_margin": 0.6179273054003716,
+        "mean_dpo_loss": 0.4311722218990326
+      }
+    }
+  },
+  "source_validation_reproduction": {
+    "checked": false
+  },
+  "elapsed_seconds": 305.27831892855465,
+  "peak_cuda_memory_gib": 28.451340675354004,
+  "scene_effectiveness_measured": false,
+  "promotable": false
+}
