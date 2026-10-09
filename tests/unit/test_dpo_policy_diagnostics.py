@@ -7,13 +7,13 @@ import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
 from scenesmith.scene_expert.slow_memory.policy_diagnostics import (
     completion_scope, diagnostic_outcome, evaluate_policy_pairs, load_diagnostic_source, pair_score,
-    summarize_scores, validation_reproduction,
+    prepare_training_kernels_for_evaluation, summarize_scores, validation_reproduction,
 )
 
 
@@ -224,3 +224,35 @@ def test_reproduction_mismatch_is_distinct_from_a_complete_evaluation():
     assert not validation_reproduction(summary, original, 8)["checked"]
     summary["splits"]["validation"]["shift_accuracy"] = 3/7
     assert validation_reproduction(summary, original, 7)["passed"]
+
+
+def test_eval_only_replays_the_model_patch_from_the_training_entrypoint(monkeypatch):
+    class Model:
+        def forward(self):
+            return None
+
+        def named_modules(self):
+            return [("", self)]
+
+    model = Model()
+    config = {"cross_entropy": False}
+    seen = []
+
+    def patched_forward():
+        return None
+
+    patched_forward.__module__ = "liger_kernel.transformers.fake_model"
+
+    def patch(actual_model, actual_config):
+        seen.append((actual_model, actual_config))
+        actual_model.forward = patched_forward
+
+    integration = ModuleType("transformers.integrations.liger")
+    integration.apply_liger_kernel = patch
+    monkeypatch.setitem(sys.modules, integration.__name__, integration)
+    trainer = SimpleNamespace(model=model, args=SimpleNamespace(use_liger_kernel=True, liger_kernel_config=config))
+    result = prepare_training_kernels_for_evaluation(trainer)
+    assert seen == [(model, config)]
+    assert result["source_train_entrypoint_setup_replayed"]
+    assert result["patched_forward_modules_before"] == {}
+    assert result["patched_forward_modules_after"] == {patched_forward.__module__: 1}
