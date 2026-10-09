@@ -8,14 +8,14 @@ import hashlib
 import json
 import sys
 import time
-from collections import defaultdict
-from copy import deepcopy
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scenesmith.scene_expert.slow_memory.policy_diagnostics import (
-    load_diagnostic_source, pair_score, summarize_scores,
+    evaluate_policy_pairs, load_diagnostic_source, summarize_scores,
+    validation_reproduction,
 )
 from scenesmith.scene_expert.slow_memory.training_lifecycle import write_json
 
@@ -60,35 +60,37 @@ def main() -> int:
         return 0
 
     import torch
-    from datasets import Dataset
     from peft import set_peft_model_state_dict
     from safetensors.torch import load_file
     from trl import DPOTrainer
     from train_sceneexpert_dpo import (
-        _audit_template_boundaries, _build_model_and_processor, _training_args,
+        _audit_template_boundaries, _build_model_and_processor, _load_json_dataset,
+        _training_args,
     )
-    from scenesmith.scene_expert.slow_memory.fused_policy import completion_only_fused_loss
+    from scenesmith.scene_expert.slow_memory.fused_policy import (
+        FusedLossOffloadContext, completion_only_fused_loss,
+    )
+    from scenesmith.scene_expert.trace_logger import collect_code_provenance
 
     if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
         raise RuntimeError("select exactly one CUDA GPU for this diagnostic")
-    # Retain the original context/template/loss. Only evaluation resource settings change.
-    config = deepcopy(config)
-    config["training"].update(
-        gradient_checkpointing=False, activation_offloading=False,
-        per_device_eval_batch_size=1, prediction_loss_only=True,
-        precompute_ref_log_probs=False, report_to="none", use_liger_kernel=True,
-    )
+    # Reconstruct the source trainer, then let its native evaluate() prepare the
+    # model. A direct prediction_step loop bypasses Trainer/Accelerator setup.
+    train_cfg = config["training"]
+    if (train_cfg.get("per_device_eval_batch_size", 1) != 1
+            or not train_cfg.get("prediction_loss_only")
+            or not train_cfg.get("use_liger_kernel")
+            or train_cfg.get("precompute_ref_log_probs")):
+        raise ValueError("source pilot does not match the supported evaluation protocol")
     write_json(output / "diagnostic_config.json", config)
-    dataset = Dataset.from_list([
-        {key: row[key] for key in ("prompt", "chosen", "rejected", "tools") if key in row}
-        | {"chat_template_kwargs": {"enable_thinking": False}}
-        for row in rows
-    ], on_mixed_types="use_json")
+    train_dataset, eval_dataset, _ = _load_json_dataset(
+        Path(manifest["dataset_manifest"]).parent, visible_action_only=True,
+    )
     model, processor, peft_config, quantization = _build_model_and_processor(config, manifest["model_name_or_path"])
-    write_json(output / "template_boundary_audit.json", _audit_template_boundaries(processor, [dataset]))
+    write_json(output / "template_boundary_audit.json", _audit_template_boundaries(processor, [train_dataset, eval_dataset]))
     trainer = DPOTrainer(
-        model=model, args=_training_args(config, output, True),
-        train_dataset=dataset, eval_dataset=dataset,
+        model=model, args=_training_args(config, output, eval_dataset is not None),
+        train_dataset=train_dataset, eval_dataset=eval_dataset,
         processing_class=processor, peft_config=peft_config,
         quantization_config=quantization,
     )
@@ -101,45 +103,64 @@ def main() -> int:
     missing_lora = [name for name in result.missing_keys if "lora_" in name]
     if missing_lora or result.unexpected_keys:
         raise ValueError(f"adapter load mismatch: {missing_lora}, {result.unexpected_keys}")
+    saved_dtypes = dict(Counter(str(value.dtype) for value in weights.values()))
     del weights
-    trainer.model.eval()
-    trainer.liger_loss = completion_only_fused_loss(trainer.liger_loss)
+    offload_context = None
+    if trainer.args.activation_offloading:
+        offload_context = FusedLossOffloadContext(trainer.maybe_activation_offload_context)
+        trainer.maybe_activation_offload_context = offload_context
+    trainer.liger_loss = completion_only_fused_loss(trainer.liger_loss, offload_context=offload_context)
+    write_json(output / "evaluation_protocol.json", {
+        "entry_point": "DPOTrainer.evaluate", "original_train_validation_splits": True,
+        "source_training_settings_preserved": True,
+        "per_pair_observer_mutates_trainer_metrics": False,
+        "saved_adapter_dtypes": saved_dtypes,
+        "loaded_adapter_dtypes": dict(Counter(
+            str(value.dtype) for name, value in trainer.model.named_parameters() if "lora_" in name
+        )),
+        "torch_version": torch.__version__, "code_provenance": collect_code_provenance(include_git=False),
+    })
     beta = float(config["training"]["beta"])
     scored = []
-    for row, batch in zip(rows, trainer.get_eval_dataloader(), strict=True):
-        trainer._metrics["eval"] = defaultdict(list)
-        counts = batch["completion_mask"][:, 1:].sum(dim=1).tolist()
-        loss, _, _ = trainer.prediction_step(trainer.model, batch, True)
-        metrics = {
-            name: float(trainer._metrics["eval"][name][-1]) for name in (
-                "logps/chosen", "logps/rejected", "rewards/chosen", "rewards/rejected",
-            )
-        }
-        record = {key: row[key] for key in ("pair_id", "task_id", "split", "target_scope")}
-        record["score"] = pair_score(dict(metrics, loss=float(loss)), beta=beta, token_counts=counts)
+
+    def persist_score(record: dict) -> None:
         scored.append(record)
         with (output / "pair_scores.jsonl").open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         write_json(output / "diagnostic_progress.json", {"scored_pairs": len(scored), "expected_pairs": len(rows)})
-        print(f"[diagnostic] {len(scored)}/{len(rows)} {row['split']} margin={record['score']['shift_margin']:.6f}", flush=True)
+        print(f"[diagnostic] {len(scored)}/{len(rows)} {record['split']} margin={record['score']['shift_margin']:.6f}", flush=True)
+
+    native_metrics = {}
+    for split in ("validation", "train"):
+        selected = [row for row in rows if row["split"] == split]
+        if not selected:
+            continue
+        dataset = trainer.eval_dataset if split == "validation" else trainer.train_dataset
+        dataset = dataset.select(range(len(selected)))
+        metrics, _ = evaluate_policy_pairs(
+            trainer, selected, dataset=dataset, beta=beta, on_score=persist_score,
+        )
+        native_metrics[split] = metrics
+        write_json(output / "native_evaluation_metrics.json", native_metrics)
     summary = summarize_scores(scored)
-    validation = summary["splits"].get("validation", {})
     source_validation_count = sum(row["split"] == "validation" for row in source_rows)
-    fidelity = {"checked": validation.get("pair_count") == source_validation_count and source_validation_count > 0}
-    if fidelity["checked"]:
-        original = manifest["evaluation_metrics"]
-        fidelity["loss_difference"] = validation["mean_dpo_loss"] - original["eval_loss"]
-        fidelity["accuracy_difference"] = validation["shift_accuracy"] - original["eval_rewards/accuracies"]
-        fidelity["passed"] = abs(fidelity["loss_difference"]) <= 0.002 and abs(fidelity["accuracy_difference"]) < 1e-8
-    completed = len(scored) == len(rows) and (not fidelity["checked"] or fidelity["passed"])
+    fidelity = validation_reproduction(summary, manifest.get("evaluation_metrics", {}), source_validation_count)
+    execution_completed = len(scored) == len(rows)
+    completed = execution_completed and (not fidelity["checked"] or fidelity["passed"])
+    failure_reasons = [] if completed else ["historical_validation_reproduction_mismatch"]
     write_json(output / "policy_diagnostics.json", {
-        "schema_version": "sceneexpert.dpo_policy_diagnostic.v1",
-        "completed": completed, "full_dataset_evaluated": len(rows) == len(source_rows),
+        "schema_version": "sceneexpert.dpo_policy_diagnostic.v2",
+        "completed": completed, "execution_completed": execution_completed,
+        "full_dataset_evaluated": len(rows) == len(source_rows), "failure_reasons": failure_reasons,
         "summary": summary, "source_validation_reproduction": fidelity,
         "elapsed_seconds": time.monotonic() - started,
         "peak_cuda_memory_gib": torch.cuda.max_memory_allocated() / 1024**3,
         "scene_effectiveness_measured": False, "promotable": False,
     })
+    print("[diagnostic] " + json.dumps({
+        "execution_completed": execution_completed, "completed": completed,
+        "source_validation_reproduction": fidelity, "failure_reasons": failure_reasons,
+    }), flush=True)
     return 0 if completed else 2
 
 

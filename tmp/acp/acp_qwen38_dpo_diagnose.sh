@@ -2,13 +2,13 @@
 # Read-only policy diagnostics; never starts training or scene tools.
 set -euo pipefail
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}"
-RUN_ID="${RUN_ID:-qwen38_dpo_policy_audit_022}"
+RUN_ID="${RUN_ID:-qwen38_dpo_policy_audit_023}"
 TRAIN_RUN_ID="${TRAIN_RUN_ID:-qwen38_dpo_pilot_021}"
 [[ "$RUN_ID" =~ ^[a-zA-Z0-9_-]+$ && "$TRAIN_RUN_ID" =~ ^[a-zA-Z0-9_-]+$ ]] || exit 2
 cd "$PROJECT_ROOT"
 PYTHON_BIN="${PYTHON_BIN:-$PROJECT_ROOT/.venv_dpo/bin/python}"
 OUTPUT="$PROJECT_ROOT/outputs/slow_memory/$RUN_ID"
-[[ ! -e "$OUTPUT" ]] || { echo 'Choose a new RUN_ID; diagnostic results are immutable' >&2; exit 2; }
+[[ ! -e "$OUTPUT" ]] || { echo "RUN_ID=$RUN_ID already exists at $OUTPUT; choose a new RUN_ID to preserve recorded results" >&2; exit 2; }
 export SCENEEXPERT_CODE_PROVENANCE_GIT_ENABLED=false PYTHONUNBUFFERED=1
 LOG_ROOT="$PROJECT_ROOT/tmp/acp_logs/$RUN_ID"
 mkdir -p "$LOG_ROOT"
@@ -32,5 +32,8 @@ fi
 printf 'diagnostic_exit_code=%s\npackage_exit_code=%s\npackage_path=%s\n' \
   "$diagnostic_exit" "$package_exit" "$PACKAGE_PATH" > "$LOG_ROOT/workflow_exit_status.env"
 cat "$LOG_ROOT/workflow_exit_status.env"
+if [[ "$diagnostic_exit" != 0 ]]; then
+  echo "Diagnostic returned $diagnostic_exit; inspect $OUTPUT/policy_diagnostics.json for evaluation completion and reproduction failure, or $LOG_ROOT/diagnostic.log for runtime errors" >&2
+fi
 [[ "$diagnostic_exit" == 0 ]] || exit "$diagnostic_exit"
 exit "$package_exit"

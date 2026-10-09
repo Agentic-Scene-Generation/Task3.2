@@ -7,7 +7,7 @@ import json
 import math
 from collections import Counter
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from scenesmith.scene_expert.slow_memory.training_lifecycle import (
     check_training_completion,
@@ -123,3 +123,76 @@ def summarize_scores(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "mean_dpo_loss": sum(row["score"]["loss"] for row in selected) / len(selected),
             }
     return {"pair_count": len(rows), "target_scope_counts": dict(scopes), "splits": splits}
+
+
+def evaluate_policy_pairs(
+    trainer: Any,
+    rows: list[dict[str, Any]],
+    *,
+    dataset: Any = None,
+    beta: float,
+    on_score: Callable[[dict[str, Any]], None],
+) -> tuple[dict[str, float], list[dict[str, Any]]]:
+    """Observe native evaluation without bypassing preparation or metric logging.
+
+    The pinned trainer exposes batch means, so this observer requires one pair
+    per batch and one process. It never clears or modifies the trainer's metrics.
+    """
+    if trainer.args.per_device_eval_batch_size != 1 or trainer.args.world_size != 1:
+        raise ValueError("pair diagnostics require batch size one and one process")
+    if not rows or len({row["split"] for row in rows}) != 1:
+        raise ValueError("native evaluation must receive one nonempty dataset split")
+    scored: list[dict[str, Any]] = []
+    original = trainer.prediction_step
+    names = ("logps/chosen", "logps/rejected", "rewards/chosen", "rewards/rejected")
+
+    def observe(model: Any, inputs: Any, prediction_loss_only: bool, ignore_keys: Any = None) -> Any:
+        if len(scored) >= len(rows) or inputs["completion_mask"].shape[0] != 2:
+            raise ValueError("evaluation batches do not match the selected policy pairs")
+        before = {name: len(trainer._metrics["eval"].get(name, [])) for name in names}
+        result = original(model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
+        if any(len(trainer._metrics["eval"].get(name, [])) != before[name] + 1 for name in names):
+            raise ValueError("native DPO evaluation did not emit one score per pair")
+        counts = inputs["completion_mask"][:, 1:].sum(dim=1).tolist()
+        metrics = {name: float(trainer._metrics["eval"][name][-1]) for name in names}
+        row = rows[len(scored)]
+        record = {key: row[key] for key in ("pair_id", "task_id", "split", "target_scope")}
+        record["score"] = pair_score(dict(metrics, loss=float(result[0])), beta=beta, token_counts=counts)
+        scored.append(record)
+        on_score(record)
+        return result
+
+    trainer.prediction_step = observe
+    try:
+        metrics = dict(trainer.evaluate(eval_dataset=dataset))
+    finally:
+        trainer.prediction_step = original
+    if len(scored) != len(rows):
+        raise ValueError("native evaluation returned before scoring all selected pairs")
+    aggregate = summarize_scores(scored)["splits"][rows[0]["split"]]
+    for key, expected in (
+        ("eval_loss", aggregate["mean_dpo_loss"]),
+        ("eval_rewards/accuracies", aggregate["shift_accuracy"]),
+        ("eval_rewards/margins", aggregate["mean_shift_margin"]),
+    ):
+        if key not in metrics or not math.isfinite(float(metrics[key])) or abs(metrics[key] - expected) > 1e-6:
+            raise ValueError(f"per-pair scores disagree with native aggregate: {key}")
+    return metrics, scored
+
+
+def validation_reproduction(
+    summary: dict[str, Any], source_metrics: dict[str, float], source_count: int,
+) -> dict[str, Any]:
+    """Keep execution completeness separate from historical numeric fidelity."""
+    validation = summary["splits"].get("validation", {})
+    checked = source_count > 0 and validation.get("pair_count") == source_count
+    result: dict[str, Any] = {"checked": checked}
+    if checked:
+        loss_difference = validation["mean_dpo_loss"] - source_metrics["eval_loss"]
+        accuracy_difference = validation["shift_accuracy"] - source_metrics["eval_rewards/accuracies"]
+        result.update(
+            loss_difference=loss_difference, accuracy_difference=accuracy_difference,
+            loss_tolerance=0.002, accuracy_tolerance=1e-8,
+            passed=abs(loss_difference) <= 0.002 and abs(accuracy_difference) < 1e-8,
+        )
+    return result
