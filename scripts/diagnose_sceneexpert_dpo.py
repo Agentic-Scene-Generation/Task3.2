@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scenesmith.scene_expert.slow_memory.policy_diagnostics import (
     diagnostic_outcome, evaluate_policy_pairs, load_diagnostic_source, summarize_scores,
-    validation_reproduction,
+    prepare_training_kernels_for_evaluation, validation_reproduction,
 )
 from scenesmith.scene_expert.slow_memory.training_lifecycle import write_json
 
@@ -106,6 +106,7 @@ def main() -> int:
         raise ValueError(f"adapter load mismatch: {missing_lora}, {result.unexpected_keys}")
     saved_dtypes = dict(Counter(str(value.dtype) for value in weights.values()))
     del weights
+    kernel_setup = prepare_training_kernels_for_evaluation(trainer)
     offload_context = None
     if trainer.args.activation_offloading:
         offload_context = FusedLossOffloadContext(trainer.maybe_activation_offload_context)
@@ -113,6 +114,7 @@ def main() -> int:
     trainer.liger_loss = completion_only_fused_loss(trainer.liger_loss, offload_context=offload_context)
     write_json(output / "evaluation_protocol.json", {
         "entry_point": "DPOTrainer.evaluate", "original_train_validation_splits": True,
+        "model_kernel_setup": kernel_setup,
         "source_training_settings_preserved": True,
         "per_pair_observer_mutates_trainer_metrics": False,
         "saved_adapter_dtypes": saved_dtypes,

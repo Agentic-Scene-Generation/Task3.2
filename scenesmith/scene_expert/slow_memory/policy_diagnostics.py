@@ -221,3 +221,33 @@ def diagnostic_outcome(*, scored_count: int, expected_count: int, fidelity: dict
         "failure_reasons": [] if complete else ["selected_pairs_not_fully_evaluated"],
         "warnings": warnings, "historical_reproduction_blocks_completion": False,
     }
+
+
+def prepare_training_kernels_for_evaluation(trainer: Any) -> dict[str, Any]:
+    """Replay the model-kernel setup that pinned Trainer.train() performs.
+
+    DPOTrainer's fused loss and the model's patched normalization/MLP kernels
+    are separate. Standalone evaluate() initializes the loss but does not replay
+    the model patch applied at the train entry point in Transformers 5.15.
+    """
+    from transformers.integrations.liger import apply_liger_kernel
+
+    def inventory() -> dict[str, int]:
+        return dict(Counter(
+            module.forward.__module__ for _, module in trainer.model.named_modules()
+            if callable(getattr(module, "forward", None))
+            and str(getattr(module.forward, "__module__", "")).startswith("liger_kernel")
+        ))
+
+    if not trainer.args.use_liger_kernel:
+        raise ValueError("this evaluation requires the source pilot's Liger model kernels")
+    before = inventory()
+    apply_liger_kernel(trainer.model, trainer.args.liger_kernel_config)
+    after = inventory()
+    return {
+        "api": "transformers.integrations.liger.apply_liger_kernel",
+        "kernel_config": trainer.args.liger_kernel_config,
+        "source_train_entrypoint_setup_replayed": True,
+        "patched_forward_modules_before": before,
+        "patched_forward_modules_after": after,
+    }
