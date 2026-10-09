@@ -34,6 +34,8 @@ SUMMARY_FILES = {
     "effective_config.json", "preflight.json", "capacity_probe.json",
     "training_supervisor.json", "training_progress.json", "training_identity.json",
     "completion_check.json", "checkpoint_complete.json",
+    "policy_diagnostics.json", "diagnostic_preflight.json", "diagnostic_config.json",
+    "diagnostic_progress.json",
     "pair_audit.json", "rescore_status.json", "summary.csv",
 }
 
@@ -122,6 +124,12 @@ def _finalization_evidence(
             f"{collection}/campaign.json",
             f"{collection}/campaign_audit.json",
             f"{collection}/campaign_exit_status.env",
+        }
+    elif f"{collection}/diagnostic_preflight.json" in included_paths:
+        mode = "dpo_policy_diagnostic"
+        required = {
+            f"{collection}/policy_diagnostics.json",
+            f"{collection}/exit_status.env",
         }
     elif any(f"{collection}/{name}" in included_paths for name in (
         "training_manifest.json", "effective_config.json", "training_supervisor.json",
