@@ -5,12 +5,15 @@ import json
 import math
 import subprocess
 import sys
+from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from scenesmith.scene_expert.slow_memory.policy_diagnostics import (
-    completion_scope, load_diagnostic_source, pair_score, summarize_scores,
+    completion_scope, evaluate_policy_pairs, load_diagnostic_source, pair_score,
+    summarize_scores, validation_reproduction,
 )
 
 
@@ -115,3 +118,72 @@ def test_summary_does_not_mix_training_and_validation():
     assert summary["splits"]["train"]["shift_accuracy"] == 1
     assert summary["splits"]["validation"]["shift_accuracy"] == 0
     assert summary["target_scope_counts"] == {"observation_or_plan": 4}
+
+
+def test_observer_uses_native_preparation_and_preserves_aggregate_metrics():
+    class Mask:
+        shape = (2, 4)
+
+        def __getitem__(self, key):
+            return self
+
+        def sum(self, dim):
+            return self
+
+        def tolist(self):
+            return [3, 3]
+
+    class Trainer:
+        args = SimpleNamespace(per_device_eval_batch_size=1, world_size=1)
+
+        def __init__(self):
+            self._metrics = {"eval": defaultdict(list)}
+            self.prepared = False
+
+        def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+            assert self.prepared, "evaluation must prepare the model before prediction"
+            for name, value in {
+                "logps/chosen": -1., "logps/rejected": -2.,
+                "rewards/chosen": .1, "rewards/rejected": -.1,
+            }.items():
+                self._metrics["eval"][name].append(value)
+            return math.log1p(math.exp(-.2)), None, None
+
+        def evaluate(self, eval_dataset):
+            self.prepared = True
+            losses = [self.prediction_step(None, {"completion_mask": Mask()}, True)[0]
+                      for _ in eval_dataset]
+            assert len(self._metrics["eval"]["rewards/chosen"]) == 2
+            self._metrics["eval"].clear()
+            return {"eval_loss": sum(losses)/len(losses),
+                    "eval_rewards/accuracies": 1., "eval_rewards/margins": .2}
+
+    trainer = Trainer()
+    original = trainer.prediction_step
+    rows = [{"pair_id": str(i), "task_id": str(i), "split": "validation",
+             "target_scope": {"chosen": {"scope": "text_only"},
+                              "rejected": {"scope": "text_only"}}} for i in range(2)]
+    recorded = []
+    metrics, scores = evaluate_policy_pairs(
+        trainer, rows, dataset=[0, 1], beta=.1, on_score=recorded.append,
+    )
+    assert scores == recorded and len(scores) == 2
+    assert metrics["eval_rewards/accuracies"] == 1
+    assert trainer.prediction_step == original
+
+    trainer.args = SimpleNamespace(per_device_eval_batch_size=2, world_size=1)
+    with pytest.raises(ValueError, match="batch size"):
+        evaluate_policy_pairs(trainer, rows, dataset=[], beta=.1, on_score=recorded.append)
+
+
+def test_reproduction_mismatch_is_distinct_from_a_complete_evaluation():
+    summary = {"splits": {"validation": {"pair_count": 7, "mean_dpo_loss": .71188,
+                                        "shift_accuracy": 2/7}}}
+    original = {"eval_loss": .71043, "eval_rewards/accuracies": 3/7}
+    result = validation_reproduction(summary, original, 7)
+    assert result["checked"] and not result["passed"]
+    assert result["loss_difference"] == pytest.approx(.00145)
+    assert result["accuracy_difference"] == pytest.approx(-1/7)
+    assert not validation_reproduction(summary, original, 8)["checked"]
+    summary["splits"]["validation"]["shift_accuracy"] = 3/7
+    assert validation_reproduction(summary, original, 7)["passed"]
