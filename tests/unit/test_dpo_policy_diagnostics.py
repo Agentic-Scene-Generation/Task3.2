@@ -1,0 +1,117 @@
+"""Diagnostic evidence must remain attached to the frozen source and objective."""
+
+import hashlib
+import json
+import math
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from scenesmith.scene_expert.slow_memory.policy_diagnostics import (
+    completion_scope, load_diagnostic_source, pair_score, summarize_scores,
+)
+
+
+def _json(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+@pytest.fixture
+def source(tmp_path):
+    dataset = tmp_path / "dataset"
+    _json(dataset / "manifest.json", {})
+    calls = [{"role": "assistant", "tool_calls": [{"function": {"name": "observe_scene", "arguments": {}}}]}]
+    row = {"pair_id": "pair1", "task_id": "task1", "chosen": calls, "rejected": calls}
+    (dataset / "train.jsonl").write_text(json.dumps(row) + "\n")
+    (dataset / "validation.jsonl").write_text("")
+    (dataset / "test.jsonl").write_text("")
+    run = tmp_path / "training"
+    _json(run / "training_supervisor.json", {"state": "completed", "exit_code": 0, "execution_id": "own"})
+    _json(run / "training_manifest.json", {
+        "execution_id": "own", "training_profile": "furniture_initial_pilot",
+        "completion": {"completed": True, "optimizer_steps": 8, "expected_optimizer_steps": 8},
+        "train_metrics": {"train_loss": 0.67, "nonzero_lora_b_tensors": 256},
+        "dataset_features": {"has_images": False},
+        "dataset_manifest": str(dataset / "manifest.json"),
+        "adapter_dir": str(run / "adapter"),
+        "dataset_snapshot": {name: hashlib.sha256((dataset/name).read_bytes()).hexdigest()
+                             for name in ("manifest.json", "train.jsonl", "validation.jsonl", "test.jsonl")},
+    })
+    _json(run / "preflight.json", {"dataset_validation": {"split_counts": {"validation": 0}}})
+    _json(run / "effective_config.json", {"training": {"loss_type": "sigmoid"}})
+    _json(run / "train_results.json", {})
+    _json(run / "adapter/adapter_config.json", {})
+    (run / "adapter/adapter_model.safetensors").write_bytes(b"nonempty")
+    return run, dataset
+
+
+def test_changed_dataset_or_incomplete_source_is_rejected(source):
+    run, dataset = source
+    manifest, rows = load_diagnostic_source(run)
+    assert manifest["execution_id"] == "own" and len(rows) == 1
+    (dataset / "train.jsonl").write_text("tampered")
+    with pytest.raises(ValueError, match="dataset changed"):
+        load_diagnostic_source(run)
+    _json(run / "training_supervisor.json", {"state": "failed", "exit_code": 4})
+    with pytest.raises(ValueError, match="supervisor"):
+        load_diagnostic_source(run)
+
+
+def test_source_without_actual_completion_is_rejected(source):
+    run, _ = source
+    (run / "adapter/adapter_model.safetensors").unlink()
+    with pytest.raises(ValueError, match="missing or empty artifact"):
+        load_diagnostic_source(run)
+
+
+def test_dry_run_requires_no_torch_and_never_overwrites_source(source, tmp_path):
+    run, _ = source
+    before = {str(p): p.read_bytes() for p in run.rglob("*") if p.is_file()}
+    script = Path(__file__).resolve().parents[2] / "scripts/diagnose_sceneexpert_dpo.py"
+    cmd = [sys.executable, str(script), "--training-run", str(run),
+           "--output-dir", str(tmp_path / "diagnostic"), "--dry-run"]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert {str(p): p.read_bytes() for p in run.rglob("*") if p.is_file()} == before
+    again = subprocess.run(cmd, capture_output=True, text=True)
+    assert again.returncode != 0 and "immutable" in again.stderr
+
+
+def test_planning_and_unknown_tools_are_not_counted_as_scene_actions():
+    def messages(names):
+        return [{"tool_calls": [{"function": {"name": name}} for name in names]}]
+    assert completion_scope(messages(["observe_scene", "designer_todo_manager"]))["scope"] == "observation_or_plan"
+    assert completion_scope(messages(["generate_assets"]))["scope"] == "scene_design"
+    assert completion_scope(messages(["new_tool"]))["scope"] == "unknown_tool"
+
+
+def test_reference_recovery_and_relative_shift_are_distinct_from_absolute_likelihood():
+    margin = 0.2
+    metrics = {"logps/chosen": -9.0, "logps/rejected": -7.0,
+               "rewards/chosen": 0.1, "rewards/rejected": -0.1,
+               "loss": math.log1p(math.exp(-margin))}
+    score = pair_score(metrics, beta=0.1, token_counts=[90, 70])
+    assert score["reference_logps/chosen"] == -10
+    assert score["reference_logps/rejected"] == -6
+    assert score["shift_correct"] is True  # Chosen likelihood is still below rejected.
+    assert score["policy_mean_logp/chosen"] == -0.1
+    with pytest.raises(ValueError, match="objective"):
+        pair_score(dict(metrics, loss=0.1), beta=0.1, token_counts=[90, 70])
+    with pytest.raises(ValueError, match="nonfinite"):
+        pair_score(dict(metrics, loss=float("nan")), beta=0.1, token_counts=[90, 70])
+
+
+def test_summary_does_not_mix_training_and_validation():
+    rows = [
+        {"split": split, "target_scope": {"chosen": {"scope": "observation_or_plan"},
+         "rejected": {"scope": "observation_or_plan"}},
+         "score": {"shift_correct": correct, "shift_margin": margin, "loss": loss}}
+        for split, correct, margin, loss in [("train", True, 0.2, 0.59), ("validation", False, -0.1, 0.74)]
+    ]
+    summary = summarize_scores(rows)
+    assert summary["splits"]["train"]["shift_accuracy"] == 1
+    assert summary["splits"]["validation"]["shift_accuracy"] == 0
+    assert summary["target_scope_counts"] == {"observation_or_plan": 4}
