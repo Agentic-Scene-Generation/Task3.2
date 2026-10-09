@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from scenesmith.scene_expert.slow_memory.policy_diagnostics import (
-    completion_scope, evaluate_policy_pairs, load_diagnostic_source, pair_score,
+    completion_scope, diagnostic_outcome, evaluate_policy_pairs, load_diagnostic_source, pair_score,
     summarize_scores, validation_reproduction,
 )
 
@@ -70,6 +70,20 @@ def test_source_without_actual_completion_is_rejected(source):
         load_diagnostic_source(run)
 
 
+def test_validation_pair_evidence_is_frozen_with_the_training_manifest(source):
+    run, _ = source
+    path = run / "validation_pair_scores.jsonl"
+    path.write_text('{"pair_id":"saved"}\n')
+    manifest_path = run / "training_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["evaluation_pair_scores"] = {"path": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    _json(manifest_path, manifest)
+    load_diagnostic_source(run)
+    path.write_text('{"pair_id":"tampered"}\n')
+    with pytest.raises(ValueError, match="pair-score evidence"):
+        load_diagnostic_source(run)
+
+
 def test_dry_run_requires_no_torch_and_never_overwrites_source(source, tmp_path):
     run, _ = source
     before = {str(p): p.read_bytes() for p in run.rglob("*") if p.is_file()}
@@ -120,7 +134,7 @@ def test_summary_does_not_mix_training_and_validation():
     assert summary["target_scope_counts"] == {"observation_or_plan": 4}
 
 
-def test_observer_uses_native_preparation_and_preserves_aggregate_metrics():
+def test_observer_uses_native_preparation_and_preserves_aggregate_metrics(tmp_path):
     class Mask:
         shape = (2, 4)
 
@@ -134,7 +148,7 @@ def test_observer_uses_native_preparation_and_preserves_aggregate_metrics():
             return [3, 3]
 
     class Trainer:
-        args = SimpleNamespace(per_device_eval_batch_size=1, world_size=1)
+        args = SimpleNamespace(per_device_eval_batch_size=1, world_size=1, beta=.1)
 
         def __init__(self):
             self._metrics = {"eval": defaultdict(list)}
@@ -149,10 +163,10 @@ def test_observer_uses_native_preparation_and_preserves_aggregate_metrics():
                 self._metrics["eval"][name].append(value)
             return math.log1p(math.exp(-.2)), None, None
 
-        def evaluate(self, eval_dataset):
+        def evaluate(self, eval_dataset=None):
             self.prepared = True
             losses = [self.prediction_step(None, {"completion_mask": Mask()}, True)[0]
-                      for _ in eval_dataset]
+                      for _ in (eval_dataset if eval_dataset is not None else range(2))]
             assert len(self._metrics["eval"]["rewards/chosen"]) == 2
             self._metrics["eval"].clear()
             return {"eval_loss": sum(losses)/len(losses),
@@ -171,6 +185,23 @@ def test_observer_uses_native_preparation_and_preserves_aggregate_metrics():
     assert metrics["eval_rewards/accuracies"] == 1
     assert trainer.prediction_step == original
 
+    from scripts.train_sceneexpert_dpo import _evaluate_with_pair_audit
+
+    dataset = tmp_path / "dataset"
+    output = tmp_path / "training"
+    dataset.mkdir()
+    output.mkdir()
+    payload = [dict(row, chosen=[{"role": "assistant", "content": "chosen"}],
+                    rejected=[{"role": "assistant", "content": "rejected"}]) for row in rows]
+    (dataset / "validation.jsonl").write_text("".join(json.dumps(row) + "\n" for row in payload))
+    native_metrics, evidence = _evaluate_with_pair_audit(
+        trainer, dataset_dir=dataset, output_dir=output, capture_pairs=True,
+    )
+    saved = output / evidence["path"]
+    assert native_metrics == metrics and evidence["pair_count"] == 2
+    assert evidence["sha256"] == hashlib.sha256(saved.read_bytes()).hexdigest()
+    assert [json.loads(line)["pair_id"] for line in saved.read_text().splitlines()] == ["0", "1"]
+
     trainer.args = SimpleNamespace(per_device_eval_batch_size=2, world_size=1)
     with pytest.raises(ValueError, match="batch size"):
         evaluate_policy_pairs(trainer, rows, dataset=[], beta=.1, on_score=recorded.append)
@@ -184,6 +215,12 @@ def test_reproduction_mismatch_is_distinct_from_a_complete_evaluation():
     assert result["checked"] and not result["passed"]
     assert result["loss_difference"] == pytest.approx(.00145)
     assert result["accuracy_difference"] == pytest.approx(-1/7)
+    outcome = diagnostic_outcome(scored_count=22, expected_count=22, fidelity=result)
+    assert outcome["completed"] and outcome["status"] == "completed_with_warnings"
+    assert outcome["warnings"] == ["historical_validation_reproduction_mismatch"]
+    assert outcome["failure_reasons"] == [] and not result["passed"]
+    assert not diagnostic_outcome(scored_count=21, expected_count=22, fidelity=result)["completed"]
+    assert not diagnostic_outcome(scored_count=0, expected_count=0, fidelity=result)["completed"]
     assert not validation_reproduction(summary, original, 8)["checked"]
     summary["splits"]["validation"]["shift_accuracy"] = 3/7
     assert validation_reproduction(summary, original, 7)["passed"]

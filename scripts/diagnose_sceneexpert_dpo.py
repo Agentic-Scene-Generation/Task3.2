@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scenesmith.scene_expert.slow_memory.policy_diagnostics import (
-    evaluate_policy_pairs, load_diagnostic_source, summarize_scores,
+    diagnostic_outcome, evaluate_policy_pairs, load_diagnostic_source, summarize_scores,
     validation_reproduction,
 )
 from scenesmith.scene_expert.slow_memory.training_lifecycle import write_json
@@ -48,6 +48,7 @@ def main() -> int:
         "source_dataset_snapshot": manifest["dataset_snapshot"],
         "source_adapter_dir": manifest["adapter_dir"],
         "source_adapter_sha256": _adapter_sha256(Path(manifest["adapter_dir"])),
+        "source_validation_pair_scores": manifest.get("evaluation_pair_scores"),
         "full_source_pair_count": len(source_rows),
         "selected_pair_count": len(rows),
         "selection": "all" if not args.max_pairs else "first_n_smoke",
@@ -145,23 +146,24 @@ def main() -> int:
     summary = summarize_scores(scored)
     source_validation_count = sum(row["split"] == "validation" for row in source_rows)
     fidelity = validation_reproduction(summary, manifest.get("evaluation_metrics", {}), source_validation_count)
-    execution_completed = len(scored) == len(rows)
-    completed = execution_completed and (not fidelity["checked"] or fidelity["passed"])
-    failure_reasons = [] if completed else ["historical_validation_reproduction_mismatch"]
+    # Revalidate immutable inputs before finalizing. A completed audit may report
+    # negative or nonreproduced historical metrics without becoming a failed job.
+    load_diagnostic_source(args.training_run)
+    if _adapter_sha256(Path(manifest["adapter_dir"])) != preflight["source_adapter_sha256"]:
+        raise ValueError("source adapter changed during diagnostic evaluation")
+    outcome = diagnostic_outcome(scored_count=len(scored), expected_count=len(rows), fidelity=fidelity)
     write_json(output / "policy_diagnostics.json", {
-        "schema_version": "sceneexpert.dpo_policy_diagnostic.v2",
-        "completed": completed, "execution_completed": execution_completed,
-        "full_dataset_evaluated": len(rows) == len(source_rows), "failure_reasons": failure_reasons,
+        "schema_version": "sceneexpert.dpo_policy_diagnostic.v3", **outcome,
+        "full_dataset_evaluated": len(rows) == len(source_rows),
         "summary": summary, "source_validation_reproduction": fidelity,
         "elapsed_seconds": time.monotonic() - started,
         "peak_cuda_memory_gib": torch.cuda.max_memory_allocated() / 1024**3,
         "scene_effectiveness_measured": False, "promotable": False,
     })
     print("[diagnostic] " + json.dumps({
-        "execution_completed": execution_completed, "completed": completed,
-        "source_validation_reproduction": fidelity, "failure_reasons": failure_reasons,
+        **outcome, "source_validation_reproduction": fidelity,
     }), flush=True)
-    return 0 if completed else 2
+    return 0 if outcome["completed"] else 2
 
 
 def _adapter_sha256(directory: Path) -> str:

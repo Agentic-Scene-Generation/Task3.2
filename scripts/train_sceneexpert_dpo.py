@@ -433,6 +433,32 @@ def _training_args(
     return DPOConfig(**kwargs)
 
 
+def _evaluate_with_pair_audit(
+    trainer: Any, *, dataset_dir: Path, output_dir: Path, capture_pairs: bool,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Persist the in-memory pilot's validation scores for later reload audits."""
+    if not capture_pairs or trainer.args.per_device_eval_batch_size != 1 or trainer.args.world_size != 1:
+        return dict(trainer.evaluate()), None
+    from scenesmith.scene_expert.slow_memory.policy_diagnostics import (
+        completion_scope, evaluate_policy_pairs,
+    )
+
+    rows = [json.loads(line) for line in (dataset_dir / "validation.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    for row in rows:
+        row["split"] = "validation"
+        row["target_scope"] = {side: completion_scope(row[side]) for side in ("chosen", "rejected")}
+    path = output_dir / "validation_pair_scores.jsonl"
+    with path.open("w", encoding="utf-8") as handle:
+        def persist(record: dict[str, Any]) -> None:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            handle.flush()
+
+        metrics, _ = evaluate_policy_pairs(
+            trainer, rows, beta=float(trainer.args.beta), on_score=persist,
+        )
+    return metrics, {"path": path.name, "sha256": _file_sha256(path), "pair_count": len(rows)}
+
+
 def main() -> int:
     args = _parse_args()
     config = apply_training_profile(load_training_config(args.config), args.profile)
@@ -569,8 +595,12 @@ def main() -> int:
     trainer.save_model(str(adapter_dir))
     processor.save_pretrained(adapter_dir)
     evaluation_metrics: dict[str, Any] = {}
+    evaluation_pair_scores = None
     if eval_dataset is not None:
-        evaluation_metrics = dict(trainer.evaluate())
+        evaluation_metrics, evaluation_pair_scores = _evaluate_with_pair_audit(
+            trainer, dataset_dir=dataset_dir, output_dir=output_dir,
+            capture_pairs=args.profile == "furniture_initial_pilot",
+        )
         trainer.save_metrics("eval", evaluation_metrics)
         if not math.isfinite(float(evaluation_metrics.get("eval_loss", float("nan")))):
             raise RuntimeError("DPO validation did not report a finite loss")
@@ -635,6 +665,7 @@ def main() -> int:
         "adapter_dir": str(adapter_dir.resolve()),
         "train_metrics": train_metrics,
         "evaluation_metrics": evaluation_metrics,
+        "evaluation_pair_scores": evaluation_pair_scores,
         "promotion_gate": promotion,
         "served_model_note": (
             "Serve this adapter with its exact base checkpoint only after the "
