@@ -29,6 +29,7 @@ from scenesmith.scene_expert.slow_memory.paired import EXPECTED_MODEL, read_json
 from scenesmith.scene_expert.slow_memory.paired_runtime import (
     open_initial_pair,
     json_value,
+    _shadow_designer_run_config,
 )
 from scenesmith.scene_expert.slow_memory.paired_wire import (
     capture_wire,
@@ -248,8 +249,27 @@ def test_default_model_provider_is_unchanged():
     assert wrap_pair_provider(provider) is provider
 
 
+def test_initial_shadow_keeps_native_run_config():
+    from agents import RunConfig
+
+    config = RunConfig()
+    initial = SimpleNamespace(_create_run_config=lambda: config)
+    assert _shadow_designer_run_config(initial, {"input": "task"}) is config
+    assert config.session_input_callback is None
+
+
+def test_shadow_decision_rejects_incomplete_input_before_sdk_dispatch():
+    from agents import RunConfig
+
+    agent = SimpleNamespace(_create_run_config=RunConfig)
+    with pytest.raises(ValueError, match="complete native list input"):
+        _shadow_designer_run_config(
+            agent, {"decision_boundary": "first_mutation", "input": "summary"}
+        )
+
+
 def test_native_runner_continues_from_shared_prefix_once(tmp_path, monkeypatch):
-    from agents import Agent, Runner
+    from agents import Agent, Runner, RunConfig, SQLiteSession
     from agents.items import ModelResponse
     from agents.usage import Usage
     from agents import function_tool
@@ -351,13 +371,37 @@ def test_native_runner_continues_from_shared_prefix_once(tmp_path, monkeypatch):
         model=b_model,
         tools=[observe_scene, *b_workflow, generate_assets],
     )
+    session = SQLiteSession("shadow", tmp_path / "shadow.db")
+    shadow_agent = SimpleNamespace(_create_run_config=RunConfig)
+    config = _shadow_designer_run_config(shadow_agent, pair.snapshot)
+    # Exercise production's list + SQLite session contract. A dirty session must
+    # fail before the model or any design tool executes, even after setup checks.
+    asyncio.run(session.add_items([{"role": "user", "content": "unrelated history"}]))
+    with pytest.raises(ValueError, match="empty at SDK input merge"):
+        asyncio.run(
+            Runner.run(
+                b,
+                input=pair.snapshot["input"],
+                session=session,
+                max_turns=pair.snapshot["remaining_max_turns"],
+                run_config=config,
+            )
+        )
+    assert b_model.inputs == [] and mutations == ["asset"]
+    asyncio.run(session.clear_session())
     asyncio.run(
         Runner.run(
             b,
             input=pair.snapshot["input"],
+            session=session,
             max_turns=pair.snapshot["remaining_max_turns"],
+            run_config=config,
         )
     )
     assert b_model.inputs[0] == a_model.inputs[2]
     assert mutations == ["asset", "asset"]
     assert len(workflow_owner(b_workflow)._designer_todos) == 1
+    # Native persistence retains the supplied prefix once and the new rollout.
+    history = json_value(asyncio.run(session.get_items()))
+    assert history[: len(pair.snapshot["input"])] == pair.snapshot["input"]
+    assert len([item for item in history if item.get("name") == "observe_scene"]) == 1
