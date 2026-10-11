@@ -786,6 +786,7 @@ def export_dpo_dataset(
     preference_policy: str = "strict",
     split_assignments: dict[str, str] | None = None,
     completion_view: str = "full",
+    require_direct_action: bool = False,
     include_task_types: set[str] | frozenset[str] | None = DEFAULT_TRAINING_TASK_TYPES,
 ) -> dict[str, Any]:
     """Materialize a portable, auditable tool/VLM DPO dataset package."""
@@ -806,6 +807,18 @@ def export_dpo_dataset(
         raise ValueError("completion_view must be full or first_turn")
     portable_pairs: list[DPOPreferencePair] = []
     for pair in pairs:
+        if require_direct_action:
+            from scenesmith.scene_expert.slow_memory.decision_scope import (
+                first_turn_has_design,
+            )
+
+            if not all(
+                first_turn_has_design(side) for side in (pair.chosen, pair.rejected)
+            ):
+                diagnostics.append(
+                    {"reason": "first_turn_not_direct_design", "pair_id": pair.pair_id}
+                )
+                continue
         if completion_view == "first_turn":
 
             def first_turn(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -901,6 +914,7 @@ def export_dpo_dataset(
         "trajectory_count": len(trajectories),
         "raw_preference_pair_count": raw_preference_pair_count,
         "completion_view": completion_view,
+        "require_direct_action": require_direct_action,
         "eligible_pair_count": len(pairs),
         "diagnostic_count": len(diagnostics),
         "diagnostic_reasons": dict(sorted(reason_counts.items())),

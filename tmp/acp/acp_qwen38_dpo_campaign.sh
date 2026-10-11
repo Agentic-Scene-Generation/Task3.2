@@ -18,6 +18,7 @@ if "$PYTHON_BIN" scripts/prepare_sceneexpert_campaign.py \
   if "$PYTHON_BIN" scripts/run_sceneexpert_campaign.py --root "$COLLECTION_ROOT" \
     --action "${CAMPAIGN_ACTION:-collect}" --parallelism "${ACP_PARALLELISM:-2}" \
     --max-tasks "${MAX_TASKS:-0}" --chunk-size "${CHUNK_SIZE:-12}" \
+    --decision-boundary "${DECISION_BOUNDARY:-initial}" \
     2>&1 | tee "$CONTROL_DIR/collection.log"; then
     collection_exit=0
   else

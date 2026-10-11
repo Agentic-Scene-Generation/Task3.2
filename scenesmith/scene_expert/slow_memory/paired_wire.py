@@ -11,15 +11,38 @@ from typing import Any, Iterator
 from scenesmith.scene_expert.slow_memory.paired import EXPECTED_MODEL, write_json
 
 _target: ContextVar[Path | None] = ContextVar("sceneexpert_pair_wire", default=None)
+_observer: ContextVar[Any] = ContextVar("sceneexpert_pair_observer", default=None)
+_expected: ContextVar[dict[str, Any] | None] = ContextVar(
+    "sceneexpert_pair_expected", default=None
+)
 
 
 @contextmanager
-def capture_wire(candidate_dir: Path | None) -> Iterator[None]:
+def capture_wire(
+    candidate_dir: Path | None,
+    *,
+    observer: Any = None,
+    expected_request: dict[str, Any] | None = None,
+) -> Iterator[None]:
     token = _target.set(candidate_dir)
+    observer_token = _observer.set(observer)
+    expected_token = _expected.set(expected_request)
     try:
         yield
     finally:
+        _expected.reset(expected_token)
+        _observer.reset(observer_token)
         _target.reset(token)
+
+
+def wrap_pair_provider(provider: Any) -> Any:
+    """Observe native model results only inside a direct-decision collection."""
+    observer = _observer.get()
+    if not callable(getattr(observer, "observe_response", None)):
+        return provider
+    from scenesmith.scene_expert.slow_memory.decision_pair import DecisionProvider
+
+    return DecisionProvider(provider, observer)
 
 
 def client_options() -> dict[str, Any]:
@@ -29,14 +52,22 @@ def client_options() -> dict[str, Any]:
         return {}
     from openai import DefaultAsyncHttpxClient
 
+    observer = _observer.get()
+    expected = _expected.get()
+
     async def on_request(request: Any) -> None:
         if not request.url.path.endswith("/chat/completions"):
             return
         payload = json.loads(request.content)
         if payload.get("model") != EXPECTED_MODEL:
             raise ValueError("paired collection observed a different request model")
+        if callable(getattr(observer, "observe_request", None)):
+            observer.observe_request(payload)
+            return
         path = destination / "first_request.json"
         if not path.exists():
+            if expected is not None and payload != expected:
+                raise ValueError("shadow decision request differs before execution")
             # Request body only; credentials in HTTP headers are never persisted.
             write_json(path, payload)
 
