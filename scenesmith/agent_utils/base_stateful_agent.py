@@ -61,7 +61,9 @@ from scenesmith.agent_utils.scoring import (
 )
 from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
 from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
-from scenesmith.scene_expert.slow_memory.paired_wire import capture_wire, client_options
+from scenesmith.scene_expert.slow_memory.paired_wire import (
+    capture_wire, client_options, wrap_pair_provider,
+)
 from scenesmith.agent_utils.thinking import (
     chat_api_reasoning_effort,
     chat_template_kwargs_from_effort,
@@ -2457,6 +2459,7 @@ class BaseStatefulAgent(ABC):
             openai_client=openai_client,
             use_responses=False,
         )
+        provider = wrap_pair_provider(provider)
         intra_cfg = self.cfg.session_memory.intra_turn_observation_stripping
         if intra_cfg.enabled:
             return RunConfig(
@@ -4268,7 +4271,10 @@ class BaseStatefulAgent(ABC):
         request_start = time.perf_counter()
         render_dir_before = self.rendering_manager.last_render_dir
         try:
-            with capture_wire(initial_pair.canonical_dir if initial_pair else None):
+            with capture_wire(
+                initial_pair.canonical_dir if initial_pair else None,
+                observer=initial_pair,
+            ):
                 async with self._reasoning_persistence_context_for_session(
                     self.designer_session
                 ):

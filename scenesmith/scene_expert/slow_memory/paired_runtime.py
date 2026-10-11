@@ -284,6 +284,19 @@ async def open_initial_pair(agent: Any, input_message: Any) -> "InitialPair | No
         }
         # Validate all runtime values before spending time copying native assets.
         snapshot = json_value(snapshot, field_path="snapshot")
+        boundary = os.environ.get("SCENEEXPERT_PAIR_BOUNDARY", "initial")
+        if boundary not in {"initial", "first_mutation"}:
+            raise ValueError("unsupported pair decision boundary")
+        if boundary == "first_mutation":
+            from scenesmith.scene_expert.slow_memory.decision_pair import DecisionPair
+
+            (group / "A").mkdir()
+            write_json(group / "initial_setup.json", snapshot)
+            write_json(
+                group / "status.json",
+                {"status": "shared_prefix_running", "canonical": "A"},
+            )
+            return DecisionPair(group, snapshot, agent)
         phase = "snapshot_assets"
         snapshot["files"] = copy_scene_tree(scene_root, group / "input_scene")
         phase = "snapshot_commit"
@@ -372,6 +385,15 @@ class InitialPair:
         from scenesmith.scene_expert.slow_memory.trajectory import TrajectoryCollector
 
         directory = self.group / candidate
+        if (
+            self.snapshot.get("decision_boundary") == "first_mutation"
+            and candidate == "A"
+        ):
+            from scenesmith.scene_expert.slow_memory.decision_pair import (
+                decision_result,
+            )
+
+            result = decision_result(result, self.snapshot)
         agent_trace = _extract_agent_result_trace(result, result.final_output or "")
         validate_tool_execution(
             agent_trace,
@@ -700,7 +722,20 @@ async def run_shadow(group: Path) -> None:
         if restored_controller != snapshot["safety_controller"]:
             raise ValueError("restored safety-controller state differs")
         restore_random_state(snapshot["random_state"])
-        with capture_wire(destination):
+        if snapshot.get("decision_boundary") == "first_mutation":
+            from scenesmith.scene_expert.slow_memory.decision_pair import (
+                restore_workflow,
+            )
+
+            restore_workflow(agent.designer.tools, snapshot["workflow_todos"])
+        with capture_wire(
+            destination,
+            expected_request=(
+                read_json(group / "A/first_request.json")
+                if snapshot.get("decision_boundary") == "first_mutation"
+                else None
+            ),
+        ):
             async with agent._reasoning_persistence_context_for_session(
                 agent.designer_session
             ):
@@ -708,7 +743,9 @@ async def run_shadow(group: Path) -> None:
                     starting_agent=agent.designer,
                     input=snapshot["input"],
                     session=agent.designer_session,
-                    max_turns=agent.cfg.agents.designer_agent.max_turns,
+                    max_turns=snapshot.get(
+                        "remaining_max_turns", agent.cfg.agents.designer_agent.max_turns
+                    ),
                     run_config=agent._create_run_config(),
                 )
         pair = InitialPair(group, snapshot)

@@ -78,6 +78,7 @@ def publish_audit(
     audits: list[dict],
     selected: list[dict],
     generation_exit: int,
+    decision_boundary: str = "initial",
 ) -> dict:
     """Refresh both data policies after each chunk, including a zero-yield chunk."""
     exports = {}
@@ -89,6 +90,7 @@ def publish_audit(
             min_quality_margin=0.03 if policy != "strict" else 0.05,
             split_assignments=plan["split_assignments"],
             completion_view="first_turn",
+            require_direct_action=decision_boundary == "first_mutation",
         )["stats"]
     summary = {
         "schema_version": "sceneexpert.campaign_audit.v1",
@@ -111,6 +113,12 @@ def publish_audit(
         ],
         "protocol": {
             "scope": "furniture_initial",
+            "decision_boundary": decision_boundary,
+            "target": (
+                "direct_design_only"
+                if decision_boundary == "first_mutation"
+                else "first_assistant_turn"
+            ),
             "memory": "frozen",
             "writer": "disabled_in_collection_only",
         },
@@ -133,6 +141,9 @@ def main() -> int:
     parser.add_argument("--parallelism", type=int, default=2)
     parser.add_argument("--max-tasks", type=int, default=0)
     parser.add_argument("--chunk-size", type=int, default=12)
+    parser.add_argument(
+        "--decision-boundary", choices=("initial", "first_mutation"), default="initial"
+    )
     args = parser.parse_args()
     root = args.root.resolve()
     plan = read_json(root / "campaign.json")
@@ -164,6 +175,22 @@ def main() -> int:
                 "campaign source changed; use a new campaign to preserve reproducibility"
             )
         write_json(identity, provenance)
+        protocol_path = root / "collection_protocol.json"
+        protocol = {
+            "decision_boundary": args.decision_boundary,
+            "completion_view": "first_turn",
+        }
+        if protocol_path.exists() and read_json(protocol_path) != protocol:
+            raise ValueError("campaign decision boundary changed; use a new campaign")
+        if (
+            not protocol_path.exists()
+            and audits
+            and args.decision_boundary != "initial"
+        ):
+            raise ValueError(
+                "cannot reinterpret an existing initial campaign as direct decisions"
+            )
+        write_json(protocol_path, protocol)
         buckets = {
             split: [
                 row
@@ -174,7 +201,11 @@ def main() -> int:
         }
         pending = []
         while any(buckets.values()):
-            for split in ["train"] * 5 + ["validation"]:
+            for split in (
+                ["train", "validation"]
+                if args.max_tasks and args.max_tasks <= 4
+                else ["train"] * 5 + ["validation"]
+            ):
                 if buckets[split]:
                     pending.append(buckets[split].pop(0))
         if args.max_tasks:
@@ -182,7 +213,14 @@ def main() -> int:
         selected = pending if args.action == "collect" else []
         generation_exit = 0
         summary = publish_audit(
-            root, plan, sources, completed, audits, selected, generation_exit
+            root,
+            plan,
+            sources,
+            completed,
+            audits,
+            selected,
+            generation_exit,
+            args.decision_boundary,
         )
         for offset in range(0, len(selected), args.chunk_size):
             pending = selected[offset : offset + args.chunk_size]
@@ -228,6 +266,7 @@ def main() -> int:
                         attempt / "runs/paired_initial"
                     ),
                     "SCENEEXPERT_PAIR_MAX_GROUPS": str(len(pending)),
+                    "SCENEEXPERT_PAIR_BOUNDARY": args.decision_boundary,
                     "SCENEEXPERT_PAIR_SOURCE_HASH": provenance["source_bundle_hash"],
                     "SCENEEXPERT_CODE_PROVENANCE_GIT_ENABLED": "false",
                     "CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE": "true",
@@ -242,7 +281,14 @@ def main() -> int:
             sources, completed, audits = validated_sources(root)
             freeze_memory(root, plan)
             summary = publish_audit(
-                root, plan, sources, completed, audits, selected, generation_exit
+                root,
+                plan,
+                sources,
+                completed,
+                audits,
+                selected,
+                generation_exit,
+                args.decision_boundary,
             )
             if completed == previous_completed:
                 # A nominal zero exit is insufficient when no independently
