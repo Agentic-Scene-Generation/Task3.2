@@ -1,0 +1,57 @@
+{
+  "recorded_at": "2026-10-11T19:05:59+08:00",
+  "code_commit": "1463d15578a7ad0ba8003e4d1701f70b89543393",
+  "branch": "dev_lwz_maintain",
+  "delivery_validation": {
+    "local_origin_cci_heads_match": true,
+    "cci_worktree_and_index_clean": true,
+    "tracked_files_content_verified": 1123,
+    "local_portable_tests_passed": 81,
+    "cci_native_tests_passed": 109,
+    "cci_native_tests_seconds": 51.37,
+    "cci_native_test_warnings": 3,
+    "cci_test_log": "tmp/direct_decision_026_tests.log",
+    "agents_version": "0.6.4",
+    "httpx_version": "0.28.1",
+    "script_syntax_passed": true,
+    "sdk_preflight_passed": true,
+    "split_matches_campaign_019": true
+  },
+  "acp_submission": {
+    "display_name": "task_3_2_design_pairs_026",
+    "job_id": "pt-psdm7z0s",
+    "created_at": "2026-10-11T19:00:23+08:00",
+    "observed_status": "starting",
+    "status_updated_at": "2026-10-11T19:01:33+08:00",
+    "persisted_command_verified": true,
+    "cluster": "computing_cluster_01e",
+    "gpu_type": "N6lS-80GB",
+    "gpus": 1,
+    "replicas": 1,
+    "vcpus": 22,
+    "ram_gib": 230,
+    "resource_pool": "idle_preemptible",
+    "image": "ccr-zhicheng-02/scene_vlm:lwz-workspace-20260611125259",
+    "afs": "afs-p3-01e",
+    "storage_directory": "/",
+    "mount_path": "/mnt/afs",
+    "restart_limit": 0,
+    "run_id": "qwen38_design_pairs_026",
+    "max_tasks": 2,
+    "parallelism": 1,
+    "entrypoint": "tmp/acp/acp_qwen38_design_pairs.sh"
+  },
+  "review_package": {
+    "final_archive": "tmp/results/slow_memory/qwen38_design_pairs_026_review_final.tar.gz",
+    "maximum_file_mib": 16,
+    "maximum_total_mib": 128,
+    "preserve_project_relative_hierarchy": true,
+    "original_server_results_preserved": true
+  },
+  "monitor": {
+    "automation_id": "sceneexpert-acp-026",
+    "interval_minutes": 30,
+    "report_meaningful_changes_only": true
+  },
+  "experiment_outcome": "pending; no completion or preference-yield claim"
+}
