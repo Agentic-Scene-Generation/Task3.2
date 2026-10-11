@@ -14,6 +14,8 @@ ACP `pt-psdm7z0s` 在 2026-10-11 20:31:30（北京时间）显示失败；实际
 
 回归测试使用实际 agents SDK、SQLiteSession 和生产 RunConfig 构造函数，验证空 session 下完整前缀只注入一次；污染 session 在模型和工具执行前拒绝；字符串 initial 边界不改变。此前测试的 B 未传 session，漏掉了生产 SDK 的这项前置契约。
 
+修复提交 `439aff3` 已推送并以离线 bundle 快进 CCI。服务器 HEAD 与远程跟踪分支一致，1125 个已提交文件的内容哈希全部匹配，服务器工作区干净。CCI 原生 Python 3.11 / agents 0.6.4 环境的七组针对性回归共 111 passed（pytest 59.30 s；含启动 62.59 s）。本地可移植子集 81 passed。三个测试警告来自两项未加载的 pytest-asyncio 配置及已有 AsyncMock trace fixture，不影响本次 SDK session 契约验证。这些 CPU 验证证明初始化错误已被覆盖，新的真实 A/B 产量仍须由 027 实验确认。
+
 监控路径已纠正：实际运行数据在 `outputs/slow_memory/<RUN_ID>`，控制日志与 workflow 退出记录在 `tmp/acp_logs/<RUN_ID>/<invocation>`，`tmp/results/slow_memory` 保存 review 压缩包。该目录下没有同名结果文件夹不意味着任务尚未执行。此前仅检查打包目录得到的运行判断已更正。
 
 ## 026 最终复核包
