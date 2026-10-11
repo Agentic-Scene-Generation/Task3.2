@@ -62,7 +62,9 @@ from scenesmith.agent_utils.scoring import (
 from scenesmith.agent_utils.stage_working_memory import StageWorkingMemory
 from scenesmith.scene_expert.context_bundle import build_stage_context_bundle
 from scenesmith.scene_expert.slow_memory.paired_wire import (
-    capture_wire, client_options, wrap_pair_provider,
+    capture_wire,
+    client_options,
+    wrap_pair_provider,
 )
 from scenesmith.agent_utils.thinking import (
     chat_api_reasoning_effort,
