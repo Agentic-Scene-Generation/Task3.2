@@ -611,6 +611,28 @@ def shadow_environment(group: Path) -> dict[str, str]:
     return env
 
 
+def _merge_shadow_decision_history(
+    history: list[Any], frozen_input: list[Any]
+) -> list[Any]:
+    """Use the complete decision input once, without implicit session merging."""
+    if history:
+        raise ValueError("shadow decision session must be empty at SDK input merge")
+    return frozen_input
+
+
+def _shadow_designer_run_config(agent: Any, snapshot: dict[str, Any]) -> Any:
+    """Declare ownership of full replay history while retaining native sessions."""
+    run_config = agent._create_run_config()
+    if snapshot.get("decision_boundary") == "first_mutation":
+        if not isinstance(snapshot["input"], list):
+            raise ValueError("shadow decision requires complete native list input")
+        # SDK 0.6.4 rejects list input with a session unless merging is explicit.
+        # Keep native session persistence and filters, but never append or replay
+        # another history onto the already prepared decision-time input.
+        run_config.session_input_callback = _merge_shadow_decision_history
+    return run_config
+
+
 async def run_shadow(group: Path) -> None:
     """Reconstruct fresh clients, tools, renderer and empty sessions for B."""
     snapshot = read_json(group / "snapshot.json")
@@ -746,7 +768,7 @@ async def run_shadow(group: Path) -> None:
                     max_turns=snapshot.get(
                         "remaining_max_turns", agent.cfg.agents.designer_agent.max_turns
                     ),
-                    run_config=agent._create_run_config(),
+                    run_config=_shadow_designer_run_config(agent, snapshot),
                 )
         pair = InitialPair(group, snapshot)
         pair.capture_raw(agent, result, candidate="B")
