@@ -13,8 +13,8 @@ pytest.importorskip("agents")
 from agents.models.interface import Model
 from omegaconf import OmegaConf
 
-from test_initial_pair_snapshot import _agent
-from test_sceneexpert_campaign import record
+from tests.unit.test_initial_pair_snapshot import _agent
+from tests.unit.test_sceneexpert_campaign import record
 from scenesmith.agent_utils.workflow_tools import WorkflowTools
 from scenesmith.scene_expert.slow_memory.decision_pair import (
     DecisionModel,
