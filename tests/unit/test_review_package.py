@@ -428,3 +428,28 @@ def test_acp_packaging_wrapper_uses_explicit_roots_and_requires_no_gpu(
     )
     assert result.returncode == 0, result.stderr
     assert verify_package(output)["integrity_verified"] is True
+
+
+def test_final_control_audit_survives_competing_logs_and_raw_payloads(tmp_path):
+    control = f"{LOGS}/current_invocation"
+    required = [
+        f"{control}/final_readonly_evidence_audit.json",
+        f"{control}/failure_analysis.json",
+        f"{control}/direct_smoke_029_dry_run.json",
+        f"{control}/workflow_exit_status.env",
+    ]
+    for name in required:
+        _write(tmp_path, name, b"a" * 20)
+    payload = f"{RESULTS}/attempts/attempt_000/payload.json"
+    service_log = f"{LOGS}/service.log"
+    _write(tmp_path, payload, b"x" * 80)
+    _write(tmp_path, service_log, b"l" * 90)
+    before = {name: (tmp_path / name).read_bytes() for name in required}
+    summary, manifest, content = _bundle(tmp_path, max_total_bytes=140)
+    assert all(name in content for name in required)
+    assert payload not in content and service_log not in content
+    assert summary["selected_bytes"] == 80
+    assert all((tmp_path / name).read_bytes() == data for name, data in before.items())
+    assert verify_package(Path(summary["archive"]))["integrity_verified"] is True
+    omitted = {row["path"]: row["reason"] for row in manifest["omitted"]}
+    assert omitted[payload] == omitted[service_log] == "total_size_limit"

@@ -37,6 +37,8 @@ SUMMARY_FILES = {
     "policy_diagnostics.json", "diagnostic_preflight.json", "diagnostic_config.json",
     "diagnostic_progress.json",
     "pair_audit.json", "rescore_status.json", "summary.csv",
+    "final_readonly_evidence_audit.json", "failure_analysis.json",
+    "next_training_preflight.json", "final_package_verification.json",
 }
 
 
@@ -54,7 +56,10 @@ def _policy(path: Path, relative: Path) -> tuple[int | None, str]:
     if suffix in TEXT_SUFFIXES:
         # Global summaries must survive the size cap even when early attempts
         # contain many large prompt/trace copies that sort before later attempts.
-        if path.name in SUMMARY_FILES or "exit_status" in path.name:
+        control_preflight = "acp_logs" in parts and path.name.endswith(
+            ("_preflight.json", "_dry_run.json")
+        )
+        if path.name in SUMMARY_FILES or "exit_status" in path.name or control_preflight:
             return 0, "run_summary"
         if path.name in {"failure.json", "status.json", "tool_execution_failure.json"}:
             return 1, "failure_or_status"
