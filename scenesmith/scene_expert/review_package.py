@@ -32,6 +32,7 @@ SUMMARY_FILES = {
     "campaign.json", "campaign_audit.json", "run_metrics.json", "stats.json",
     "manifest.json", "training_manifest.json", "train_results.json", "eval_results.json",
     "effective_config.json", "preflight.json", "capacity_probe.json",
+    "template_preflight.json", "template_boundary_audit.json",
     "training_supervisor.json", "training_progress.json", "training_identity.json",
     "completion_check.json", "checkpoint_complete.json",
     "policy_diagnostics.json", "diagnostic_preflight.json", "diagnostic_config.json",

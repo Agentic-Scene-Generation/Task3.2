@@ -8,7 +8,9 @@ ACP 028 (`pt-7xj3dctv`) ended with collection exit 2 and package exit 0. Ten of 
 
 SceneEval 477 failed because seven deterministic intent-extension checks had unresolved entity bindings. SceneEval 336 failed IntentCompiler schema validation because an inventory requirement lacked an inventory `subject_ref`. Two otherwise eligible pairs were excluded because the sampled B first turn contained TODO management without a direct design tool. These are distinct mechanisms; a later B action must not be relabeled as its first response.
 
-The first next experiment is `qwen38_dpo_direct_smoke_029`, using `PROFILE=pipeline_smoke` and the verified-relative dataset under `qwen38_design_pairs_027`. It runs two optimizer steps. Both the training-request validator and the actual training CLI CPU dry-run passed. This is an infrastructure check; two train pairs cannot establish effectiveness.
+The first direct-action smoke, `qwen38_dpo_direct_smoke_029` (`pt-gm0e8ehj`), failed before an optimizer step. Historical OpenAI tool arguments were strings while direct-action completions used mappings; the Qwen template requires mappings. Arrow mixed-type inference also changed nested schemas, and default JSON feature decoding changed floating-point render values. The loader now parses object arguments at the training boundary, preserves heterogeneous columns with explicit JSON storage, and uses standard-library decoding for exact values. Source JSONL files remain unchanged.
+
+The next experiment is `qwen38_dpo_direct_smoke_030`, using `PROFILE=pipeline_smoke` and the verified-relative dataset under `qwen38_design_pairs_027`. It runs two optimizer steps. The ACP wrapper now runs the actual local processor/template on all train and validation pairs before model weights are loaded. Plain `--dry-run` retains its config-only behavior; `--dry-run --template-preflight` adds the real CPU template check. This is an infrastructure check; two train pairs cannot establish effectiveness.
 
 ## State and lifecycle
 
@@ -24,7 +26,7 @@ Run lightweight CPU audit and packaging on CCI. Source results remain intact. Fi
 
 ## Continuing decisions
 
-1. Inspect 029's finalization and training diagnostics. On success, proceed to a small collection validation with the intended action scope. On failure, diagnose the first causal failure before changing implementation.
+1. Inspect 030's finalization and training diagnostics. On success, proceed to a small collection validation with the intended action scope. On failure, diagnose the first causal failure before changing implementation.
 2. Address task/intent contract generation and direct-action sampling scope with bounded, opt-in changes. Prefer SceneExpert wrappers and adapters. Modify another group's code only for a demonstrated blocker. Never replace missing evidence with invented labels or silently loosen request/isolation checks.
 3. Freeze a new campaign identity after collection-code changes; an existing frozen source bundle cannot be resumed under changed code. Retain deterministic task partitions, frozen memory and all historical audited data. Merge only sources that passed full server-side pair validation, retaining their original task splits.
 4. Validate a small batch before expansion. Continue bounded SceneEval batches toward the explicit pilot gate (at least eight independent train pairs and four validation pairs), then regular furniture-initial training (at least sixteen train pairs) and reserved scene-level base/adapter evaluation. Report preference yield and missing tasks, including zero-yield batches.
@@ -32,7 +34,7 @@ Run lightweight CPU audit and packaging on CCI. Source results remain intact. Fi
 
 Source changes made on CCI must be committed in English on `dev_lwz_maintain`, mirrored to the local branch via an offline bundle when needed, pushed to `origin/dev_lwz_maintain`, and verified at matching HEADs with clean intended tracked files before the next experiment. Preserve unrelated user changes. Do not force-push. ACP commands contain no Git operations.
 
-CCI autonomous execution is limited to one GPU and estimated elapsed time at most one hour. Longer or multi-GPU work uses ACP. Estimate 029 at 2–5 minutes preparation, 40–80 minutes single-H100 execution plus queue, 5–10 minutes validation and 1–5 minutes packaging. Operator involvement is about 5–15 minutes. These estimates include uncertainty from model loading, compilation and AFS storage.
+CCI autonomous execution is limited to one GPU and estimated elapsed time at most one hour. Longer or multi-GPU work uses ACP. Estimate 030 at 2–5 minutes preparation, 40–80 minutes single-H100 execution plus queue, 5–10 minutes validation and 1–5 minutes packaging. Operator involvement is about 5–15 minutes. These estimates include uncertainty from model loading, compilation and AFS storage.
 
 ## Next ACP command
 
@@ -41,7 +43,7 @@ set -euo pipefail
 cd /mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2
 CUDA_VISIBLE_DEVICES=0 \
 CAMPAIGN_ID=qwen38_design_pairs_027 \
-RUN_ID=qwen38_dpo_direct_smoke_029 \
+RUN_ID=qwen38_dpo_direct_smoke_030 \
 PROFILE=pipeline_smoke \
 BASE_MODEL=/mnt/afs/task3_2/share_model/Qwen/Qwen3.8-27B \
 PACKAGE_MAX_FILE_MIB=16 PACKAGE_MAX_TOTAL_MIB=128 \
@@ -53,10 +55,10 @@ After actual finalization:
 ```bash
 set -euo pipefail
 cd /mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2
-RUN_ID=qwen38_dpo_direct_smoke_029 \
-PACKAGE_PATH="$PWD/tmp/results/slow_memory/qwen38_dpo_direct_smoke_029_review_final.tar.gz" \
+RUN_ID=qwen38_dpo_direct_smoke_030 \
+PACKAGE_PATH="$PWD/tmp/results/slow_memory/qwen38_dpo_direct_smoke_030_review_final.tar.gz" \
 PACKAGE_MAX_FILE_MIB=16 PACKAGE_MAX_TOTAL_MIB=128 \
 bash tmp/acp/pack_qwen38_initial_pairs.sh
 .venv/bin/python scripts/package_sceneexpert_results.py \
-  --verify tmp/results/slow_memory/qwen38_dpo_direct_smoke_029_review_final.tar.gz
+  --verify tmp/results/slow_memory/qwen38_dpo_direct_smoke_030_review_final.tar.gz
 ```
