@@ -40,6 +40,7 @@ SUMMARY_FILES = {
     "pair_audit.json", "rescore_status.json", "summary.csv",
     "scope_sampling.json", "collection_protocol.json", "collection_iteration_audit.json",
     "runtime_preflight.json", "collection_failure_audit.json",
+    "shared_base_subset.json",
     "final_readonly_evidence_audit.json", "failure_analysis.json",
     "next_training_preflight.json", "final_package_verification.json",
 }

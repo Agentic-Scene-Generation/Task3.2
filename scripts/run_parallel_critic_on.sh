@@ -390,6 +390,7 @@ SCENE_RETRY_ATTEMPTS="${SCENE_RETRY_ATTEMPTS:-2}"
 # only failed shared-base scenes once in fresh, serialized batch processes.
 SHARED_BASE_BATCH_RETRIES="${SHARED_BASE_BATCH_RETRIES:-1}"
 SHARED_BASE_RETRY_PARALLELISM="${SHARED_BASE_RETRY_PARALLELISM:-1}"
+SCENEEXPERT_CONTINUE_PARTIAL_SHARED_BASE="${SCENEEXPERT_CONTINUE_PARTIAL_SHARED_BASE:-false}"
 CRITIC_PROBE_PARALLEL="${CRITIC_PROBE_PARALLEL:-true}"
 # A Qwen llama-server already reserves tens of GiB in the ACP cgroup.  Keep
 # one Python scene process by default; callers can opt into more concurrency
@@ -762,6 +763,15 @@ fi
 if ! CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE="$(normalize_bool "$CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE")"; then
     echo "ERROR: CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE must be true or false" >&2
     exit 1
+fi
+if ! SCENEEXPERT_CONTINUE_PARTIAL_SHARED_BASE="$(normalize_bool "$SCENEEXPERT_CONTINUE_PARTIAL_SHARED_BASE")"; then
+    echo "ERROR: SCENEEXPERT_CONTINUE_PARTIAL_SHARED_BASE must be true or false" >&2
+    exit 2
+fi
+if [ "$SCENEEXPERT_CONTINUE_PARTIAL_SHARED_BASE" = "true" ] \
+    && { [ "$SCENE_BATCH_SIZE" != "1" ] || [ "$GENERATE_SHARED_BASE" != "true" ]; }; then
+    echo "ERROR: partial shared-base collection requires generated bases and SCENE_BATCH_SIZE=1" >&2
+    exit 2
 fi
 if ! DISABLE_ARTICULATED="$(normalize_bool "$DISABLE_ARTICULATED")"; then
     echo "ERROR: SCENEEXPERT_DISABLE_ARTICULATED must be true or false" >&2
@@ -1199,6 +1209,7 @@ export PYTHON_BIN MODEL_NAME RUN_ID OUTPUT_ROOT CASE_SET CASE_SET_IDS
 export SCENEEVAL_SIZE SCENEEVAL_ANNOTATIONS PROMPT_CSV PROMPT_CSV_SHA256 DIFFICULTY_SELECTION
 export SCENE_BATCH_SIZE SCENE_WORKERS_PER_PROCESS SCENE_RETRY_ATTEMPTS
 export SHARED_BASE_BATCH_RETRIES SHARED_BASE_RETRY_PARALLELISM
+export SCENEEXPERT_CONTINUE_PARTIAL_SHARED_BASE
 export CRITIC_PROBE_PARALLEL CRITIC_PROBE_INNER_PARALLELISM
 export CRITIC_PROBE_MAX_SAFE_INNER_PARALLELISM CRITIC_PROBE_ALLOW_UNSAFE_PARALLELISM
 export CRITIC_PROBE_PORT_BASE CRITIC_PROBE_PORT_BLOCK_SIZE
@@ -2097,13 +2108,38 @@ if [ "$GENERATE_SHARED_BASE" = "true" ]; then
         run_exit_code=$?
     fi
 fi
-if [ "$run_exit_code" -eq 0 ]; then
+run_critic_branches=false
+if [ "$run_exit_code" -eq 0 ]; then run_critic_branches=true; fi
+original_scene_selection="$SCENE_SELECTION"
+original_scene_selection_explicit="$SCENE_SELECTION_EXPLICIT"
+original_max_cases="$MAX_CASES"
+if [ "$SCENEEXPERT_CONTINUE_PARTIAL_SHARED_BASE" = "true" ] && [ "$DRY_RUN" = "false" ]; then
+    if subset_wire=$("$PYTHON_BIN" -m scenesmith.scene_expert.slow_memory.shared_base_subset \
+        --output-root "$OUTPUT_ROOT" --shared-base-root "$SHARED_BASE_ROOT" \
+        --report "$OUTPUT_ROOT/shared_base_subset.json"); then
+        IFS='|' read -r SCENE_SELECTION excluded_count <<< "$subset_wire"
+        SCENE_SELECTION_EXPLICIT=true
+        MAX_CASES=0
+        run_critic_branches=true
+        if [ "$excluded_count" -ne 0 ] && [ "$run_exit_code" -eq 0 ]; then run_exit_code=1; fi
+        echo "Collection branches use validated shared bases: $SCENE_SELECTION; excluded=$excluded_count"
+    else
+        subset_exit=$?
+        run_critic_branches=false
+        if [ "$run_exit_code" -eq 0 ]; then run_exit_code="$subset_exit"; fi
+    fi
+fi
+if [ "$run_critic_branches" = "true" ]; then
     if run_batches critic_on; then
         :
     else
-        run_exit_code=$?
+        branch_exit=$?
+        if [ "$run_exit_code" -eq 0 ]; then run_exit_code="$branch_exit"; fi
     fi
 fi
+SCENE_SELECTION="$original_scene_selection"
+SCENE_SELECTION_EXPLICIT="$original_scene_selection_explicit"
+MAX_CASES="$original_max_cases"
 
 # Metrics are generated for successful and failed probes alike. A metrics write
 # failure is a probe failure, but it never replaces an earlier generation code.

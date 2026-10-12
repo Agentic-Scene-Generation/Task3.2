@@ -22,6 +22,12 @@ The default B sampling protocol remains a single native draw. This pilot explici
 
 Acceptance requires four complete audited A/B groups, no systematic compiler/runtime failure, matching requests, preserved canonical assets/memory and candidate-bound fresh evidence. Preference yield is measured independently; at least one valid direct-action pair is the pilot target, not an invented guarantee. A zero-yield but intact batch is retained and analyzed before further sampling. After mechanism validation, continue bounded SceneEval batches toward the pilot training gate and reserved base/adapter scene evaluation.
 
+032 produced three complete audited groups and one relative training preference, with no validation preference. Its fourth group was excluded after an HSSD cushion retrieval failed. The 033 continuation produced no new groups: SceneEval 129's floor-plan planner twice finished without calling Designer, while 127, 360 and 371 completed their floor plans. The launcher required every base to succeed before starting any furniture branch, stranding those three valid checkpoints; the campaign's zero-progress guard then stopped the remaining chunks. This exposed batch failure coupling rather than a new GPU dependency failure.
+
+The collection-only `isolated` policy now audits the original assignment, completion status/marker, scene identity, readable layout, declared local geometry and SDFs. Only complete checkpoints continue, at their original case and scene indices; excluded cases and the original nonzero exit remain visible. The standard runner still defaults to strict behavior, and partial continuation requires one scene per native batch. The opt-in policy is frozen as `sceneexpert.collection_fault_isolation.v1`; no failed base becomes a preference. CPU tests exercise the actual Bash branch controller with mixed, empty, nominal-zero and failed branches. The real 033 checkpoints were inspected on CPU and selected exactly 127, 360 and 371, excluding 129 without changing their files. Eighty-two focused CCI regressions passed.
+
+Because launcher source changed, the next pilot uses fresh campaign `qwen38_design_pairs_034`, covering four train tasks (360, 127, 129, 371) and four validation tasks (273, 201, 473, 353). The frozen SceneEval partition, memory seed and three-draw scope policy remain the same. The failed 033 source/results and both 032 review packages remain preserved. For a partial batch, a nonzero workflow exit remains correct even when valid pairs were collected; assess branch completeness and preference yield separately. After confirming task isolation on actual ACP execution, expand the same campaign without a mechanism filter.
+
 
 ## State and lifecycle
 
@@ -37,7 +43,7 @@ Run lightweight CPU audit and packaging on CCI. Source results remain intact. Fi
 
 ## Continuing decisions
 
-1. Inspect 032's execution, sampling proofs and preference yield before expanding the frozen campaign. Diagnose the first causal failure if a mechanism remains broken.
+1. Inspect 034's checkpoint isolation, A/B execution, sampling proofs and preference yield before expanding the frozen campaign. Diagnose the first causal failure if a mechanism remains broken.
 2. Address task/intent contract generation and direct-action sampling scope with bounded, opt-in changes. Prefer SceneExpert wrappers and adapters. Modify another group's code only for a demonstrated blocker. Never replace missing evidence with invented labels or silently loosen request/isolation checks.
 3. Freeze a new campaign identity after collection-code changes; an existing frozen source bundle cannot be resumed under changed code. Retain deterministic task partitions, frozen memory and all historical audited data. Merge only sources that passed full server-side pair validation, retaining their original task splits.
 4. Validate a small batch before expansion. Continue bounded SceneEval batches toward the explicit pilot gate (at least eight independent train pairs and four validation pairs), then regular furniture-initial training (at least sixteen train pairs) and reserved scene-level base/adapter evaluation. Report preference yield and missing tasks, including zero-yield batches.
@@ -45,17 +51,18 @@ Run lightweight CPU audit and packaging on CCI. Source results remain intact. Fi
 
 Source changes made on CCI must be committed in English on `dev_lwz_maintain`, mirrored to the local branch via an offline bundle when needed, pushed to `origin/dev_lwz_maintain`, and verified at matching HEADs with clean intended tracked files before the next experiment. Preserve unrelated user changes. Do not force-push. ACP commands contain no Git operations.
 
-CCI autonomous execution is limited to one GPU and estimated elapsed time at most one hour. Longer or multi-GPU work uses ACP. For the four-task 032 retry, estimate 5–10 minutes preparation, 60–120 minutes execution plus queue, 5–15 minutes server audit and 1–5 minutes packaging. The reference is 028's twelve tasks in about 4 hours 47 minutes with four-way concurrency; task complexity and AFS/rendering latency can widen this range. These estimates are not guarantees. The user has no required hands-on submission work because the loop is authorized to submit; manual review would take roughly 5–15 minutes.
+CCI autonomous execution is limited to one GPU and estimated elapsed time at most one hour. Longer or multi-GPU work uses ACP. For the eight-task 034 isolation pilot, estimate 5–10 minutes preparation, 2–4 hours execution plus queue, 10–20 minutes server audit and 2–10 minutes packaging/download. The references are 032's four tasks in about 51–52 minutes and 028's twelve tasks in about 4 hours 47 minutes with four-way concurrency; task complexity and AFS/rendering latency can widen this range. These estimates are not guarantees. No user submission work is required because the loop is authorized to submit.
 
 ## Next ACP command
 
 ```bash
 set -euo pipefail
 cd /mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2
-RUN_ID=qwen38_design_pairs_032 \
-MAX_TASKS=4 CHUNK_SIZE=4 ACP_PARALLELISM=4 \
-CAMPAIGN_SCENEEVAL_IDS=336,477,340,273 \
+RUN_ID=qwen38_design_pairs_034 \
+MAX_TASKS=8 CHUNK_SIZE=4 ACP_PARALLELISM=4 \
+CAMPAIGN_SCENEEVAL_IDS=360,127,129,371,273,201,473,353 \
 SHADOW_SCOPE_SAMPLES=3 \
+SHARED_BASE_FAILURE_POLICY=isolated \
 MEMORY_SEED_DIR="$PWD/outputs/slow_memory/qwen38_design_pairs_027/frozen_memory/ablation_4c" \
 PACKAGE_MAX_FILE_MIB=16 PACKAGE_MAX_TOTAL_MIB=128 \
 bash tmp/acp/acp_qwen38_design_pairs.sh
@@ -66,10 +73,10 @@ After real finalization:
 ```bash
 set -euo pipefail
 cd /mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2
-RUN_ID=qwen38_design_pairs_032 \
-PACKAGE_PATH="$PWD/tmp/results/slow_memory/qwen38_design_pairs_032_review_final.tar.gz" \
+RUN_ID=qwen38_design_pairs_034 \
+PACKAGE_PATH="$PWD/tmp/results/slow_memory/qwen38_design_pairs_034_review_final.tar.gz" \
 PACKAGE_MAX_FILE_MIB=16 PACKAGE_MAX_TOTAL_MIB=128 \
 bash tmp/acp/pack_qwen38_initial_pairs.sh
 .venv/bin/python scripts/package_sceneexpert_results.py \
-  --verify tmp/results/slow_memory/qwen38_design_pairs_032_review_final.tar.gz
+  --verify tmp/results/slow_memory/qwen38_design_pairs_034_review_final.tar.gz
 ```

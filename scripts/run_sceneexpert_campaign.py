@@ -158,6 +158,7 @@ def main() -> int:
         "--decision-boundary", choices=("initial", "first_mutation"), default="initial"
     )
     parser.add_argument("--shadow-scope-samples", type=int, default=1)
+    parser.add_argument("--shared-base-failure-policy", choices=("strict", "isolated"), default="strict")
     parser.add_argument("--sceneeval-ids", default="",
                         help="Optional mechanism pilot filter; preserves the frozen task splits.")
     args = parser.parse_args()
@@ -204,6 +205,12 @@ def main() -> int:
         if args.shadow_scope_samples > 1:
             from scenesmith.scene_expert.slow_memory.scope_sampling import sampling_policy
             protocol["shadow_sampling"] = sampling_policy(args.shadow_scope_samples)
+        if args.shared_base_failure_policy == "isolated":
+            protocol["collection_failure_policy"] = {
+                "protocol": "sceneexpert.collection_fault_isolation.v1",
+                "shared_base": "validated_subset",
+                "preserve_failure_exit": True,
+            }
         if protocol_path.exists() and read_json(protocol_path) != protocol:
             raise ValueError("campaign decision boundary changed; use a new campaign")
         if (
@@ -293,6 +300,7 @@ def main() -> int:
                     "SCENEEXPERT_PAIR_MAX_GROUPS": str(len(pending)),
                     "SCENEEXPERT_PAIR_BOUNDARY": args.decision_boundary,
                     "SCENEEXPERT_SHADOW_SCOPE_SAMPLES": str(args.shadow_scope_samples),
+                    "SCENEEXPERT_CONTINUE_PARTIAL_SHARED_BASE": str(args.shared_base_failure_policy == "isolated").lower(),
                     "SCENEEXPERT_PAIR_SOURCE_HASH": provenance["source_bundle_hash"],
                     "SCENEEXPERT_CODE_PROVENANCE_GIT_ENABLED": "false",
                     "CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE": "true",
