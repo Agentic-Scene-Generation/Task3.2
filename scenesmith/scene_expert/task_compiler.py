@@ -27,6 +27,7 @@ from scenesmith.scenebenchmark_critic.object_taxonomy import (
     canonical_object_category,
     generation_owner,
     is_structural_anchor,
+    is_known_object_category,
 )
 from scenesmith.utils.llm_json import json_response_format, parse_llm_json_object
 
@@ -82,6 +83,10 @@ Rules:
 - Infer reasonable functional zones based on the room type and objects.
 - Infer reachability constraints for any small objects placed on furniture surfaces.
 - Keep object names concise (e.g. "bed" not "a large king-sized bed").
+- Rugs, carpets and floor cushions are portable floor-supported assets in
+  required_large_objects, never required_architectural_features. Folding,
+  bamboo and privacy screens are room_divider furniture; an electronic display
+  is a monitor. Preserve this distinction when describing inventories.
 - Windows, doors, and open connections are structural anchors owned by the
   floor plan. Do not put them in any required_* object array.
 - Do not invent coordinates, room sides, or nearest-object identities.
@@ -380,6 +385,9 @@ _WALL_STAGE_CATEGORIES = {
 }
 
 _FURNITURE_STAGE_CATEGORIES = {
+    "rug",
+    "room_divider",
+    "floor_cushion",
     "dressing_table",
     "plant",
     "stool",
@@ -570,6 +578,22 @@ def _normalize_stage_ownership(
         "ceiling": list(task_spec.required_ceiling_objects),
         "small": list(task_spec.required_small_objects),
     }
+    # Structured model outputs may put portable decor among architecture.
+    # Recover only known physical categories; retain true/unknown structural
+    # features and do not fabricate inventory from a relation or scene pose.
+    architectural_features = []
+    owner_to_inventory = {"furniture": "large", "wall_mounted": "wall",
+                          "ceiling_mounted": "ceiling", "manipuland": "small"}
+    for feature in task_spec.required_architectural_features:
+        category = inventory_key(feature)
+        owner = generation_owner(category)
+        if (is_known_object_category(category) and category not in _VIRTUAL_CATEGORIES
+                and not is_structural_anchor(category) and owner in owner_to_inventory):
+            if not any(inventory_key(value) == category
+                       for values in inventories.values() for value in values):
+                inventories[owner_to_inventory[owner]].append(feature)
+        else:
+            architectural_features.append(feature)
     _remove_spurious_generic_inventory_entries(inventories, prompt=prompt)
     for values in inventories.values():
         values[:] = [
@@ -721,6 +745,7 @@ def _normalize_stage_ownership(
 
     return task_spec.model_copy(
         update={
+            "required_architectural_features": architectural_features,
             "required_large_objects": inventories["large"],
             "required_wall_objects": inventories["wall"],
             "required_ceiling_objects": inventories["ceiling"],
@@ -734,6 +759,7 @@ def _task_spec_normalization_warnings(
 ) -> list[str]:
     warnings: list[str] = []
     for field in (
+        "required_architectural_features",
         "required_large_objects",
         "required_wall_objects",
         "required_ceiling_objects",

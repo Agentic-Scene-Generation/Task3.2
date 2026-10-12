@@ -1,8 +1,9 @@
 """Opt-in fork at the first natural scene action, after a shared read-only prefix.
 
-A's response identifies the boundary before its tools execute. B samples once
-from that exact request and native SDK input; no tool choice is forced and no
-resampling is used. This conditions collection on A choosing a design action.
+A's response identifies the boundary before its tools execute. By default B
+samples once from that exact request and native SDK input. A separately frozen,
+opt-in scope protocol can retain up to three draws before executing the first
+design response. No tool choice or scene-quality conditioning is applied.
 Evidence evaluates each remaining rollout, rather than immediate action reward.
 """
 
@@ -11,6 +12,7 @@ from __future__ import annotations
 import logging
 from copy import deepcopy
 from pathlib import Path
+import os
 from types import SimpleNamespace
 from typing import Any
 
@@ -189,6 +191,14 @@ class DecisionPair(InitialPair):
             },
             random_state=random_state(),
         )
+        max_samples = int(os.environ.get("SCENEEXPERT_SHADOW_SCOPE_SAMPLES", "1"))
+        from scenesmith.scene_expert.slow_memory.scope_sampling import sampling_policy
+        policy = sampling_policy(max_samples)
+        if max_samples > 1:
+            snapshot["shadow_sampling"] = policy
+            snapshot["boundary_selection"] = (
+                "first_natural_A_design_response_before_tools;B_bounded_scope_sampling_v1"
+            )
         snapshot["files"] = copy_scene_tree(
             Path(snapshot["source_scene_root"]), self.group / "input_scene"
         )

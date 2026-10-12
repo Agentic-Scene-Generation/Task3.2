@@ -38,6 +38,7 @@ SUMMARY_FILES = {
     "policy_diagnostics.json", "diagnostic_preflight.json", "diagnostic_config.json",
     "diagnostic_progress.json",
     "pair_audit.json", "rescore_status.json", "summary.csv",
+    "scope_sampling.json", "collection_protocol.json", "collection_iteration_audit.json",
     "final_readonly_evidence_audit.json", "failure_analysis.json",
     "next_training_preflight.json", "final_package_verification.json",
 }

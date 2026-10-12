@@ -410,6 +410,13 @@ class InitialPair:
         write_json(directory / "report.json", report)
         verdict, score, failures = deterministic_verdict(report)
         wire = read_json(directory / "first_request.json")
+        sampling_hash = None
+        if candidate == "B" and self.snapshot.get("shadow_sampling"):
+            from scenesmith.scene_expert.slow_memory.scope_sampling import validate_sampling_proof
+            sampling_hash = validate_sampling_proof(
+                directory, self.snapshot["shadow_sampling"], wire,
+                json_value(result.raw_responses[0].output),
+            )
         payload = {
             "schema_version": "2.0",
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -460,6 +467,7 @@ class InitialPair:
                     "raw_state_sha256": raw_hash,
                     "candidate": candidate,
                     "relative_profile": report_profile(report),
+                    **({"shadow_sampling_sha256": sampling_hash} if sampling_hash else {}),
                 },
             ),
             outcome=TrajectoryOutcome(
@@ -487,6 +495,7 @@ class InitialPair:
             {
                 "status": "raw_captured",
                 "scoring_protocol": SCORING_PROTOCOL,
+                **({"shadow_sampling_sha256": sampling_hash} if sampling_hash else {}),
                 "candidate": candidate,
                 "model": wire["model"],
                 "snapshot_hash": digest(self.snapshot),
@@ -750,8 +759,15 @@ async def run_shadow(group: Path) -> None:
             )
 
             restore_workflow(agent.designer.tools, snapshot["workflow_todos"])
+        scope_sampler = None
+        if snapshot.get("shadow_sampling"):
+            from scenesmith.scene_expert.slow_memory.scope_sampling import ShadowScopeSampler
+            scope_sampler = ShadowScopeSampler(
+                destination, read_json(group / "A/first_request.json"), snapshot["shadow_sampling"],
+            )
         with capture_wire(
             destination,
+            scope_sampler=scope_sampler,
             expected_request=(
                 read_json(group / "A/first_request.json")
                 if snapshot.get("decision_boundary") == "first_mutation"
