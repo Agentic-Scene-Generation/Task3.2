@@ -81,7 +81,7 @@ finish() {
 trap finish EXIT
 "$TRAIN_PYTHON" -u scripts/train_sceneexpert_dpo.py \
   --model "$BASE_MODEL" --dataset-dir "$DATASET_DIR" --output-dir "$OUTPUT_DIR" \
-  --profile "$PROFILE" "${probe_args[@]}" --dry-run 2>&1 | tee "$OUTPUT_DIR/preflight.log"
+  --profile "$PROFILE" "${probe_args[@]}" --dry-run --template-preflight 2>&1 | tee "$OUTPUT_DIR/preflight.log"
 "$TRAIN_PYTHON" -u scripts/supervise_sceneexpert_dpo.py --output-dir "$OUTPUT_DIR" -- \
   "$TRAIN_PYTHON" -u scripts/train_sceneexpert_dpo.py \
   --model "$BASE_MODEL" --dataset-dir "$DATASET_DIR" --output-dir "$OUTPUT_DIR" \

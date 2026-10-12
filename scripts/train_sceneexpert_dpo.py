@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import math
@@ -74,7 +75,14 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Validate config and dataset without importing CUDA libraries.",
     )
+    parser.add_argument(
+        "--template-preflight",
+        action="store_true",
+        help="With --dry-run, render real data using the local processor without model weights.",
+    )
     args = parser.parse_args()
+    if args.template_preflight and not args.dry_run:
+        parser.error("--template-preflight requires --dry-run")
     if args.capacity_probe and args.profile != "pipeline_smoke":
         parser.error("--capacity-probe requires --profile pipeline_smoke")
     return args
@@ -86,6 +94,33 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _normalize_tool_arguments(messages: Any) -> Any:
+    """Adapt OpenAI string arguments to template mappings without changing actions."""
+    messages = copy.deepcopy(messages)
+    for message in messages:
+        for call in message.get("tool_calls") or []:
+            function = call.get("function") or {}
+            if "arguments" not in function:
+                continue
+            arguments = function["arguments"]
+            if isinstance(arguments, str):
+                arguments = json.loads(arguments)
+            if not isinstance(arguments, dict):
+                raise ValueError("tool-call arguments must encode a JSON object")
+            function["arguments"] = arguments
+    return messages
+
+
+def _decode_json_batch(batch: dict[str, list[Any]]) -> dict[str, list[Any]]:
+    """Decode JSON with Python's exact float round trip, including after Dataset.map."""
+    columns = {"prompt", "chosen", "rejected", "tools", "chat_template_kwargs"}
+    return {
+        key: [json.loads(value) if key in columns and isinstance(value, str) else value
+              for value in values]
+        for key, values in batch.items()
+    }
 
 
 def _read_rows(path: Path, *, dataset_dir: Path) -> list[dict[str, Any]]:
@@ -105,6 +140,8 @@ def _read_rows(path: Path, *, dataset_dir: Path) -> list[dict[str, Any]]:
             for key in ("prompt", "chosen", "rejected", "tools", "images")
             if key in payload
         }
+        for side in ("prompt", "chosen", "rejected"):
+            row[side] = _normalize_tool_arguments(row[side])
         image_paths = row.get("images") or []
         row["images"] = [
             load_image(dataset_dir / str(image_path)) for image_path in image_paths
@@ -118,7 +155,7 @@ def _load_json_dataset(
     *,
     visible_action_only: bool = False,
 ) -> tuple[Any, Any | None, dict[str, bool]]:
-    from datasets import Dataset
+    from datasets import Dataset, Features, Image, Json, List
 
     train_rows = _read_rows(dataset_dir / "train.jsonl", dataset_dir=dataset_dir)
     validation_path = dataset_dir / "validation.jsonl"
@@ -135,15 +172,26 @@ def _load_json_dataset(
             # their loss on the template's closed thinking envelope, rather than
             # inventing reasoning targets or misaligning the first action tokens.
             row["chat_template_kwargs"] = {"enable_thinking": False}
-        if not has_tools:
+        if has_tools:
+            row.setdefault("tools", [])
+        else:
             row.pop("tools", None)
         if not has_images:
             row.pop("images", None)
-    train = Dataset.from_list(train_rows, on_mixed_types="use_json")
+    # Preserve heterogeneous messages, tool schemas and argument keys as JSON,
+    # rather than letting Arrow invent a union of nullable fields. Explicit
+    # standard-library decoding also avoids ujson's float rounding drift.
+    features = Features({key: Json(decode=False) for key in ("prompt", "chosen", "rejected")})
+    if has_tools:
+        features["tools"] = Json(decode=False)
+    if visible_action_only:
+        features["chat_template_kwargs"] = Json(decode=False)
+    if has_images:
+        features["images"] = List(Image())
+    train = Dataset.from_list(train_rows, features=features).with_transform(_decode_json_batch)
     validation = (
-        Dataset.from_list(validation_rows, on_mixed_types="use_json")
-        if validation_rows
-        else None
+        Dataset.from_list(validation_rows, features=features).with_transform(_decode_json_batch)
+        if validation_rows else None
     )
     return train, validation, {"has_tools": has_tools, "has_images": has_images}
 
@@ -237,6 +285,22 @@ def _select_capacity_pair(processor: Any, dataset: Any) -> tuple[Any, dict[str, 
     }
 
 
+def _load_processor(config: dict[str, Any], model_ref: str) -> Any:
+    """Load tokenizer/processor assets only; never load or allocate model weights."""
+    from transformers import AutoProcessor, AutoTokenizer
+
+    model_cfg = config["model"]
+    cls = AutoProcessor if model_cfg.get("multimodal", False) else AutoTokenizer
+    processor = cls.from_pretrained(
+        model_ref, trust_remote_code=bool(model_cfg.get("trust_remote_code", True)),
+    )
+    tokenizer = getattr(processor, "tokenizer", processor)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+    return processor
+
+
 def _build_model_and_processor(
     config: dict[str, Any], model_ref: str
 ) -> tuple[Any, Any, Any | None, Any | None]:
@@ -274,19 +338,9 @@ def _build_model_and_processor(
     else:
         import torch
         from peft import LoraConfig
-        from transformers import AutoProcessor, AutoTokenizer, BitsAndBytesConfig
+        from transformers import BitsAndBytesConfig
 
-        processor = (
-            AutoProcessor.from_pretrained(
-                model_ref,
-                trust_remote_code=bool(model_cfg.get("trust_remote_code", True)),
-            )
-            if multimodal
-            else AutoTokenizer.from_pretrained(
-                model_ref,
-                trust_remote_code=bool(model_cfg.get("trust_remote_code", True)),
-            )
-        )
+        processor = _load_processor(config, model_ref)
         if load_in_4bit:
             quantization_config = BitsAndBytesConfig(
                 load_in_4bit=True,
@@ -477,6 +531,25 @@ def main() -> int:
     if not preflight["valid"]:
         return 2
     if args.dry_run:
+        if args.template_preflight:
+            train_dataset, eval_dataset, features = _load_json_dataset(
+                dataset_dir, visible_action_only=args.profile != "full",
+            )
+            processor = _load_processor(config, preflight["model_name_or_path"])
+            _verify_processing_contract(processor, dataset_features=features)
+            audit = _audit_template_boundaries(processor, [train_dataset, eval_dataset])
+            report = {
+                "valid": True, "model_weights_loaded": False,
+                "dataset_features": features, "template_boundary_audit": audit,
+                "dataset_sha256": {
+                    name: _file_sha256(dataset_dir / name)
+                    for name in ("train.jsonl", "validation.jsonl", "test.jsonl")
+                },
+            }
+            if args.output_dir:
+                output_dir.mkdir(parents=True, exist_ok=True)
+                write_json(output_dir / "template_preflight.json", report)
+            print(json.dumps({"template_preflight": report}, indent=2), flush=True)
         return 0
 
     output_dir.mkdir(parents=True, exist_ok=True)
