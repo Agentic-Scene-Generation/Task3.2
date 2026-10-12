@@ -12,7 +12,11 @@ The first direct-action smoke, `qwen38_dpo_direct_smoke_029` (`pt-gm0e8ehj`), fa
 
 `qwen38_dpo_direct_smoke_030` (`pt-uks57dzt`) completed all two optimizer steps. The supervisor ran for 600 seconds, training took 315 seconds, peak CUDA allocation was 53.49 GiB, and all 512 saved adapter tensors were finite with 256 nonzero LoRA B tensors. Dataset checksums and runtime source hashes matched. The one validation pair had loss 0.668 and preference accuracy 1.0; this verifies infrastructure only, and the promotion gate correctly rejected deployment.
 
-The next experiment is the new frozen campaign `qwen38_design_pairs_031`. A four-task mechanism pilot uses existing SceneEval assignments for 336, 477, 340 and 273, retaining three train tasks and one validation task. Neither the reserved test split nor the old campaign artifacts are modified. Portable known assets mistakenly classified as architecture are returned to their owning inventory; specific folding/privacy/bamboo screen phrases use the shared room-divider identity, while electronic/projection screens retain their previous identities. A contradictory Main IntentCompiler instruction is corrected to require inventory subject_ref; this small shared-contract change addresses the observed schema blocker.
+The four-task mechanism pilot uses existing SceneEval assignments for 336, 477, 340 and 273, retaining three train tasks and one validation task. Neither the reserved test split nor the old campaign artifacts are modified. Portable known assets mistakenly classified as architecture are returned to their owning inventory; specific folding/privacy/bamboo screen phrases use the shared room-divider identity, while electronic/projection screens retain their previous identities. A contradictory Main IntentCompiler instruction is corrected to require inventory subject_ref; this small shared-contract change addresses the observed schema blocker.
+
+`qwen38_design_pairs_031` (`pt-mim9x5g2`) exited with collection code 2 before any model or scene process started. The generation launcher required a CUDA 13 directory in an obsolete `Task3.2` checkout. Export-only CPU preparation had checked serialization and campaign configuration, without exercising the native serving runtime. No A/B group, trajectory or preference pair was generated. The retained failure audit and verified final package distinguish this startup failure from scheduling wait and from low preference yield.
+
+The launcher now resolves all three required CUDA 13 SONAMEs from this project's managed environments, validates explicit overrides without silent replacement, and checks both serving binaries with `ldd`. It exports the resolved directory to the embedding helper, which otherwise has its own stale default. `SCENEEXPERT_RUNTIME_PREFLIGHT_ONLY=true` exercises the actual generation entrypoint on CPU and exits before model startup or asset mirroring. The real CCI preflight selected `.venv_dpo`'s CUDA 13 libraries and resolved both llama-server binaries; 60 focused runtime, campaign and packaging tests passed. This is dependency evidence, not a GPU/model execution result. The retry uses a new frozen campaign `qwen38_design_pairs_032`; 031's source and zero-yield results remain untouched.
 
 The default B sampling protocol remains a single native draw. This pilot explicitly freezes `sceneexpert.shadow_direct_action_sampling.v1` with a maximum of three draws from the exact same request. Every rejected response and every wire request is saved, no rejected tools execute, and selection depends only on first-response design scope. The first eligible draw is executed through the native SDK; if all draws are out of scope, the last draw is executed normally and remains subject to the existing export exclusion. No later action is relabeled as the first turn, no quality score influences sampling, and all existing isolation/physics/request gates remain active.
 
@@ -33,7 +37,7 @@ Run lightweight CPU audit and packaging on CCI. Source results remain intact. Fi
 
 ## Continuing decisions
 
-1. Inspect 031's execution, sampling proofs and preference yield before expanding the frozen campaign. Diagnose the first causal failure if a mechanism remains broken.
+1. Inspect 032's execution, sampling proofs and preference yield before expanding the frozen campaign. Diagnose the first causal failure if a mechanism remains broken.
 2. Address task/intent contract generation and direct-action sampling scope with bounded, opt-in changes. Prefer SceneExpert wrappers and adapters. Modify another group's code only for a demonstrated blocker. Never replace missing evidence with invented labels or silently loosen request/isolation checks.
 3. Freeze a new campaign identity after collection-code changes; an existing frozen source bundle cannot be resumed under changed code. Retain deterministic task partitions, frozen memory and all historical audited data. Merge only sources that passed full server-side pair validation, retaining their original task splits.
 4. Validate a small batch before expansion. Continue bounded SceneEval batches toward the explicit pilot gate (at least eight independent train pairs and four validation pairs), then regular furniture-initial training (at least sixteen train pairs) and reserved scene-level base/adapter evaluation. Report preference yield and missing tasks, including zero-yield batches.
@@ -41,14 +45,14 @@ Run lightweight CPU audit and packaging on CCI. Source results remain intact. Fi
 
 Source changes made on CCI must be committed in English on `dev_lwz_maintain`, mirrored to the local branch via an offline bundle when needed, pushed to `origin/dev_lwz_maintain`, and verified at matching HEADs with clean intended tracked files before the next experiment. Preserve unrelated user changes. Do not force-push. ACP commands contain no Git operations.
 
-CCI autonomous execution is limited to one GPU and estimated elapsed time at most one hour. Longer or multi-GPU work uses ACP. For the four-task 031 pilot, estimate 5–10 minutes preparation, 60–120 minutes execution plus queue, 5–15 minutes server audit and 1–5 minutes packaging. The reference is 028's twelve tasks in about 4 hours 47 minutes with four-way concurrency; task complexity and AFS/rendering latency can widen this range. These estimates are not guarantees. The user has no required hands-on submission work because the loop is authorized to submit; manual review would take roughly 5–15 minutes.
+CCI autonomous execution is limited to one GPU and estimated elapsed time at most one hour. Longer or multi-GPU work uses ACP. For the four-task 032 retry, estimate 5–10 minutes preparation, 60–120 minutes execution plus queue, 5–15 minutes server audit and 1–5 minutes packaging. The reference is 028's twelve tasks in about 4 hours 47 minutes with four-way concurrency; task complexity and AFS/rendering latency can widen this range. These estimates are not guarantees. The user has no required hands-on submission work because the loop is authorized to submit; manual review would take roughly 5–15 minutes.
 
 ## Next ACP command
 
 ```bash
 set -euo pipefail
 cd /mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2
-RUN_ID=qwen38_design_pairs_031 \
+RUN_ID=qwen38_design_pairs_032 \
 MAX_TASKS=4 CHUNK_SIZE=4 ACP_PARALLELISM=4 \
 CAMPAIGN_SCENEEVAL_IDS=336,477,340,273 \
 SHADOW_SCOPE_SAMPLES=3 \
@@ -62,10 +66,10 @@ After real finalization:
 ```bash
 set -euo pipefail
 cd /mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2
-RUN_ID=qwen38_design_pairs_031 \
-PACKAGE_PATH="$PWD/tmp/results/slow_memory/qwen38_design_pairs_031_review_final.tar.gz" \
+RUN_ID=qwen38_design_pairs_032 \
+PACKAGE_PATH="$PWD/tmp/results/slow_memory/qwen38_design_pairs_032_review_final.tar.gz" \
 PACKAGE_MAX_FILE_MIB=16 PACKAGE_MAX_TOTAL_MIB=128 \
 bash tmp/acp/pack_qwen38_initial_pairs.sh
 .venv/bin/python scripts/package_sceneexpert_results.py \
-  --verify tmp/results/slow_memory/qwen38_design_pairs_031_review_final.tar.gz
+  --verify tmp/results/slow_memory/qwen38_design_pairs_032_review_final.tar.gz
 ```

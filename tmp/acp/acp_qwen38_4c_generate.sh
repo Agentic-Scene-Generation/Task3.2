@@ -24,7 +24,10 @@ SHARED_HSSD_AUX_ROOT="${SHARED_HSSD_AUX_ROOT:-$TASK3_SHARED_ROOT/share_data/scen
 SHARED_MODEL_ROOT="${SHARED_MODEL_ROOT:-$TASK3_SHARED_ROOT/share_model}"
 SHARED_SCRIPT_ROOT="${SHARED_SCRIPT_ROOT:-$TASK3_SHARED_ROOT/share_scripts}"
 SCENEEXPERT_DATA_DIR="${SCENEEXPERT_DATA_DIR:-$TASK3_SHARED_ROOT/L202500276_lwz/data}"
-CUDA13_LIB_DIR="${CUDA13_LIB_DIR:-$TASK3_SHARED_ROOT/L202500276_lwz/projects/Task3.2/.venv/lib/python3.11/site-packages/nvidia/cu13/lib}"
+# Empty selects a complete CUDA 13 runtime from this project's environments.
+# An explicit override is validated and never silently replaced.
+CUDA13_LIB_DIR="${CUDA13_LIB_DIR:-}"
+SCENEEXPERT_RUNTIME_PREFLIGHT_ONLY="${SCENEEXPERT_RUNTIME_PREFLIGHT_ONLY:-false}"
 
 # --- 2. Qwen3.8 serving profile ---------------------------------------------
 # TODO(user): Change these together when the critic team changes model builds.
@@ -331,15 +334,37 @@ require_dir CRITIC_HELPER_DIR "$CRITIC_HELPER_DIR"
 require_dir SHARED_HSSD_ROOT "$SHARED_HSSD_ROOT"
 require_dir SHARED_HSSD_AUX_ROOT "$SHARED_HSSD_AUX_ROOT"
 require_dir SHARED_MODEL_ROOT "$SHARED_MODEL_ROOT"
-require_dir CUDA13_LIB_DIR "$CUDA13_LIB_DIR"
 require_file EMBEDDING_LAUNCHER "$EMBEDDING_LAUNCHER"
 require_file READY_CHECKER "$READY_CHECKER"
 require_file LLM_LAUNCHER "$LLM_LAUNCHER"
 require_file QWEN38_MODEL "$MODEL"
 require_file MMPROJ "$MMPROJ"
-require_file CUDA13_RUNTIME "$CUDA13_LIB_DIR/libcudart.so.13"
 require_dir MEMORY_EMBEDDING_MODEL_DIR "$MEMORY_EMBEDDING_MODEL_DIR"
 require_dir SCENEEXPERT_DATA_DIR "$SCENEEXPERT_DATA_DIR"
+PYTHON_BIN="${PYTHON_BIN:-$PROJECT_ROOT/.venv/bin/python}"
+[[ -x "$PYTHON_BIN" ]] || die "no usable SceneSmith Python: $PYTHON_BIN"
+EMBEDDING_LLAMA_DIR="${EMBEDDING_LLAMA_DIR:-${LLAMA_DIR:-$FALLBACK_HELPER_DIR/llama.cpp}}"
+LLM_BINARY="${LLAMA_SERVER:-${LLAMA_DIR:-$(dirname -- "$LLM_LAUNCHER")}/llama-server}"
+EMBEDDING_BINARY="${LLAMA_SERVER:-$EMBEDDING_LLAMA_DIR/llama-server}"
+if [[ ! -x "$EMBEDDING_BINARY" && -x "$EMBEDDING_LLAMA_DIR/build/bin/llama-server" ]]; then
+  EMBEDDING_BINARY="$EMBEDDING_LLAMA_DIR/build/bin/llama-server"
+fi
+CUDA13_LIB_DIR="$("$PYTHON_BIN" "$PROJECT_ROOT/scripts/preflight_sceneexpert_cuda_runtime.py" \
+  --project-root "$PROJECT_ROOT" --cuda13-lib-dir "$CUDA13_LIB_DIR" \
+  --binary "$LLM_BINARY" --binary "$EMBEDDING_BINARY" \
+  --report "$ACP_LOG_DIR/runtime_preflight.json")" || die "native runtime preflight failed"
+# The embedding helper has its own obsolete default; both services inherit the
+# resolved path explicitly, including when they run from a copied helper folder.
+export CUDA13_LIB_DIR
+echo "cuda13_lib_dir=$CUDA13_LIB_DIR"
+require_dir HSSD-models "$SHARED_HSSD_ROOT/hssd-models"
+require_dir HSSD-preprocessed "$SHARED_HSSD_ROOT/preprocessed"
+require_dir HSSD-rendered-assets "$SHARED_HSSD_AUX_ROOT/hssd_rendered_assets"
+require_bool SCENEEXPERT_RUNTIME_PREFLIGHT_ONLY "$SCENEEXPERT_RUNTIME_PREFLIGHT_ONLY"
+if is_true "$SCENEEXPERT_RUNTIME_PREFLIGHT_ONLY"; then
+  echo "Runtime dependency preflight passed; no model services or scene execution started."
+  exit 0
+fi
 
 if [[ ! -f "$LOCAL_HSSD_MIRROR_MARKER" \
     || ! -f "$LOCAL_HSSD_ZVEC_ROOT/0/embedding.index.3.proxima" ]]; then
@@ -512,6 +537,7 @@ else
   # so inheriting them would make it load the 27B generator as an embedding
   # model.  Keep those overrides scoped to the LLM launcher below.
   nohup env -u MODEL -u MODEL_DIR -u MMPROJ -u ALIAS \
+    LLAMA_DIR="$EMBEDDING_LLAMA_DIR" \
     HOST=0.0.0.0 PORT="$EMBEDDING_PORT" PARALLEL=7 THREADS_HTTP=7 \
     N_GPU_LAYERS=auto CTX_SIZE=12288 BATCH_SIZE=4096 UBATCH_SIZE=4096 \
     bash "$EMBEDDING_LAUNCHER" > "$EMBEDDING_LOG" 2>&1 &
