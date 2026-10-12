@@ -229,6 +229,13 @@ def validate_pair_inputs(
                 reasons.append("effective_request_mismatch")
             if request_a.get("model") != EXPECTED_MODEL:
                 reasons.append("unexpected_model")
+            if snapshot.get("shadow_sampling"):
+                from scenesmith.scene_expert.slow_memory.scope_sampling import validate_sampling_proof
+                sampling_hash = validate_sampling_proof(
+                    group / "B", snapshot["shadow_sampling"], request_a,
+                )
+                if sampling_hash != b.get("shadow_sampling_sha256"):
+                    reasons.append("B_scope_sampling_proof_mismatch")
             for name, candidate in (("A", a), ("B", b)):
                 if require_fresh_physics:
                     from scenesmith.scene_expert.slow_memory.paired_scoring import (
@@ -289,6 +296,10 @@ def validate_pair_inputs(
                 if candidate_errors or len(candidate_records) != 1:
                     reasons.append(f"{name}_invalid_candidate_capture")
                 for record in candidate_records:
+                    if name == "B" and snapshot.get("shadow_sampling") and (
+                        record.evidence.details.get("shadow_sampling_sha256") != sampling_hash
+                    ):
+                        reasons.append("B_trajectory_scope_sampling_proof_mismatch")
                     if record.evidence.details.get("relative_profile"):
                         from scenesmith.scene_expert.slow_memory.relative import (
                             report_profile,

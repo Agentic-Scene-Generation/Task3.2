@@ -1847,8 +1847,10 @@ class IntentCompiler:
             "TaskSpec grounding needs a requirement disposition: relation/inventory "
             "for compiled semantics, forbidden_inventory, unsupported, unresolved, "
             "or soft_scope. required_count is generated from SceneTaskSpec only; do "
-            "not emit it. Only kind=relation uses relation, subject_ref, target_ref, "
-            "counts, roles, cohorts, or geometry fields. forbidden_inventory, "
+            "not emit it. kind=inventory requires subject_ref=inventory:<category> "
+            "from the entity catalog and target_ref=null. Only kind=relation uses "
+            "relation, non-null target refs, counts, roles, cohorts, or geometry "
+            "fields; it also requires subject_ref. forbidden_inventory, "
             "unsupported, unresolved, and soft_scope are coverage-only rows: use "
             "reason/surface_mentions (and forbidden_category only for "
             "forbidden_inventory), with no endpoint or relation fields. Every "
@@ -1873,6 +1875,13 @@ class IntentCompiler:
                     "\nEvery SemanticIR requirement needs the target_ref field. Use "
                     "null for inventory, forbidden_inventory, unsupported, unresolved, "
                     "and soft_scope rows."
+                )
+            elif "inventory requires an inventory subject_ref" in validation_error:
+                user += (
+                    "\nThe inventory row is missing its inventory endpoint. Set "
+                    "subject_ref to the exact inventory:<category> entity_ref in "
+                    "the catalog and target_ref to null. Do not change its kind "
+                    "or invent a replacement relation."
                 )
             elif "omitted subject_ref" in validation_error:
                 user += (

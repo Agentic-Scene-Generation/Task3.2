@@ -134,6 +134,19 @@ def publish_audit(
     return summary
 
 
+def select_task_filter(plan: dict, selection: str) -> set[int] | None:
+    """Select already assigned collection tasks without changing partitions."""
+    if not selection.strip():
+        return None
+    selected = {int(value.strip()) for value in selection.split(",")}
+    tasks = {row["sceneeval_id"]: row for row in plan["tasks"]}
+    if not selected or not selected <= tasks.keys():
+        raise ValueError("pilot selection contains a task outside the frozen campaign")
+    if any(tasks[index]["split"] == "test" for index in selected):
+        raise ValueError("reserved test tasks cannot enter a collection pilot")
+    return selected
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
@@ -144,9 +157,17 @@ def main() -> int:
     parser.add_argument(
         "--decision-boundary", choices=("initial", "first_mutation"), default="initial"
     )
+    parser.add_argument("--shadow-scope-samples", type=int, default=1)
+    parser.add_argument("--sceneeval-ids", default="",
+                        help="Optional mechanism pilot filter; preserves the frozen task splits.")
     args = parser.parse_args()
+    if not 1 <= args.shadow_scope_samples <= 3:
+        parser.error("shadow-scope-samples must be 1..3")
+    if args.shadow_scope_samples > 1 and args.decision_boundary != "first_mutation":
+        parser.error("scope sampling requires first_mutation")
     root = args.root.resolve()
     plan = read_json(root / "campaign.json")
+    task_filter = select_task_filter(plan, args.sceneeval_ids)
     annotations = REPO / "scripts/assets/annotations.csv"
     if (
         hashlib.sha256(annotations.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
@@ -180,6 +201,9 @@ def main() -> int:
             "decision_boundary": args.decision_boundary,
             "completion_view": "first_turn",
         }
+        if args.shadow_scope_samples > 1:
+            from scenesmith.scene_expert.slow_memory.scope_sampling import sampling_policy
+            protocol["shadow_sampling"] = sampling_policy(args.shadow_scope_samples)
         if protocol_path.exists() and read_json(protocol_path) != protocol:
             raise ValueError("campaign decision boundary changed; use a new campaign")
         if (
@@ -196,6 +220,7 @@ def main() -> int:
                 row
                 for row in plan["tasks"]
                 if row["split"] == split and row["task_id"] not in completed
+                and (task_filter is None or row["sceneeval_id"] in task_filter)
             ]
             for split in ("train", "validation")
         }
@@ -267,6 +292,7 @@ def main() -> int:
                     ),
                     "SCENEEXPERT_PAIR_MAX_GROUPS": str(len(pending)),
                     "SCENEEXPERT_PAIR_BOUNDARY": args.decision_boundary,
+                    "SCENEEXPERT_SHADOW_SCOPE_SAMPLES": str(args.shadow_scope_samples),
                     "SCENEEXPERT_PAIR_SOURCE_HASH": provenance["source_bundle_hash"],
                     "SCENEEXPERT_CODE_PROVENANCE_GIT_ENABLED": "false",
                     "CRITIC_PROBE_CONTINUE_ON_BATCH_FAILURE": "true",

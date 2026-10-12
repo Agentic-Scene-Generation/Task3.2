@@ -10,7 +10,14 @@ SceneEval 477 failed because seven deterministic intent-extension checks had unr
 
 The first direct-action smoke, `qwen38_dpo_direct_smoke_029` (`pt-gm0e8ehj`), failed before an optimizer step. Historical OpenAI tool arguments were strings while direct-action completions used mappings; the Qwen template requires mappings. Arrow mixed-type inference also changed nested schemas, and default JSON feature decoding changed floating-point render values. The loader now parses object arguments at the training boundary, preserves heterogeneous columns with explicit JSON storage, and uses standard-library decoding for exact values. Source JSONL files remain unchanged.
 
-The next experiment is `qwen38_dpo_direct_smoke_030`, using `PROFILE=pipeline_smoke` and the verified-relative dataset under `qwen38_design_pairs_027`. It runs two optimizer steps. The ACP wrapper now runs the actual local processor/template on all train and validation pairs before model weights are loaded. Plain `--dry-run` retains its config-only behavior; `--dry-run --template-preflight` adds the real CPU template check. This is an infrastructure check; two train pairs cannot establish effectiveness.
+`qwen38_dpo_direct_smoke_030` (`pt-uks57dzt`) completed all two optimizer steps. The supervisor ran for 600 seconds, training took 315 seconds, peak CUDA allocation was 53.49 GiB, and all 512 saved adapter tensors were finite with 256 nonzero LoRA B tensors. Dataset checksums and runtime source hashes matched. The one validation pair had loss 0.668 and preference accuracy 1.0; this verifies infrastructure only, and the promotion gate correctly rejected deployment.
+
+The next experiment is the new frozen campaign `qwen38_design_pairs_031`. A four-task mechanism pilot uses existing SceneEval assignments for 336, 477, 340 and 273, retaining three train tasks and one validation task. Neither the reserved test split nor the old campaign artifacts are modified. Portable known assets mistakenly classified as architecture are returned to their owning inventory; specific folding/privacy/bamboo screen phrases use the shared room-divider identity, while electronic/projection screens retain their previous identities. A contradictory Main IntentCompiler instruction is corrected to require inventory subject_ref; this small shared-contract change addresses the observed schema blocker.
+
+The default B sampling protocol remains a single native draw. This pilot explicitly freezes `sceneexpert.shadow_direct_action_sampling.v1` with a maximum of three draws from the exact same request. Every rejected response and every wire request is saved, no rejected tools execute, and selection depends only on first-response design scope. The first eligible draw is executed through the native SDK; if all draws are out of scope, the last draw is executed normally and remains subject to the existing export exclusion. No later action is relabeled as the first turn, no quality score influences sampling, and all existing isolation/physics/request gates remain active.
+
+Acceptance requires four complete audited A/B groups, no systematic compiler/runtime failure, matching requests, preserved canonical assets/memory and candidate-bound fresh evidence. Preference yield is measured independently; at least one valid direct-action pair is the pilot target, not an invented guarantee. A zero-yield but intact batch is retained and analyzed before further sampling. After mechanism validation, continue bounded SceneEval batches toward the pilot training gate and reserved base/adapter scene evaluation.
+
 
 ## State and lifecycle
 
@@ -26,7 +33,7 @@ Run lightweight CPU audit and packaging on CCI. Source results remain intact. Fi
 
 ## Continuing decisions
 
-1. Inspect 030's finalization and training diagnostics. On success, proceed to a small collection validation with the intended action scope. On failure, diagnose the first causal failure before changing implementation.
+1. Inspect 031's execution, sampling proofs and preference yield before expanding the frozen campaign. Diagnose the first causal failure if a mechanism remains broken.
 2. Address task/intent contract generation and direct-action sampling scope with bounded, opt-in changes. Prefer SceneExpert wrappers and adapters. Modify another group's code only for a demonstrated blocker. Never replace missing evidence with invented labels or silently loosen request/isolation checks.
 3. Freeze a new campaign identity after collection-code changes; an existing frozen source bundle cannot be resumed under changed code. Retain deterministic task partitions, frozen memory and all historical audited data. Merge only sources that passed full server-side pair validation, retaining their original task splits.
 4. Validate a small batch before expansion. Continue bounded SceneEval batches toward the explicit pilot gate (at least eight independent train pairs and four validation pairs), then regular furniture-initial training (at least sixteen train pairs) and reserved scene-level base/adapter evaluation. Report preference yield and missing tasks, including zero-yield batches.
@@ -34,31 +41,31 @@ Run lightweight CPU audit and packaging on CCI. Source results remain intact. Fi
 
 Source changes made on CCI must be committed in English on `dev_lwz_maintain`, mirrored to the local branch via an offline bundle when needed, pushed to `origin/dev_lwz_maintain`, and verified at matching HEADs with clean intended tracked files before the next experiment. Preserve unrelated user changes. Do not force-push. ACP commands contain no Git operations.
 
-CCI autonomous execution is limited to one GPU and estimated elapsed time at most one hour. Longer or multi-GPU work uses ACP. Estimate 030 at 2–5 minutes preparation, 40–80 minutes single-H100 execution plus queue, 5–10 minutes validation and 1–5 minutes packaging. Operator involvement is about 5–15 minutes. These estimates include uncertainty from model loading, compilation and AFS storage.
+CCI autonomous execution is limited to one GPU and estimated elapsed time at most one hour. Longer or multi-GPU work uses ACP. For the four-task 031 pilot, estimate 5–10 minutes preparation, 60–120 minutes execution plus queue, 5–15 minutes server audit and 1–5 minutes packaging. The reference is 028's twelve tasks in about 4 hours 47 minutes with four-way concurrency; task complexity and AFS/rendering latency can widen this range. These estimates are not guarantees. The user has no required hands-on submission work because the loop is authorized to submit; manual review would take roughly 5–15 minutes.
 
 ## Next ACP command
 
 ```bash
 set -euo pipefail
 cd /mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2
-CUDA_VISIBLE_DEVICES=0 \
-CAMPAIGN_ID=qwen38_design_pairs_027 \
-RUN_ID=qwen38_dpo_direct_smoke_030 \
-PROFILE=pipeline_smoke \
-BASE_MODEL=/mnt/afs/task3_2/share_model/Qwen/Qwen3.8-27B \
+RUN_ID=qwen38_design_pairs_031 \
+MAX_TASKS=4 CHUNK_SIZE=4 ACP_PARALLELISM=4 \
+CAMPAIGN_SCENEEVAL_IDS=336,477,340,273 \
+SHADOW_SCOPE_SAMPLES=3 \
+MEMORY_SEED_DIR="$PWD/outputs/slow_memory/qwen38_design_pairs_027/frozen_memory/ablation_4c" \
 PACKAGE_MAX_FILE_MIB=16 PACKAGE_MAX_TOTAL_MIB=128 \
-bash tmp/acp/acp_qwen38_dpo_train.sh
+bash tmp/acp/acp_qwen38_design_pairs.sh
 ```
 
-After actual finalization:
+After real finalization:
 
 ```bash
 set -euo pipefail
 cd /mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-dev_lwz_pre_merge_v2
-RUN_ID=qwen38_dpo_direct_smoke_030 \
-PACKAGE_PATH="$PWD/tmp/results/slow_memory/qwen38_dpo_direct_smoke_030_review_final.tar.gz" \
+RUN_ID=qwen38_design_pairs_031 \
+PACKAGE_PATH="$PWD/tmp/results/slow_memory/qwen38_design_pairs_031_review_final.tar.gz" \
 PACKAGE_MAX_FILE_MIB=16 PACKAGE_MAX_TOTAL_MIB=128 \
 bash tmp/acp/pack_qwen38_initial_pairs.sh
 .venv/bin/python scripts/package_sceneexpert_results.py \
-  --verify tmp/results/slow_memory/qwen38_dpo_direct_smoke_030_review_final.tar.gz
+  --verify tmp/results/slow_memory/qwen38_design_pairs_031_review_final.tar.gz
 ```

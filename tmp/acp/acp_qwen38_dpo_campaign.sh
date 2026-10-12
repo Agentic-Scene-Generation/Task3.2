@@ -19,6 +19,8 @@ if "$PYTHON_BIN" scripts/prepare_sceneexpert_campaign.py \
     --action "${CAMPAIGN_ACTION:-collect}" --parallelism "${ACP_PARALLELISM:-2}" \
     --max-tasks "${MAX_TASKS:-0}" --chunk-size "${CHUNK_SIZE:-12}" \
     --decision-boundary "${DECISION_BOUNDARY:-initial}" \
+    --shadow-scope-samples "${SHADOW_SCOPE_SAMPLES:-1}" \
+    --sceneeval-ids "${CAMPAIGN_SCENEEVAL_IDS:-}" \
     2>&1 | tee "$CONTROL_DIR/collection.log"; then
     collection_exit=0
   else
