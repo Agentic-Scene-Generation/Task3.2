@@ -14,7 +14,12 @@ _LLAMACPP_MODEL_PREFIXES = ("qwen", "llama.cpp", "llama-cpp", "llama")
 def is_llamacpp_model(model: str) -> bool:
     """Return whether ``model`` names a local llama.cpp-compatible model."""
     normalized = str(model or "").strip().lower()
-    return normalized.startswith(_LLAMACPP_MODEL_PREFIXES)
+    # Served Hugging Face model IDs can include an organization namespace.
+    # The family still belongs to the model name, not to that organization.
+    model_name = normalized.rsplit("/", 1)[-1]
+    return normalized.startswith(_LLAMACPP_MODEL_PREFIXES) or model_name.startswith(
+        _LLAMACPP_MODEL_PREFIXES
+    )
 
 
 def _make_openai_strict_schema(schema: Any) -> Any:
