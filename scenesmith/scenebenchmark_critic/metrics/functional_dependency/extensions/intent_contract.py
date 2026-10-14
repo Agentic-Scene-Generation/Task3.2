@@ -456,6 +456,7 @@ def _evaluate_support_readiness(
         relation="on_top_of",
         endpoint="subject",
         declared_owner=declared_subject_stage,
+        target_category=target_category,
     )
     target_owner = generation_owner(
         target_category,
@@ -2617,10 +2618,7 @@ def _evaluate_across_from(
             f"{axis_errors[1]:.0f}deg; front-axis opposition error is "
             f"{opposition_error:.0f}deg"
             if work_surface_pair
-            else (
-                f"mutual facing errors are {errors[0]:.0f}deg and "
-                f"{errors[1]:.0f}deg"
-            )
+            else (f"mutual facing errors are {errors[0]:.0f}deg and {errors[1]:.0f}deg")
         )
         return [
             _result(
@@ -3536,13 +3534,11 @@ _EXTENSION_EVALUATORS = {
             tier=tier,
         )
     ),
-    "behind": lambda constraint, _geometry, objects, case_pack, tier: (
-        _evaluate_behind(
-            constraint,
-            case_pack=case_pack,
-            objects=objects,
-            tier=tier,
-        )
+    "behind": lambda constraint, _geometry, objects, case_pack, tier: _evaluate_behind(
+        constraint,
+        case_pack=case_pack,
+        objects=objects,
+        tier=tier,
     ),
     "faces": lambda constraint, geometry, objects, _case_pack, tier: (
         _evaluate_faces_room(constraint, geometry, objects, tier)

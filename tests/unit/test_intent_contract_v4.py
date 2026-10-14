@@ -3293,6 +3293,12 @@ def test_intent_compiler_exhaustion_never_calls_deterministic_prompt_fallback(
         compiler.compile("A room with a desk.")
 
     assert compiler.last_trace["status"] == "error"
+    assert [row["status"] for row in compiler.last_trace["attempts"]] == [
+        "error",
+        "error",
+    ]
+
+    assert compiler.last_trace["status"] == "error"
 
 
 def test_intent_compiler_ignores_refs_and_relation_metadata_on_coverage_rows() -> None:
@@ -3506,8 +3512,9 @@ def test_intent_compiler_anchor_inventory_retry_preserves_grounded_relation(
 
     assert result["retry_count"] == 1
     assert len(compiler._test_calls) == 2
-    assert "inventory cannot bind environment anchor" in (
-        compiler.last_trace["attempts"][0]["error"]
+    assert (
+        "inventory cannot bind environment anchor"
+        in (compiler.last_trace["attempts"][0]["error"])
     )
     retry = compiler._test_calls[1]["messages"][-1]["content"]
     assert "Never rename that anchor into an inventory ref" in retry
@@ -3640,11 +3647,125 @@ def test_intent_compiler_raises_after_provider_failures_without_fallback() -> No
     with pytest.raises(IntentCompilationError, match="failed after two attempts"):
         compiler.compile("A room with a desk.")
 
+
+@pytest.mark.parametrize("relation", [None, "", "   "])
+def test_semantic_ir_blank_relation_has_grounded_feedback_and_no_fill(relation) -> None:
+    row = {
+        "requirement_id": "treadmill_against_wall",
+        "kind": "relation",
+        "grounding": "prompt:0",
+        "subject_ref": "inventory:treadmill",
+        "target_ref": "anchor:wall",
+        "relation": relation,
+    }
+    compiler = _compiler_with_responses(
+        [_response(_semantic_ir([row])), _response(_semantic_ir([row]))]
+    )
+    with pytest.raises(IntentCompilationError, match="nonempty relation"):
+        compiler.compile(
+            "A treadmill along one wall.",
+            task_spec={"required_large_objects": ["treadmill"]},
+        )
+    assert len(compiler._test_calls) == 2
+    feedback = compiler._test_calls[1]["messages"][-1]["content"]
+    assert "treadmill_against_wall" in feedback and "prompt:0" in feedback
+    assert "Review all relation rows" in feedback
+    assert "unsupported/unresolved coverage" in feedback
     assert compiler.last_trace["status"] == "error"
-    assert [row["status"] for row in compiler.last_trace["attempts"]] == [
-        "error",
-        "error",
-    ]
+
+
+@pytest.mark.parametrize("missing", ["orientation", "groups"])
+def test_semantic_ir_edge_retry_keeps_complete_model_authored_fields(missing) -> None:
+    row = {
+        "requirement_id": "stools_line_counter",
+        "kind": "relation",
+        "grounding": "prompt:0",
+        "relation": "edge_distribution",
+        "subject_ref": "inventory:stool",
+        "subject_count": 4,
+        "target_ref": "inventory:bar_counter",
+        "target_count": 1,
+        "edge_frame": "target_local_rectangle",
+        "groups": [{"edge_class": "long", "counts_per_edge": [4, 0]}],
+        "orientation": "unconstrained",
+    }
+    incomplete = {key: value for key, value in row.items() if key != missing}
+    compiler = _compiler_with_responses(
+        [_response(_semantic_ir([incomplete])), _response(_semantic_ir([row]))]
+    )
+    result = compiler.compile(
+        "Four stools line the long side of the bar counter.",
+        task_spec={"required_large_objects": ["bar_counter"] + ["stool"] * 4},
+    )
+    assert result["retry_count"] == 1 and len(compiler._test_calls) == 2
+    edge = next(
+        r for r in result["constraints"] if r["relation"] == "edge_distribution"
+    )
+    assert edge["groups"] == row["groups"] and edge["orientation"] == "unconstrained"
+    feedback = compiler._test_calls[1]["messages"][-1]["content"]
+    assert "stools_line_counter" in feedback and "prompt:0" in feedback
+    assert "must not remove existing edge groups" in feedback
+    assert "orientation=unconstrained" in feedback
+
+
+def test_semantic_ir_edge_retry_dropping_groups_still_fails_with_two_calls() -> None:
+    row = {
+        "requirement_id": "stools_line_counter",
+        "kind": "relation",
+        "grounding": "prompt:0",
+        "relation": "edge_distribution",
+        "subject_ref": "inventory:stool",
+        "subject_count": 4,
+        "target_ref": "inventory:bar_counter",
+        "target_count": 1,
+        "edge_frame": "target_local_rectangle",
+    }
+    first = {**row, "groups": [{"edge_class": "long", "counts_per_edge": [4, 0]}]}
+    second = {**row, "orientation": "toward_target"}
+    compiler = _compiler_with_responses(
+        [_response(_semantic_ir([first])), _response(_semantic_ir([second]))]
+    )
+    with pytest.raises(IntentCompilationError, match="nonempty groups"):
+        compiler.compile(
+            "Four stools line the long side of the bar counter.",
+            task_spec={"required_large_objects": ["bar_counter"] + ["stool"] * 4},
+        )
+    assert len(compiler._test_calls) == 2
+    assert compiler.last_trace["status"] == "error"
+
+
+def test_floor_covering_keeps_seating_relation_due_at_furniture_stage() -> None:
+    contract = validate_intent_contract(
+        {
+            "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+            "prompt": "An armchair rests on a rug adjacent to a bookshelf.",
+            "constraints": [
+                {
+                    "relation": "on_top_of",
+                    "subjects": {"category": "armchair", "count": 1},
+                    "targets": {"category": "rug", "count": 1},
+                    "source": "explicit_prompt",
+                    "evidence_span": "armchair on rug",
+                }
+            ],
+        }
+    )
+    constraint = contract["constraints"][0]
+    assert constraint["stage"] == "furniture"
+    for label in ("pass", "fail"):
+        checks = [
+            {
+                "check_id": "support",
+                "label": label,
+                "scoring_tier": "core",
+                "evidence": {"intent_constraint": constraint},
+                "diagnostics": {},
+            }
+        ]
+        result = apply_contract_execution_states(
+            {"stage": "furniture", "intent_contract": contract}, checks
+        )
+        assert result[0]["label"] == label and result[0]["scoring_tier"] == "core"
 
 
 def test_intent_compiler_without_task_spec_keeps_unbound_prompt_entity_unresolved() -> (
@@ -4280,8 +4401,9 @@ def test_intent_compiler_retries_when_provider_omits_required_target_ref() -> No
         "semantic IR requirement omitted target_ref"
         in compiler.last_trace["attempts"][0]["error"]
     )
-    assert "Every SemanticIR requirement needs the target_ref field" in (
-        compiler._test_calls[1]["messages"][1]["content"]
+    assert (
+        "Every SemanticIR requirement needs the target_ref field"
+        in (compiler._test_calls[1]["messages"][1]["content"])
     )
 
 
