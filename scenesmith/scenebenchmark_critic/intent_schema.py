@@ -98,7 +98,7 @@ LEGACY_INTENT_CONTRACT_SCHEMA_VERSIONS = frozenset(
     }
 )
 INTENT_CONTRACT_SCHEMA_VERSION = "scenesmith.intent_contract.v8"
-INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v18"
+INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v19"
 INTENT_COMPILER_SEMANTIC_IR_VERSION = "scenesmith.intent_compiler.semantic_ir.v1"
 
 _SEMANTIC_IR_ENTITY_REF = Annotated[
@@ -845,7 +845,9 @@ def intent_compiler_wire_json_schema() -> dict[str, Any]:
                 "type": "string",
                 "pattern": r"^(prompt|interaction|aesthetic):[0-9]+$",
             },
-            "relation": {"enum": sorted(set(RELATION_REGISTRY) - {"required_count"})},
+            "relation": {
+                "enum": sorted(set(RELATION_REGISTRY) - {"required_count"}) + [None]
+            },
             "subject_ref": endpoint_ref,
             "target_ref": {"anyOf": [endpoint_ref, {"type": "null"}]},
             "secondary_target_ref": {"anyOf": [endpoint_ref, {"type": "null"}]},
@@ -880,9 +882,12 @@ def intent_compiler_wire_json_schema() -> dict[str, Any]:
         },
         # llama.cpp's JSON grammar does not reliably enforce conditional
         # ``if/then`` requirements. Keep the endpoint field structurally
-        # present for every row, while allowing null for coverage-only rows;
-        # deterministic admission still requires a catalog ref for relations.
-        "required": ["requirement_id", "kind", "grounding", "target_ref"],
+        # present for every row, while allowing null for coverage-only rows.
+        # Relation must also be structurally present: otherwise a grammar can
+        # repeat relation rows without a relation name despite retry feedback.
+        # Admission still rejects null relation names and missing catalog refs
+        # for kind=relation; these nullable fields never supply semantic values.
+        "required": ["requirement_id", "kind", "grounding", "relation", "target_ref"],
     }
     return {
         "$defs": {"EdgeDistributionGroup": EdgeDistributionGroup.model_json_schema()},

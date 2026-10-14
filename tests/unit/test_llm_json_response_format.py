@@ -102,9 +102,11 @@ def test_namespaced_local_models_preserve_optional_intent_fields(model: str) -> 
         "requirement_id",
         "kind",
         "grounding",
+        "relation",
         "target_ref",
     ]
-    assert "relation" not in requirement["required"]
+    assert None in requirement["properties"]["relation"]["enum"]
+    assert "subject_ref" not in requirement["required"]
     assert "subject_cohort" not in requirement["required"]
     assert schema == original
 

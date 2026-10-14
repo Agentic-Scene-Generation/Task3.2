@@ -902,7 +902,9 @@ def _audit_stage_ownership(
                 f"before={count} after={after_counts.get(category, 0)}"
             )
 
-    def endpoint_owner(selector: Any, relation: str, endpoint: str) -> str | None:
+    def endpoint_owner(
+        selector: Any, relation: str, endpoint: str, target_category: str
+    ) -> str | None:
         if not isinstance(selector, dict):
             return None
         category = _inventory_category(selector.get("category"))
@@ -922,16 +924,20 @@ def _audit_stage_ownership(
             relation=relation,
             endpoint=endpoint,
             declared_owner=declared,
+            target_category=target_category,
         )
 
     for constraint in contract.get("constraints") or []:
         if not isinstance(constraint, dict):
             continue
         relation = str(constraint.get("relation") or "")
+        target_category = str((constraint.get("targets") or {}).get("category") or "")
         endpoint_owners = [
             owner
             for owner in (
-                endpoint_owner(constraint.get("subjects"), relation, "subject"),
+                endpoint_owner(
+                    constraint.get("subjects"), relation, "subject", target_category
+                ),
                 endpoint_owner(
                     {
                         "category": (constraint.get("subjects") or {}).get(
@@ -940,8 +946,11 @@ def _audit_stage_ownership(
                     },
                     relation,
                     "subject",
+                    target_category,
                 ),
-                endpoint_owner(constraint.get("targets"), relation, "target"),
+                endpoint_owner(
+                    constraint.get("targets"), relation, "target", target_category
+                ),
             )
             if owner is not None
         ]
