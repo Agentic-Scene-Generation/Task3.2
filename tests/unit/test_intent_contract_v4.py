@@ -3325,6 +3325,73 @@ def test_intent_compiler_rejects_unbound_inventory_claim_before_coverage_admissi
     ]
 
 
+@pytest.mark.parametrize("anchor", ["window", "door"])
+def test_intent_compiler_anchor_inventory_retry_preserves_grounded_relation(
+    anchor: str,
+) -> None:
+    task_spec = SceneTaskSpec(
+        room_type="office", style="standard", required_large_objects=["desk"]
+    )
+    invalid = {
+        "requirement_id": f"inv_{anchor}",
+        "kind": "inventory",
+        "grounding": "prompt:0",
+        "subject_ref": f"anchor:{anchor}",
+    }
+    valid = {
+        "requirement_id": f"desk_by_{anchor}",
+        "kind": "relation",
+        "grounding": "prompt:0",
+        "relation": "next_to",
+        "subject_ref": "inventory:desk",
+        "target_ref": f"anchor:{anchor}",
+    }
+    compiler = _compiler_with_responses(
+        [_response(_semantic_ir([invalid])), _response(_semantic_ir([valid]))]
+    )
+
+    result = compiler.compile(f"A desk beside the {anchor}.", task_spec=task_spec)
+
+    assert result["retry_count"] == 1
+    assert len(compiler._test_calls) == 2
+    assert "inventory cannot bind environment anchor" in (
+        compiler.last_trace["attempts"][0]["error"]
+    )
+    retry = compiler._test_calls[1]["messages"][-1]["content"]
+    assert "Never rename that anchor into an inventory ref" in retry
+    assert "Do not invent a relation or drop the grounding" in retry
+    assert [row["relation"] for row in result["constraints"]] == [
+        "required_count",
+        "next_to",
+    ]
+    assert result["coverage_ledger"][0]["entity_refs"] == [
+        "inventory:desk",
+        f"anchor:{anchor}",
+    ]
+
+
+def test_intent_compiler_repeated_anchor_inventory_is_not_silently_admitted() -> None:
+    invalid = _semantic_ir(
+        [
+            {
+                "requirement_id": "inv_window",
+                "kind": "inventory",
+                "grounding": "prompt:0",
+                "subject_ref": "anchor:window",
+            }
+        ]
+    )
+    compiler = _compiler_with_responses([_response(invalid), _response(invalid)])
+
+    with pytest.raises(IntentCompilationError, match="environment anchor"):
+        compiler.compile("A room with a window.")
+
+    assert len(compiler._test_calls) == 2
+    assert compiler.last_trace["constraints"] == []
+    assert compiler.last_trace["coverage_ledger"] == []
+    assert all(row["status"] == "error" for row in compiler.last_trace["attempts"])
+
+
 def test_intent_compiler_failure_trace_keeps_all_rejected_entity_refs() -> None:
     task_spec = SceneTaskSpec(
         room_type="office", style="standard", required_large_objects=["desk"]

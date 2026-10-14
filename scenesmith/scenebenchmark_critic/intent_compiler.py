@@ -443,6 +443,11 @@ def _admit_semantic_ir(
             ledger_row["disposition"] = "compiled"
         elif kind == "inventory":
             subject_ref = raw.get("subject_ref")
+            if str(subject_ref or "").startswith("anchor:"):
+                raise ValueError(
+                    f"inventory cannot bind environment anchor {subject_ref!r} "
+                    f"in requirement {requirement_id!r}"
+                )
             if not subject_ref or not str(subject_ref).startswith("inventory:"):
                 raise ValueError("inventory requires an inventory subject_ref")
             _catalog_selector(subject_ref, catalog)
@@ -1516,8 +1521,14 @@ Every relation endpoint MUST be one of the exact entity_ref values in the entity
 catalog. Use subject_ref, target_ref, and (only for a binary relation)
 secondary_target_ref; do not emit targets, subjects, category, or any free-form
 endpoint. An inventory row requires subject_ref="inventory:<category>" and no
-target ref. A forbidden_inventory row has no endpoint refs because the forbidden
-object is intentionally absent from the catalog.
+target ref. Environment anchors such as anchor:window and anchor:door are not
+object inventory. Use them only as endpoints of an explicitly grounded,
+registered relation. Do not add standalone inventory rows for architectural
+mentions or invent inventory:window/inventory:door. If an architectural presence
+requirement cannot be represented by a supported relation, preserve it as an
+unsupported or unresolved coverage row with a truthful reason; do not invent a
+relation to satisfy coverage. A forbidden_inventory row has no endpoint refs
+because the forbidden object is intentionally absent from the catalog.
 
 Map accessibility language according to what the geometry evaluator can
 actually measure. "X reachable/accessible from Y" may emit near(X, Y); it does
@@ -1848,7 +1859,10 @@ class IntentCompiler:
             "for compiled semantics, forbidden_inventory, unsupported, unresolved, "
             "or soft_scope. required_count is generated from SceneTaskSpec only; do "
             "not emit it. kind=inventory requires subject_ref=inventory:<category> "
-            "from the entity catalog and target_ref=null. Only kind=relation uses "
+            "from the entity catalog and target_ref=null. Environment anchor refs "
+            "are never inventory subjects; architectural mentions need a grounded "
+            "registered relation or a truthful coverage-only disposition. Only "
+            "kind=relation uses "
             "relation, non-null target refs, counts, roles, cohorts, or geometry "
             "fields; it also requires subject_ref. forbidden_inventory, "
             "unsupported, unresolved, and soft_scope are coverage-only rows: use "
@@ -1875,6 +1889,16 @@ class IntentCompiler:
                     "\nEvery SemanticIR requirement needs the target_ref field. Use "
                     "null for inventory, forbidden_inventory, unsupported, unresolved, "
                     "and soft_scope rows."
+                )
+            elif "inventory cannot bind environment anchor" in validation_error:
+                user += (
+                    "\nThe reported inventory row refers to an environment anchor, "
+                    "not an inventory object. Never rename that anchor into an "
+                    "inventory ref. Replace the invalid row only with semantics "
+                    "explicitly supported by its grounding: a registered relation "
+                    "using the catalog anchor, or an unsupported/unresolved "
+                    "coverage row with no endpoint fields. Do not invent a "
+                    "relation or drop the grounding."
                 )
             elif "inventory requires an inventory subject_ref" in validation_error:
                 user += (
