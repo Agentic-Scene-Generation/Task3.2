@@ -311,6 +311,20 @@ def _admit_semantic_ir(
     # The provider receives this schema too, but local JSON grammars do not
     # consistently enforce every field type. Admission is the final boundary
     # before SemanticIR becomes hard runtime intent.
+    # Report absent/blank relation names with their grounding before the wire
+    # validator loses that row context. This only rejects; it never fills a key.
+    requirements = payload.get("requirements")
+    if isinstance(requirements, list):
+        for raw in requirements:
+            if not isinstance(raw, dict) or raw.get("kind") != "relation":
+                continue
+            relation = raw.get("relation")
+            if relation is None or (isinstance(relation, str) and not relation.strip()):
+                raise ValueError(
+                    "semantic IR relation requires a nonempty relation in "
+                    f"requirement {raw.get('requirement_id')!r} at "
+                    f"grounding {raw.get('grounding')!r}"
+                )
     validate_compiler_semantic_ir(payload)
     if payload.get("schema_version") != INTENT_COMPILER_SEMANTIC_IR_VERSION:
         raise ValueError("semantic IR schema_version is missing or unsupported")
@@ -422,11 +436,6 @@ def _admit_semantic_ir(
             ledger_row["ignored_semantic_fields"] = ignored_fields
         if kind == "relation":
             relation = str(raw.get("relation") or "")
-            if not relation.strip():
-                raise ValueError(
-                    f"semantic IR relation requires a nonempty relation in "
-                    f"requirement {requirement_id!r} at grounding {grounding!r}"
-                )
             spec = relation_spec(relation)
             if relation == "required_count":
                 raise ValueError("semantic IR may not create required_count")
