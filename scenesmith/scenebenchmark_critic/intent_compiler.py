@@ -244,6 +244,58 @@ def _coverage_row(
     }
 
 
+def _validate_directional_coverage(
+    requirements: list[dict[str, Any]], grounding_catalog: dict[str, str]
+) -> None:
+    """Reject omitted lateral coverage and an explicit vertical contradiction.
+
+    This boundary never supplies relation rows or changes the model's IR. It
+    requires the model to retain unknown coverage for literal signed directions
+    that the registered critic cannot measure, using the existing retry budget.
+    """
+    lateral_cues = re.compile(
+        r"\b(left|right)(?:-hand| hand)?(?: side)?\s+of\b|"
+        r"\b(?:to|on)\s+(?:its|their|the)\s+(left|right)\b"
+        r"(?!\s+(?:wall|corner|side)\b)",
+        re.IGNORECASE,
+    )
+    for grounding, text in grounding_catalog.items():
+        rows = [row for row in requirements if row.get("grounding") == grounding]
+        directions = {
+            (match.group(1) or match.group(2)).lower()
+            for match in lateral_cues.finditer(text)
+        }
+        for direction in sorted(directions):
+            if f"{direction}_of" in RELATION_REGISTRY:
+                continue
+            covered = any(
+                row.get("kind") in {"unsupported", "unresolved"}
+                and re.search(
+                    rf"(?<![a-z]){direction}(?![a-z])",
+                    str(row.get("reason") or "").lower(),
+                )
+                for row in rows
+            )
+            if not covered:
+                raise ValueError(
+                    "unregistered lateral direction requires unsupported/unresolved "
+                    f"coverage for {direction!r} in grounding {grounding!r}"
+                )
+        if re.search(
+            r"\b(?:below|beneath|under|underneath)\b", text, re.IGNORECASE
+        ) and not re.search(r"\b(?:above|over|higher)\b", text, re.IGNORECASE):
+            for row in rows:
+                if (
+                    row.get("kind") == "relation"
+                    and row.get("relation") == "centered_above"
+                ):
+                    raise ValueError(
+                        "centered_above contradicts below/beneath/under grounding "
+                        f"{grounding!r}; preserve unsupported/unresolved coverage "
+                        "when the registered relation cannot express that requirement"
+                    )
+
+
 def _admit_semantic_ir(
     payload: dict[str, Any],
     *,
@@ -254,7 +306,7 @@ def _admit_semantic_ir(
     catalog: dict[str, dict[str, Any]],
     retry_count: int,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, str]]]:
-    """Validate LLM semantics without interpreting prompt wording in code."""
+    """Admit model-authored semantics while rejecting literal coverage loss."""
 
     # The provider receives this schema too, but local JSON grammars do not
     # consistently enforce every field type. Admission is the final boundary
@@ -271,6 +323,7 @@ def _admit_semantic_ir(
     requirements = payload.get("requirements")
     if not isinstance(requirements, list):
         raise ValueError("semantic IR requirements must be a list")
+    _validate_directional_coverage(requirements, grounding_catalog)
     seen_ids: set[str] = set()
     covered_groundings: set[str] = set()
     constraints = _task_spec_inventory_constraints(task_spec)
@@ -1541,6 +1594,17 @@ Preserve explicit adjacency wording: "next to", "beside", and "adjacent to"
 must emit next_to. Emit the looser near relation only for literal "near" wording
 or the accessibility mapping described above. Never downgrade next_to to near.
 
+Signed lateral directions such as "left of", "right of", and "to its right"
+are not adjacency. If the registered relations below have no exact signed
+direction predicate, emit unsupported or unresolved coverage, with a reason
+that explicitly names the original left/right direction. Do not replace it
+with next_to, near, flanking, inventory, or soft_scope. Keep independently stated
+adjacency relations in the same grounding, without treating them as coverage
+for the signed direction.
+"X beneath/below/under Y" must never become centered_above(X, Y). Preserve
+unsupported/unresolved coverage when no registered predicate expresses it;
+do not invent centering or reverse endpoints to manufacture a hard relation.
+
 Registered relations:
 {relation_lines}
 
@@ -1948,6 +2012,22 @@ class IntentCompiler:
                 user += (
                     "\nReturn at least one requirement disposition for every "
                     "grounding ID in the grounding catalog."
+                )
+            if "unregistered lateral direction requires" in validation_error:
+                user += (
+                    "\nFor the reported grounding and left/right direction, emit "
+                    "an unsupported or unresolved coverage row whose reason names "
+                    "that direction. Adjacency, inventory, and soft_scope cannot "
+                    "replace signed directional coverage. Do not invent a "
+                    "registered direction or force an unrelated relation."
+                )
+            if "centered_above contradicts" in validation_error:
+                user += (
+                    "\nThe reported grounding places the subject beneath/below/under "
+                    "its target. Remove the reversed centered_above relation and "
+                    "preserve unsupported/unresolved coverage if the registry "
+                    "cannot express it. Do not invent centering or automatically "
+                    "swap the endpoints."
                 )
             if "unknown or unbound entity_ref" in validation_error:
                 user += (
