@@ -115,7 +115,7 @@ def test_structural_window_is_not_furniture_inventory() -> None:
         for row in contract["constraints"]
     )
     assert "window" not in intent_contract_required_counts(scene)
-    assert INTENT_COMPILER_SPEC_VERSION == "scenesmith.intent_compiler.v17"
+    assert INTENT_COMPILER_SPEC_VERSION == "scenesmith.intent_compiler.v18"
 
 
 def test_repair_placeholder_uses_stable_compound_name_as_category() -> None:
@@ -3701,7 +3701,9 @@ def test_semantic_ir_edge_retry_keeps_complete_model_authored_fields(missing) ->
     edge = next(
         r for r in result["constraints"] if r["relation"] == "edge_distribution"
     )
-    assert edge["groups"] == row["groups"] and edge["orientation"] == "unconstrained"
+    assert [group["edge_class"] for group in edge["groups"]] == ["long"]
+    assert [group["counts_per_edge"] for group in edge["groups"]] == [[4, 0]]
+    assert edge["orientation"] == "unconstrained"
     feedback = compiler._test_calls[1]["messages"][-1]["content"]
     assert "stools_line_counter" in feedback and "prompt:0" in feedback
     assert "must not remove existing edge groups" in feedback
