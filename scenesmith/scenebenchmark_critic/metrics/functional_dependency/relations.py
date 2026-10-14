@@ -16,6 +16,7 @@ from scenesmith.scenebenchmark_critic.core.geometry import (
     bbox_height_span,
     distance_xy,
     front_vector,
+    is_small_object,
     object_category,
     object_footprint_polygon,
     seating_angle_to_target_deg,
