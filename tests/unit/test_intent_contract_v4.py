@@ -115,7 +115,7 @@ def test_structural_window_is_not_furniture_inventory() -> None:
         for row in contract["constraints"]
     )
     assert "window" not in intent_contract_required_counts(scene)
-    assert INTENT_COMPILER_SPEC_VERSION == "scenesmith.intent_compiler.v16"
+    assert INTENT_COMPILER_SPEC_VERSION == "scenesmith.intent_compiler.v17"
 
 
 def test_repair_placeholder_uses_stable_compound_name_as_category() -> None:
@@ -2760,6 +2760,158 @@ def _compiler_with_responses(
 _LEGACY_LIVE_COMPILER_REASON = (
     "v15 legacy contract fixture; v16 accepts CompilerSemanticIR only"
 )
+
+
+@pytest.mark.parametrize("direction", ["left", "right"])
+@pytest.mark.parametrize("weaker_relation", ["next_to", "near"])
+def test_live_compiler_preserves_unregistered_lateral_coverage(
+    direction: str, weaker_relation: str
+) -> None:
+    weakened = {
+        "requirement_id": "opaque_requirement",
+        "kind": "relation",
+        "grounding": "prompt:0",
+        "subject_ref": "inventory:keyboard",
+        "target_ref": "inventory:laptop",
+        "relation": weaker_relation,
+    }
+    truthful = {
+        "requirement_id": "unsupported_direction",
+        "kind": "unsupported",
+        "grounding": "prompt:0",
+        "reason": f"The signed {direction} direction has no registered predicate",
+    }
+    compiler = _compiler_with_responses(
+        [_response(_semantic_ir([weakened])), _response(_semantic_ir([truthful]))]
+    )
+    result = compiler.compile(
+        f"A keyboard sits to the {direction} of a laptop.",
+        task_spec={"required_small_objects": ["keyboard", "laptop"]},
+    )
+
+    assert result["retry_count"] == 1
+    assert all(row["relation"] == "required_count" for row in result["constraints"])
+    assert result["coverage_requirements"][0]["disposition"] == "unsupported"
+    assert direction in result["coverage_requirements"][0]["normalized"]
+    retry = compiler._test_calls[1]["messages"][1]["content"]
+    assert "Adjacency, inventory, and soft_scope cannot replace" in retry
+    assert len(compiler._test_calls) == 2
+    assert all(call["max_tokens"] == 256 for call in compiler._test_calls)
+
+
+def test_live_compiler_does_not_admit_lateral_direction_as_soft_scope() -> None:
+    compiler = _compiler_with_responses(
+        [_response(_semantic_scope("prompt:0")), _response(_semantic_scope("prompt:0"))]
+    )
+    with pytest.raises(IntentCompilationError, match="failed after two attempts"):
+        compiler.compile("A guitar stands to its right.")
+    assert len(compiler._test_calls) == 2
+    assert all(row["status"] == "error" for row in compiler.last_trace["attempts"])
+    assert "unregistered lateral direction" in compiler.last_trace["failure_reason"]
+
+
+def test_live_compiler_keeps_adjacency_separate_from_signed_direction() -> None:
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "adjacency",
+                            "kind": "relation",
+                            "grounding": "prompt:0",
+                            "subject_ref": "inventory:guitar_stand",
+                            "target_ref": "inventory:desk",
+                            "relation": "next_to",
+                        },
+                        {
+                            "requirement_id": "direction",
+                            "kind": "unresolved",
+                            "grounding": "prompt:0",
+                            "reason": "The guitar's right direction is not registered",
+                        },
+                    ]
+                )
+            )
+        ]
+    )
+    result = compiler.compile(
+        "A guitar stand is next to a desk, with a guitar to the right of the stand.",
+        task_spec={"required_large_objects": ["guitar_stand", "desk", "guitar"]},
+    )
+    relations = [
+        row for row in result["constraints"] if row["relation"] != "required_count"
+    ]
+    assert len(relations) == 1 and relations[0]["relation"] == "next_to"
+    assert relations[0]["subjects"]["category"] == "guitar_stand"
+    assert result["coverage_requirements"][0]["disposition"] == "unresolved"
+    assert result["retry_count"] == 0
+
+
+def test_live_compiler_does_not_reverse_beneath_into_centered_above() -> None:
+    wrong = {
+        "requirement_id": "opaque",
+        "kind": "relation",
+        "grounding": "prompt:0",
+        "subject_ref": "inventory:desk",
+        "target_ref": "anchor:window",
+        "relation": "centered_above",
+    }
+    truthful = {
+        "requirement_id": "vertical",
+        "kind": "unresolved",
+        "grounding": "prompt:0",
+        "reason": "Beneath is not the registered centered_above relation",
+    }
+    compiler = _compiler_with_responses(
+        [_response(_semantic_ir([wrong])), _response(_semantic_ir([truthful]))]
+    )
+    result = compiler.compile(
+        "A desk is beneath the window.", task_spec={"required_large_objects": ["desk"]}
+    )
+    assert result["retry_count"] == 1
+    assert all(row["relation"] == "required_count" for row in result["constraints"])
+    assert result["coverage_requirements"][0]["disposition"] == "unresolved"
+    assert "centered_above contradicts" in compiler.last_trace["attempts"][0]["error"]
+    assert (
+        "Do not invent centering or automatically swap"
+        in compiler._test_calls[1]["messages"][1]["content"]
+    )
+
+
+@pytest.mark.parametrize(
+    "prompt,relation,target",
+    [
+        ("A mirror centered above a desk.", "centered_above", "inventory:desk"),
+        ("A mirror next to a desk on the left wall.", "next_to", "inventory:desk"),
+    ],
+)
+def test_live_direction_guard_preserves_supported_unambiguous_relations(
+    prompt: str, relation: str, target: str
+) -> None:
+    compiler = _compiler_with_responses(
+        [
+            _response(
+                _semantic_ir(
+                    [
+                        {
+                            "requirement_id": "supported",
+                            "kind": "relation",
+                            "grounding": "prompt:0",
+                            "subject_ref": "inventory:mirror",
+                            "target_ref": target,
+                            "relation": relation,
+                        },
+                    ]
+                )
+            )
+        ]
+    )
+    result = compiler.compile(
+        prompt, task_spec={"required_large_objects": ["mirror", "desk"]}
+    )
+    assert result["retry_count"] == 0
+    assert [row["relation"] for row in result["constraints"]].count(relation) == 1
 
 
 def test_task_spec_rejects_removed_intent_constraints_field() -> None:
