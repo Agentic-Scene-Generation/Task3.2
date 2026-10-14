@@ -635,11 +635,14 @@ def _contract_inventory_ownership(
                 relation=relation,
                 endpoint="subject",
                 declared_owner=existing_owners.get(subject_category, ""),
+                target_category=(constraint.get("targets") or {}).get("category"),
             )
             subject_priority = (
                 3
                 if explicit_relation and relation in owner_bearing_relations
-                else 2 if explicit_relation else 0
+                else 2
+                if explicit_relation
+                else 0
             )
             record(subject, subject_stage, priority=subject_priority)
 
@@ -655,6 +658,9 @@ def _contract_inventory_ownership(
                         relation=relation,
                         endpoint="subject",
                         declared_owner=existing_owners.get(secondary_subject, ""),
+                        target_category=(constraint.get("targets") or {}).get(
+                            "category"
+                        ),
                     ),
                     priority=subject_priority,
                 )
@@ -784,7 +790,12 @@ def _reconcile_task_spec_stage_ownership(
         subjects = constraint.get("subjects") or {}
         targets = constraint.get("targets") or {}
 
-        def reconciled_endpoint_stage(selector: dict[str, Any], endpoint: str) -> str:
+        def reconciled_endpoint_stage(
+            selector: dict[str, Any],
+            endpoint: str,
+            relation: str = relation,
+            target_category: str = str(targets.get("category") or ""),
+        ) -> str:
             category = _inventory_category(selector.get("category"))
             owned_category = next(
                 (
@@ -801,6 +812,7 @@ def _reconcile_task_spec_stage_ownership(
                 relation=relation,
                 endpoint=endpoint,
                 declared_owner=existing_owners.get(category, ""),
+                target_category=target_category,
             )
 
         endpoint_stages = [
@@ -2144,7 +2156,7 @@ class SceneExpertHookRunner:
         ):
             console_logger.info(
                 f"[SceneExpert] Injected placement reference for {stage} "
-                f"({self._current_injection_bundle.placement_text.count(chr(10))+1} lines)"
+                f"({self._current_injection_bundle.placement_text.count(chr(10)) + 1} lines)"
             )
         if self._inject_pending_stage_repair(stage, scene):
             console_logger.info(

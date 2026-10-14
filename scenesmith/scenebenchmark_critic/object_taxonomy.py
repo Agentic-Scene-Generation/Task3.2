@@ -114,7 +114,16 @@ OBJECT_CATEGORY_PHRASES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "teaching screen",
         ),
     ),
-    ("room_divider", ("room divider", "bamboo screen", "folding screen", "privacy screen", "decorative screen")),
+    (
+        "room_divider",
+        (
+            "room divider",
+            "bamboo screen",
+            "folding screen",
+            "privacy screen",
+            "decorative screen",
+        ),
+    ),
     ("student_desk", ("student desk",)),
     ("teacher_desk", ("teacher desk", "instructor desk")),
     ("reception_desk", ("reception desk", "reception counter")),
@@ -470,6 +479,7 @@ def generation_owner(
     relation: str = "",
     endpoint: str = "subject",
     declared_owner: str = "",
+    target_category: Any = "",
 ) -> str:
     """Return the stage that creates an object, independently of check timing.
 
@@ -486,6 +496,15 @@ def generation_owner(
 
     if normalized_endpoint == "subject":
         if normalized_relation in _SURFACE_SUPPORT_RELATIONS:
+            if canonical_object_category(target_category) == "rug":
+                # A floor covering does not turn floor furniture into an
+                # elevated surface placement. Preserve the object's ordinary
+                # owner; small objects still belong to the manipuland stage.
+                owner = generation_owner(
+                    normalized_category, declared_owner=declared_owner
+                )
+                if owner == "furniture":
+                    return owner
             # Furniture tools are floor-only SE(2): they cannot realize the Z
             # coordinate required by a support relation. The manipuland stage
             # owns every explicit surface-supported subject, independently of
@@ -531,6 +550,7 @@ def execution_owner(
     relation: str = "",
     endpoint: str = "subject",
     existing_owner: str = "",
+    target_category: Any = "",
 ) -> str:
     """Compatibility wrapper for the retired combined ownership helper."""
     return generation_owner(
@@ -538,4 +558,5 @@ def execution_owner(
         relation=relation,
         endpoint=endpoint,
         declared_owner=existing_owner,
+        target_category=target_category,
     )

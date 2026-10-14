@@ -98,7 +98,7 @@ LEGACY_INTENT_CONTRACT_SCHEMA_VERSIONS = frozenset(
     }
 )
 INTENT_CONTRACT_SCHEMA_VERSION = "scenesmith.intent_contract.v8"
-INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v17"
+INTENT_COMPILER_SPEC_VERSION = "scenesmith.intent_compiler.v18"
 INTENT_COMPILER_SEMANTIC_IR_VERSION = "scenesmith.intent_compiler.semantic_ir.v1"
 
 _SEMANTIC_IR_ENTITY_REF = Annotated[
@@ -680,7 +680,10 @@ def validate_intent_contract(
         targets = constraint.get("targets") or {}
         endpoint_stages = [
             execution_owner(
-                subjects.get("category"), relation=relation, endpoint="subject"
+                subjects.get("category"),
+                relation=relation,
+                endpoint="subject",
+                target_category=targets.get("category"),
             ),
             execution_owner(
                 targets.get("category"), relation=relation, endpoint="target"

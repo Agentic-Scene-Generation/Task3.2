@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
 
+
 import numpy as np
 
 from scenesmith.agent_utils.scoring import CategoryScore, FurnitureCritiqueWithScores
@@ -2123,6 +2124,66 @@ class SceneExpertMemoryTest(unittest.TestCase):
             self.assertIn("vector_search_sec", timing)
             self.assertIn("rerank_sec", timing)
             self.assertIn("total_sec", timing)
+
+
+def test_floor_covering_ownership_keeps_current_furniture_and_future_small_objects():
+    from scenesmith.scenebenchmark_critic.intent_schema import (
+        INTENT_CONTRACT_SCHEMA_VERSION,
+        validate_intent_contract,
+    )
+    from scenesmith.scenebenchmark_critic.object_taxonomy import generation_owner
+
+    assert (
+        generation_owner("armchair", relation="on_top_of", target_category="carpet")
+        == "furniture"
+    )
+    assert (
+        generation_owner("armchair", relation="on_top_of", target_category="table")
+        == "manipuland"
+    )
+    assert (
+        generation_owner("book", relation="on_top_of", target_category="rug")
+        == "manipuland"
+    )
+    spec = SceneTaskSpec(
+        room_type="living room",
+        style="cozy",
+        required_large_objects=["armchair", "rug", "bookshelf"],
+        required_small_objects=["cushion"],
+    )
+    contract = validate_intent_contract(
+        {
+            "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+            "prompt": "An armchair on a rug next to a bookshelf, with a cushion on the armchair.",
+            "constraints": [
+                {
+                    "relation": "on_top_of",
+                    "subjects": {"category": "armchair", "count": 1},
+                    "targets": {"category": "rug", "count": 1},
+                    "source": "explicit_prompt",
+                    "evidence_span": "armchair on rug",
+                },
+                {
+                    "relation": "next_to",
+                    "subjects": {"category": "armchair", "count": 1},
+                    "targets": {"category": "bookshelf", "count": 1},
+                    "source": "explicit_prompt",
+                    "evidence_span": "armchair next to bookshelf",
+                },
+                {
+                    "relation": "on_top_of",
+                    "subjects": {"category": "cushion", "count": 1},
+                    "targets": {"category": "armchair", "count": 1},
+                    "source": "explicit_prompt",
+                    "evidence_span": "cushion on armchair",
+                },
+            ],
+        }
+    )
+    reconciled = _reconcile_task_spec_stage_ownership(spec, contract)
+    assert "armchair" in reconciled.required_large_objects
+    assert "armchair" not in reconciled.required_small_objects
+    assert "cushion" in reconciled.required_small_objects
 
 
 if __name__ == "__main__":

@@ -422,6 +422,11 @@ def _admit_semantic_ir(
             ledger_row["ignored_semantic_fields"] = ignored_fields
         if kind == "relation":
             relation = str(raw.get("relation") or "")
+            if not relation.strip():
+                raise ValueError(
+                    f"semantic IR relation requires a nonempty relation in "
+                    f"requirement {requirement_id!r} at grounding {grounding!r}"
+                )
             spec = relation_spec(relation)
             if relation == "required_count":
                 raise ValueError("semantic IR may not create required_count")
@@ -474,6 +479,18 @@ def _admit_semantic_ir(
                 **source,
             }
             if relation == "edge_distribution":
+                missing = [
+                    field
+                    for field in ("orientation", "groups")
+                    if raw.get(field) in (None, [])
+                ]
+                if missing:
+                    raise ValueError(
+                        "semantic IR edge_distribution requires orientation and "
+                        "nonempty groups in requirement "
+                        f"{requirement_id!r} at grounding {grounding!r}; "
+                        f"missing: {', '.join(missing)}"
+                    )
                 row.update(
                     {
                         "edge_frame": raw.get("edge_frame"),
@@ -1570,6 +1587,12 @@ NEVER emit source, evidence_span, inference_reason, warnings, explanations, or
 other provenance text. The compiler expands the ID deterministically after
 generation.
 
+Every kind="relation" row MUST contain a nonempty relation key naming an exact
+registered relation below. A descriptive requirement_id, subject/target role,
+cohort, or surface mention never substitutes for relation. If no registered
+relation expresses the requirement, return truthful unsupported/unresolved
+coverage with the same grounding; never invent a relation or drop coverage.
+
 Every relation endpoint MUST be one of the exact entity_ref values in the entity
 catalog. Use subject_ref, target_ref, and (only for a binary relation)
 secondary_target_ref; do not emit targets, subjects, category, or any free-form
@@ -1620,16 +1643,24 @@ secondary_target_ref for the second endpoint.
 
 For a rectangular target with edge-specific distribution, emit exactly one
 edge_distribution relation. It must contain subject_count, target_ref,
-target_count=1, edge_frame target_local_rectangle, and groups. Each edge class
+target_count=1, edge_frame target_local_rectangle, nonempty groups, and orientation.
+All these fields must remain together in both the initial and corrected output.
+Each edge class
 has one counts_per_edge pair, sorted descending. The sum of all counts must
 equal subject_count. Use [3, 3] for three objects on each long edge and [1, 0]
-for one object on either short edge. Use toward_target only when the prompt
+for one object on either short edge. Orientation is mandatory: use unconstrained
+when the prompt states no facing requirement. Use toward_target only when the prompt
 requires all subjects to face inward; do not also emit a duplicate faces row.
 Do not emit one_per_side; that relation was removed.
 For wording such as "two objects on each side of a target", when no long/short
 edge is explicitly named, emit the reusable flanking relation instead of
 edge_distribution. Reserve edge_distribution for explicit finite rectangular
 edge layouts or unambiguous long/short edge wording.
+Complete example for "Four stools line the long side of the bar counter"
+(with no facing requirement):
+``{{"requirement_id": "stools_line_counter", "kind": "relation", "grounding": "prompt:0", "relation": "edge_distribution", "subject_ref": "inventory:stool", "subject_count": 4, "target_ref": "inventory:bar_counter", "target_count": 1, "edge_frame": "target_local_rectangle", "groups": [{{"edge_class": "long", "counts_per_edge": [4, 0]}}], "orientation": "unconstrained"}}``.
+Counts in this example belong only to that explicit four-stool requirement;
+author the actual counts and edge classes from the supplied grounding.
 
 Target shape is strict: a relation with registered target arity 1 must have
 exactly one target_ref and must omit secondary_target_ref. Only a relation
@@ -1992,6 +2023,26 @@ class IntentCompiler:
                     "\nThe top-level requirements field is mandatory, even when it "
                     "is empty. Return every grounding disposition and hard relation "
                     "inside that SemanticIR list."
+                )
+            if "relation requires a nonempty relation" in validation_error:
+                user += (
+                    "\nEvery kind=relation row must include its exact registered "
+                    "relation key. Review all relation rows, not just the first "
+                    "reported one. A requirement_id, role, cohort or surface "
+                    "mention cannot replace it. If the grounding has no precise "
+                    "registered relation, preserve it as truthful unsupported/"
+                    "unresolved coverage with target_ref=null; do not invent "
+                    "a relation or remove the grounding."
+                )
+            if "edge_distribution requires" in validation_error:
+                user += (
+                    "\nReview every edge_distribution row. Keep subject_count, "
+                    "target_count=1, edge_frame=target_local_rectangle, nonempty "
+                    "groups and orientation together. Fixing orientation must "
+                    "not remove existing edge groups or their explicit counts. "
+                    "Use orientation=unconstrained unless the grounding "
+                    "explicitly requires inward facing. Group counts must sum "
+                    "to the declared subject_count; never invent counts."
                 )
             if "unexpected secondary_target_ref" in validation_error:
                 user += (
