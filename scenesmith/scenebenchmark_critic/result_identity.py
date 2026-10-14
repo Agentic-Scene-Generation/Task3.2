@@ -147,6 +147,15 @@ def _semantic_parameters(
             if key in source and source[key] not in (None, "", []):
                 values[key] = source[key]
     evidence = payload.get("evidence") or {}
+    if (
+        payload.get("metric") == "functional_dependency"
+        and payload.get("relation_type") == "furniture_faces_furniture"
+        and intent.get("relation") == "faces"
+    ):
+        # Facing eligibility differs for hard prompt claims and inferred priors.
+        # Their identical endpoints do not make those evaluator contexts equal.
+        values["facing_intent_source"] = intent.get("source") or ""
+        values["facing_intent_strength"] = intent.get("strength") or ""
     if _is_annotation_facing(payload, evidence, dependency):
         values["relation_type"] = "furniture_faces_furniture"
         criteria = facing_dependency_criteria(dependency)

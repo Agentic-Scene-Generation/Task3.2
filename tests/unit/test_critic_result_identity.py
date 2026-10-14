@@ -303,3 +303,82 @@ def test_facing_defaults_preserve_nonfinite_legacy_and_explicit_distance_rules()
         assert not facing_dependency_criteria(
             {"source": "hssd_annotations:legacy", "max_distance_m": invalid}
         )["distance_required"]
+
+
+def _intent_facing(source: str, label: str = "pass") -> dict:
+    return {
+        "check_id": source,
+        "metric": "functional_dependency",
+        "relation_type": "furniture_faces_furniture",
+        "subject_id": "sofa_0",
+        "target_ids": ["arcade_machine_0"],
+        "label": label,
+        "evidence": {
+            "intent_constraint": {
+                "constraint_id": source,
+                "relation": "faces",
+                "source": source,
+                "strength": "hard",
+            },
+            "dependency": {"max_angle_deg": 60.0, "distance_required": False},
+        },
+    }
+
+
+@pytest.mark.parametrize("deduplicate", [deduplicate_checks, deduplicate_results])
+def test_facing_identity_separates_authority_sensitive_evaluator_contexts(
+    deduplicate,
+) -> None:
+    prompt = _intent_facing("explicit_prompt")
+    inferred = _intent_facing("model_inferred", "fail")
+    rows = [prompt, inferred]
+    before = deepcopy(rows)
+    separated = deduplicate(rows)
+
+    assert len(separated) == 2
+    assert [row["label"] for row in separated] == ["pass", "fail"]
+    assert separated[0]["canonical_check_id"] != separated[1]["canonical_check_id"]
+    assert rows == before
+    assert {row["evidence"]["intent_constraint"]["source"] for row in separated} == {
+        "explicit_prompt",
+        "model_inferred",
+    }
+
+
+@pytest.mark.parametrize("label", ["unknown", "fail"])
+def test_same_facing_authority_keeps_worst_label_and_transitive_provenance(
+    label: str,
+) -> None:
+    first = _intent_facing("explicit_prompt")
+    second = _intent_facing("explicit_prompt", label)
+    second["check_id"] = "duplicate_prompt"
+    second["evidence"]["intent_constraint"]["constraint_id"] = "duplicate_prompt"
+    third = deepcopy(first)
+    third["check_id"] = "third_prompt"
+    merged = deduplicate_results(deduplicate_results([first, second]) + [third])
+
+    assert len(merged) == 1
+    assert merged[0]["label"] == label
+    assert merged[0]["producer_check_ids"] == [
+        "duplicate_prompt",
+        "explicit_prompt",
+        "third_prompt",
+    ]
+    assert merged[0]["source_constraint_ids"] == ["duplicate_prompt", "explicit_prompt"]
+
+
+@pytest.mark.parametrize("deduplicate", [deduplicate_checks, deduplicate_results])
+def test_facing_identity_preserves_hard_versus_soft_eligibility(deduplicate) -> None:
+    hard = _intent_facing("explicit_prompt")
+    soft = deepcopy(hard)
+    soft["evidence"]["intent_constraint"]["strength"] = "soft"
+    assert len(deduplicate([hard, soft])) == 2
+
+
+def test_facing_authority_scope_does_not_change_other_relation_deduplication() -> None:
+    first = _intent_facing("explicit_prompt")
+    second = _intent_facing("model_inferred")
+    for row in (first, second):
+        row["relation_type"] = "generic_near_relation"
+        row["evidence"]["intent_constraint"]["relation"] = "near"
+    assert len(deduplicate_results([first, second])) == 1
