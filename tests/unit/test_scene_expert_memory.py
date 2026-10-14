@@ -2184,6 +2184,54 @@ def test_floor_covering_ownership_keeps_current_furniture_and_future_small_objec
     assert "armchair" in reconciled.required_large_objects
     assert "armchair" not in reconciled.required_small_objects
     assert "cushion" in reconciled.required_small_objects
+    # Exercise the final admission boundary used by build_hook_runner, not
+    # only the earlier projection. It must use the same support target context.
+    from scenesmith.scene_expert.hooks import _audit_stage_ownership
+
+    report = _audit_stage_ownership(spec, reconciled, contract)
+    assert report["status"] == "ok" and report["errors"] == []
+
+
+def test_support_ownership_validator_still_rejects_premature_elevated_and_small_objects():
+    from copy import deepcopy
+
+    from scenesmith.scene_expert.hooks import _audit_stage_ownership
+    from scenesmith.scenebenchmark_critic.intent_schema import (
+        INTENT_CONTRACT_SCHEMA_VERSION,
+        validate_intent_contract,
+    )
+
+    for subject, target in (("armchair", "table"), ("book", "rug")):
+        spec = SceneTaskSpec(
+            room_type="living room",
+            style="cozy",
+            required_large_objects=[target],
+            required_small_objects=[subject],
+        )
+        contract = validate_intent_contract(
+            {
+                "schema_version": INTENT_CONTRACT_SCHEMA_VERSION,
+                "prompt": f"A {subject} rests on a {target}.",
+                "constraints": [
+                    {
+                        "relation": "on_top_of",
+                        "subjects": {"category": subject, "count": 1},
+                        "targets": {"category": target, "count": 1},
+                        "source": "explicit_prompt",
+                        "evidence_span": f"{subject} on {target}",
+                    }
+                ],
+            }
+        )
+        reconciled = _reconcile_task_spec_stage_ownership(spec, contract)
+        assert _audit_stage_ownership(spec, reconciled, contract)["status"] == "ok"
+        premature = deepcopy(contract)
+        premature["constraints"][0]["stage"] = "furniture"
+        report = _audit_stage_ownership(spec, reconciled, premature)
+        assert report["status"] == "invalid"
+        assert any(
+            "precedes endpoint owner 'manipuland'" in e for e in report["errors"]
+        )
 
 
 if __name__ == "__main__":

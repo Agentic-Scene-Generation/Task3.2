@@ -1967,13 +1967,15 @@ class IntentCompiler:
             "are never inventory subjects; architectural mentions need a grounded "
             "registered relation or a truthful coverage-only disposition. Only "
             "kind=relation uses "
-            "relation, non-null target refs, counts, roles, cohorts, or geometry "
+            "a non-null registered relation, non-null target refs, counts, roles, cohorts, or geometry "
             "fields; it also requires subject_ref. forbidden_inventory, "
             "unsupported, unresolved, and soft_scope are coverage-only rows: use "
             "reason/surface_mentions (and forbidden_category only for "
-            "forbidden_inventory), with no endpoint or relation fields. Every "
-            "requirement must include target_ref: use null for inventory and all "
-            "coverage-only rows."
+            "forbidden_inventory), with no other endpoint or geometry fields. Every "
+            "requirement must include relation and target_ref: use relation=null "
+            "and target_ref=null for inventory and all coverage-only rows. A "
+            "kind=relation row must author its exact registered relation name; "
+            "null is never a valid hard relation."
         )
         if validation_error:
             user += (

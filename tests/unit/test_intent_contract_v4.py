@@ -115,7 +115,7 @@ def test_structural_window_is_not_furniture_inventory() -> None:
         for row in contract["constraints"]
     )
     assert "window" not in intent_contract_required_counts(scene)
-    assert INTENT_COMPILER_SPEC_VERSION == "scenesmith.intent_compiler.v18"
+    assert INTENT_COMPILER_SPEC_VERSION == "scenesmith.intent_compiler.v19"
 
 
 def test_repair_placeholder_uses_stable_compound_name_as_category() -> None:
@@ -4376,6 +4376,46 @@ def test_intent_compiler_wire_schema_requires_nullable_target_ref_field() -> Non
             {"type": "null"},
         ]
     }
+
+
+def test_intent_compiler_wire_grammar_rejects_omitted_relation_without_filling_it() -> (
+    None
+):
+    import jsonschema
+
+    schema = intent_compiler_wire_json_schema()
+    missing = {
+        "schema_version": INTENT_COMPILER_SEMANTIC_IR_VERSION,
+        "requirements": [
+            {
+                "requirement_id": "treadmill_against_wall",
+                "kind": "relation",
+                "grounding": "prompt:0",
+                "subject_ref": "inventory:treadmill",
+                "target_ref": "anchor:wall",
+            }
+        ],
+    }
+    with pytest.raises(jsonschema.ValidationError, match="relation.*required"):
+        jsonschema.validate(missing, schema)
+    assert "relation" not in missing["requirements"][0]
+    model_authored = json.loads(json.dumps(missing))
+    model_authored["requirements"][0]["relation"] = "against_wall"
+    jsonschema.validate(model_authored, schema)
+    scope = {
+        "schema_version": INTENT_COMPILER_SEMANTIC_IR_VERSION,
+        "requirements": [
+            {
+                "requirement_id": "appearance",
+                "kind": "soft_scope",
+                "grounding": "prompt:0",
+                "relation": None,
+                "target_ref": None,
+                "reason": "Material is not verified by geometry.",
+            }
+        ],
+    }
+    jsonschema.validate(scope, schema)
 
 
 def test_intent_compiler_retries_when_provider_omits_required_target_ref() -> None:
