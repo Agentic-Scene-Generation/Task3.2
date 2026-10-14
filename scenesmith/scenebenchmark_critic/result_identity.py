@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
+from copy import deepcopy
+from typing import Any
 
-from typing import Any, Iterable
-
+from scenesmith.scenebenchmark_critic.core.facing_criteria import (
+    facing_dependency_criteria,
+)
 
 _LABEL_RANK = {"pass": 0, "unknown": 1, "degraded": 2, "fail": 3}
 
@@ -57,6 +61,8 @@ def semantic_signature(payload: dict[str, Any]) -> tuple[Any, ...]:
         )
     normalized_targets = tuple(sorted(str(item) for item in targets if str(item)))
     params = _semantic_parameters(payload, intent, dependency, diagnostics)
+    if _is_annotation_facing(payload, evidence, dependency):
+        relation = "furniture_faces_furniture"
     return (
         metric,
         relation,
@@ -86,7 +92,7 @@ def deduplicate_checks(checks: Iterable[dict[str, Any]]) -> list[dict[str, Any]]
     for original in checks:
         if not isinstance(original, dict):
             continue
-        check = dict(original)
+        check = deepcopy(original)
         signature = semantic_signature(check)
         canonical = canonical_id(signature)
         producer_id = str(check.get("check_id") or "")
@@ -105,7 +111,7 @@ def deduplicate_results(results: Iterable[dict[str, Any]]) -> list[dict[str, Any
     for original in results:
         if not isinstance(original, dict):
             continue
-        result = dict(original)
+        result = deepcopy(original)
         signature = semantic_signature(result)
         canonical = canonical_id(signature)
         producer_id = str(result.get("check_id") or "")
@@ -140,8 +146,31 @@ def _semantic_parameters(
         ):
             if key in source and source[key] not in (None, "", []):
                 values[key] = source[key]
+    evidence = payload.get("evidence") or {}
+    if _is_annotation_facing(payload, evidence, dependency):
+        values["relation_type"] = "furniture_faces_furniture"
+        criteria = facing_dependency_criteria(dependency)
+        if criteria["target_face"] in {"", "any", "none", "null"}:
+            criteria["target_face"] = "any"
+        values.update(criteria)
+        if not criteria["distance_required"]:
+            values.pop("max_distance_m", None)
     return tuple(
         sorted((str(key), _normalize_value(value)) for key, value in values.items())
+    )
+
+
+def _is_annotation_facing(
+    payload: dict[str, Any], evidence: dict[str, Any], dependency: dict[str, Any]
+) -> bool:
+    """Limit alias normalization to the existing asset orientation evaluator."""
+    return (
+        payload.get("metric") == "functional_dependency"
+        and isinstance(evidence, dict)
+        and evidence.get("annotation_source") == "asset_orientation_dependency"
+        and evidence.get("dependency_key") == "orientation_dependencies"
+        and str(dependency.get("relation_type") or "").strip().lower()
+        in {"face_to", "faces", "facing", "front_faces", "furniture_faces_furniture"}
     )
 
 
@@ -170,6 +199,7 @@ def _merge_provenance(target: dict[str, Any], source: dict[str, Any]) -> None:
     target_evidence = target.get("evidence")
     source_evidence = source.get("evidence")
     evidence_rows: list[dict[str, Any]] = []
+    dependency_rows: list[dict[str, Any]] = []
     for evidence in (target_evidence, source_evidence):
         if not isinstance(evidence, dict):
             continue
@@ -179,6 +209,20 @@ def _merge_provenance(target: dict[str, Any], source: dict[str, Any]) -> None:
         evidence_rows.extend(
             row
             for row in evidence.get("intent_constraints") or []
+            if isinstance(row, dict)
+        )
+        dependency = evidence.get("dependency")
+        if isinstance(dependency, dict):
+            dependency_rows.append(
+                {
+                    key: evidence[key]
+                    for key in ("dependency", "dependency_key", "annotation_source")
+                    if key in evidence
+                }
+            )
+        dependency_rows.extend(
+            row
+            for row in evidence.get("annotation_dependencies") or []
             if isinstance(row, dict)
         )
 
@@ -201,6 +245,8 @@ def _merge_provenance(target: dict[str, Any], source: dict[str, Any]) -> None:
 
     if isinstance(target_evidence, dict) and evidence_rows:
         target_evidence["intent_constraints"] = _unique_json_rows(evidence_rows)
+    if isinstance(target_evidence, dict) and dependency_rows:
+        target_evidence["annotation_dependencies"] = _unique_json_rows(dependency_rows)
 
 
 def _merge_result(target: dict[str, Any], source: dict[str, Any]) -> None:
@@ -217,7 +263,7 @@ def _merge_result(target: dict[str, Any], source: dict[str, Any]) -> None:
         disagreements = list(diagnostics.get("label_disagreements") or [])
         disagreements.extend(labels)
         diagnostics["label_disagreements"] = sorted(set(disagreements))
-    blocking = set(str(item) for item in target.get("blocking_objects") or [])
+    blocking = {str(item) for item in target.get("blocking_objects") or []}
     blocking.update(str(item) for item in source.get("blocking_objects") or [])
     target["blocking_objects"] = sorted(item for item in blocking if item)
 
