@@ -234,6 +234,30 @@ def _eval_relation_over_targets(
             # assets can lack support taxonomy even when their contact geometry is
             # conclusive, so let the deterministic support evaluator decide it.
             pass
+        elif (
+            relation_type == "furniture_faces_furniture"
+            and not _relation_target_is_valid(subject, target, relation_type)
+            and _explicit_facing_has_furniture_endpoints(check, subject, target)
+        ):
+            # A bound prompt-facing claim is geometric even when the target's
+            # open-vocabulary furniture category has no affordance taxonomy.
+            # Require measured subject orientation instead of the geometry
+            # helper's legacy default yaw for this additional evaluation route.
+            try:
+                measured_yaw = math.isfinite(float(subject.get("yaw_deg")))
+            except (TypeError, ValueError):
+                measured_yaw = False
+            if not measured_yaw:
+                scored.append(
+                    _target_eval_payload(
+                        target,
+                        "unknown",
+                        0.0,
+                        "missing measured subject orientation for explicit facing.",
+                        relation_type,
+                    )
+                )
+                continue
         elif not _relation_target_is_valid(subject, target, relation_type):
             inferred = _infer_relation_type(subject, target)
             if inferred and _relation_target_is_valid(subject, target, inferred):
@@ -1775,6 +1799,28 @@ def _angle_penalty(
     if angle is None:
         return 0.0
     return max(angle - 60.0, 0.0) / 60.0
+
+
+def _explicit_facing_has_furniture_endpoints(
+    check: dict[str, Any] | None,
+    subject: dict[str, Any],
+    target: dict[str, Any],
+) -> bool:
+    """Recognize bound hard prompt-facing claims without changing asset priors."""
+    evidence = (check or {}).get("evidence") or {}
+    intent = evidence.get("intent_constraint") or {}
+    return (
+        intent.get("relation") == "faces"
+        and intent.get("source") == "explicit_prompt"
+        and intent.get("strength") == "hard"
+        and (check or {}).get("subject_id") == subject.get("id")
+        and target.get("id") in ((check or {}).get("target_ids") or [])
+        and _scene_object_type(subject) == "furniture"
+        and _is_directional_facing_subject(subject)
+        and _scene_object_type(target) == "furniture"
+        and object_category(target) not in {"wall", "floor", "ceiling"}
+        and not is_small_object(target)
+    )
 
 
 def _relation_target_is_valid(
