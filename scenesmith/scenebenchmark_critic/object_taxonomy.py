@@ -350,6 +350,24 @@ _KNOWN_CATEGORIES = frozenset(
     | {"door", "opening", "room", "wall", "window"}
 )
 
+# Appearance words do not introduce a different functional object. Keep this
+# narrow: nouns such as ``metal`` (metal detector) and positional/ownership
+# qualifiers are deliberately absent. This applies only to unknown categories
+# when matching observed identities, never to compiled inventory or stage rules.
+_APPEARANCE_PREFIX_WORDS = frozenset(
+    {
+        "oldschool",
+        "vintage",
+        "modern",
+        "contemporary",
+        "traditional",
+        "minimalist",
+        "rustic",
+        "wooden",
+        "plastic",
+    }
+)
+
 
 def is_known_object_category(category: Any) -> bool:
     """Return whether taxonomy has an intrinsic policy for this category."""
@@ -466,6 +484,16 @@ def semantic_category_match(requested: Any, observed: Any) -> dict[str, Any]:
             match_kind="taxonomy_equivalent",
             match_path=[observed_raw, observed_category, requested_category],
         )
+    elif requested_category not in _KNOWN_CATEGORIES and observed_raw.endswith(
+        "_" + requested_category
+    ):
+        prefix = observed_raw[: -len(requested_category) - 1].split("_")
+        if prefix and all(word in _APPEARANCE_PREFIX_WORDS for word in prefix):
+            result.update(
+                matched=True,
+                match_kind="appearance_qualified",
+                match_path=[observed_raw, requested_category],
+            )
     return result
 
 
