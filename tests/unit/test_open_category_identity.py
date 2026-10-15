@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from scenesmith.agent_utils.room import ObjectType
 from scenesmith.scenebenchmark_critic.adapter import _category_for_object
 from scenesmith.scenebenchmark_critic.intent_contract import (
     selected_ids,
@@ -72,7 +73,7 @@ def test_known_specialization_does_not_join_existing_exact_cohort():
 def test_furniture_compound_is_not_a_structural_anchor(name):
     obj = SimpleNamespace(
         object_id=name + "_0",
-        object_type=SimpleNamespace(value="furniture"),
+        object_type=ObjectType.FURNITURE,
         name=name,
         description=name,
         metadata={"semantic_name": name},
@@ -88,7 +89,7 @@ def test_real_structure_and_known_furniture_keep_categories():
     ]:
         obj = SimpleNamespace(
             object_id=name + "_0",
-            object_type=SimpleNamespace(value=kind),
+            object_type=ObjectType(kind),
             name=name,
             description=name,
             metadata={"semantic_name": name},
