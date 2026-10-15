@@ -15,6 +15,11 @@ enabled: false   # Default: off. Set true in ablation_3/4/5 experiment configs.
 #   "full"           → harness_memory + observer-only Slow Memory capture
 mode: "disabled"
 
+# Optional planner guidance from the configured native HSSD category buckets.
+# Does not change retrieval, required inventory or unknown-category handling.
+native_retrieval_capabilities:
+  enabled: ${oc.env:SCENEEXPERT_NATIVE_RETRIEVAL_CAPABILITY_GUARD,false}
+
 # Per-stage asset policy. Every native SceneSmith stage still executes.
 #   auto          → prompt-explicit assets are required minimums; planner and
 #                   native designer may add capacity-aware same-stage assets.

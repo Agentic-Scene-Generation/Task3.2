@@ -26,6 +26,7 @@ from scenesmith.agent_utils.thinking import (
 )
 from scenesmith.scene_expert.context_bundle import build_llm_call_debug_record
 from scenesmith.scene_expert.memory.adaptation import effective_relation_grade
+from scenesmith.scene_expert.retrieval_capabilities import NativeAssetCapabilities
 from scenesmith.scene_expert.schemas import (
     HarnessContext,
     MemoryPack,
@@ -1019,11 +1020,13 @@ class GlobalPlanner:
         max_tokens: int = 2048,
         temperature: float = 0.2,
         llm_client: Any | None = None,
+        native_retrieval_capabilities: dict[str, NativeAssetCapabilities] | None = None,
     ) -> None:
         self._model = model
         self._max_tokens = max_tokens
         self._temperature = temperature
         self._structured_llm = llm_client
+        self._native_retrieval_capabilities = native_retrieval_capabilities or {}
         self._client = None
         if self._structured_llm is None:
             from openai import OpenAI
@@ -1036,6 +1039,28 @@ class GlobalPlanner:
         self.last_trace: dict = {}
 
     def generate_stage_brief(
+        self,
+        context: HarnessContext,
+        scene_state_summary: str = "",
+        original_task: str = "",
+    ) -> StageBrief:
+        """Generate one native brief, then enforce optional capability guidance."""
+        brief = self._generate_stage_brief(context, scene_state_summary, original_task)
+        capability = getattr(self, "_native_retrieval_capabilities", {}).get(
+            context.stage
+        )
+        if capability is not None:
+            brief, audit = capability.filter_optional(
+                brief, _brief_required_objects(context.task_spec, context.stage)
+            )
+            self.last_trace["native_retrieval_capability"] = audit
+            self.last_trace["optional_asset_recommendations"] = [
+                item.model_dump(mode="json")
+                for item in brief.optional_asset_recommendations
+            ]
+        return brief
+
+    def _generate_stage_brief(
         self,
         context: HarnessContext,
         scene_state_summary: str = "",
@@ -1343,6 +1368,11 @@ class GlobalPlanner:
             "## Task Specification",
             task_spec_text,
         ]
+        capability = getattr(self, "_native_retrieval_capabilities", {}).get(
+            context.stage
+        )
+        if capability is not None:
+            parts += ["", "## Native Retrieval Capability", capability.prompt_context()]
 
         if original_task.strip():
             parts += [
