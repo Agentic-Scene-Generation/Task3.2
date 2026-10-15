@@ -66,6 +66,9 @@ from scenesmith.scene_expert.memory.store import FastMemoryStore
 from scenesmith.scene_expert.memory.writer import MemoryWriter
 from scenesmith.scene_expert.relation_context import StageRelationProjector
 from scenesmith.scene_expert.repair_controller import RepairController
+from scenesmith.scene_expert.retrieval_capabilities import (
+    native_capabilities_from_config,
+)
 from scenesmith.scene_expert.schemas import (
     REQUIRED_FIRST_DIRECTIVE,
     FullVerifyReport,
@@ -3604,6 +3607,13 @@ def build_hook_runner(
         api_base_url=api_base,
         api_key=api_key,
         llm_client=structured_llm_client,
+        native_retrieval_capabilities=native_capabilities_from_config(
+            cfg_dict,
+            enabled=component_flags["global_planner"] and _cfg_bool(
+                (se_cfg.get("native_retrieval_capabilities", {}) or {}).get("enabled"),
+                False,
+            ),
+        ),
         max_tokens=_cfg_int(
             (
                 (structured_llm_cfg.get("roles", {}) or {}).get("global_planner", {})
