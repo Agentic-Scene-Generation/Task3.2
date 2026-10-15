@@ -95,3 +95,55 @@ def test_real_structure_and_known_furniture_keep_categories():
             metadata={"semantic_name": name},
         )
         assert _category_for_object(obj) == expected
+
+
+def furniture_category(name: str) -> str:
+    obj = SimpleNamespace(
+        object_id=name + "_0",
+        object_type=ObjectType.FURNITURE,
+        name=name,
+        description=name,
+        metadata={"semantic_name": name},
+    )
+    return _category_for_object(obj)
+
+
+@pytest.mark.parametrize(
+    "name", ["desk_chair", "modern_desk_chair", "compact_modern_desk_chair"]
+)
+def test_known_desk_chair_uses_existing_seating_identity(name):
+    assert canonical_object_category(name) == "office_chair"
+    assert furniture_category(name) == "office_chair"
+
+
+@pytest.mark.parametrize(
+    "name", ["desk_chair_cover", "desk_chair_holder", "desk_chair_table"]
+)
+def test_unknown_desk_chair_compounds_do_not_gain_seating_identity(name):
+    assert canonical_object_category(name) != "office_chair"
+    assert furniture_category(name) != "office_chair"
+
+
+def test_optional_desk_chair_does_not_ambiguous_bind_required_desk():
+    objects = [
+        record("writing_desk", furniture_category("writing_desk")),
+        record("desk_chair", furniture_category("desk_chair")),
+    ]
+    assert selected_ids({"category": "desk"}, objects) == ["writing_desk_0"]
+    assert selected_ids({"category": "office_chair"}, objects) == ["desk_chair_0"]
+
+
+def test_known_desk_chair_identity_preserves_stage_ownership():
+    obj = record("desk_chair", furniture_category("desk_chair"), kind="manipuland")
+    assert selected_ids({"category": "office_chair"}, [obj]) == []
+
+
+def test_desk_chair_precedence_keeps_neighboring_known_categories():
+    for name, expected in [
+        ("desk", "desk"),
+        ("writing_desk", "desk"),
+        ("desk_lamp", "desk_lamp"),
+        ("office_chair", "office_chair"),
+        ("floor_lamp", "floor_lamp"),
+    ]:
+        assert furniture_category(name) == expected

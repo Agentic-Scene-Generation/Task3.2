@@ -1045,6 +1045,11 @@ def _category_for_object(obj: SceneObject) -> str:
         # orientation checks.
         category = _canonical_category(str(semantic_name))
         semantic_category = canonical_object_category(semantic_name)
+        if category == "desk" and semantic_category == "office_chair":
+            # The shared taxonomy already recognizes desk chairs as seating.
+            # Its whole-compound identity outranks the legacy interior token;
+            # unknown compounds such as desk_chair_holder remain unchanged.
+            return semantic_category
         if (
             _scene_object_type(obj) == "furniture"
             and category in {"floor", "wall", "ceiling", "door", "window", "opening"}
