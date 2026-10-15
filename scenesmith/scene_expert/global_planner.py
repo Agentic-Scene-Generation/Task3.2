@@ -32,6 +32,10 @@ from scenesmith.scene_expert.schemas import (
     SceneTaskSpec,
     StageBrief,
 )
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    canonical_object_category,
+    categories_are_equivalent,
+)
 from scenesmith.utils.openai_strict_schema import make_openai_strict_json_schema
 
 console_logger = logging.getLogger(__name__)
@@ -837,6 +841,33 @@ def _brief_required_objects(task_spec: SceneTaskSpec, stage: str) -> list[str]:
     return _stage_required_objects(task_spec, stage)
 
 
+def _other_stage_inventory(
+    task_spec: SceneTaskSpec, stage: str
+) -> dict[str, list[str]]:
+    """Keep the compiler's declared owners separate from optional proposals."""
+    return {
+        owner: objects
+        for owner in (
+            "floor_plan",
+            "furniture",
+            "wall_mounted",
+            "ceiling_mounted",
+            "manipuland",
+        )
+        if owner != stage and (objects := _brief_required_objects(task_spec, owner))
+    }
+
+
+def _proposal_matches_inventory(name: str, label: str) -> bool:
+    """Match declared concepts and descriptor prefixes, never interior nouns."""
+    candidate = canonical_object_category(name)
+    declared = canonical_object_category(label)
+    return bool(declared) and (
+        categories_are_equivalent(candidate, declared)
+        or candidate.endswith("_" + declared)
+    )
+
+
 def _apply_stage_policy(
     brief: StageBrief,
     context: HarnessContext,
@@ -852,6 +883,24 @@ def _apply_stage_policy(
         if policy == "auto" and not inventory_closed
         else []
     )
+    other_inventory = _other_stage_inventory(context.task_spec, context.stage)
+    rejected = [
+        item
+        for item in optional
+        if not any(_proposal_matches_inventory(item.name, label) for label in required)
+        and any(
+            _proposal_matches_inventory(item.name, label)
+            for objects in other_inventory.values()
+            for label in objects
+        )
+    ]
+    if rejected:
+        console_logger.warning(
+            "GlobalPlanner %s rejected optional proposals owned by another stage: %s",
+            context.stage,
+            [item.name for item in rejected],
+        )
+        optional = [item for item in optional if item not in rejected]
     constraints = list(brief.constraints_for_designer)
     if inventory_closed:
         policy_rule = (
@@ -872,6 +921,20 @@ def _apply_stage_policy(
         )
     if policy_rule not in constraints:
         constraints = [*constraints[:5], policy_rule]
+    if other_inventory:
+        ownership_rule = (
+            "Stage ownership: assets assigned to another stage are context only; "
+            "do not create or modify them in this stage, including as optional "
+            "additions. Their declared owners are "
+            + "; ".join(
+                f"{owner}: {', '.join(objects)}"
+                for owner, objects in other_inventory.items()
+            )
+            + ". Reserve space or support for later stages and preserve existing "
+            "upstream assets."
+        )
+        if ownership_rule not in constraints:
+            constraints.append(ownership_rule)
     return brief.model_copy(
         update={
             "stage_policy": policy,
@@ -909,6 +972,12 @@ def _format_task_spec(task_spec: SceneTaskSpec, stage: str) -> str:
                 "Stage ownership: do not create, move, or reinterpret objects "
                 "assigned to another stage.",
             )
+        )
+
+    for owner, objects in _other_stage_inventory(task_spec, stage).items():
+        lines.append(
+            f"Context-only inventory owned by {owner} (do not create or modify "
+            f"during {stage}, including as optional assets): {', '.join(objects)}"
         )
 
     if task_spec.functional_zones:
