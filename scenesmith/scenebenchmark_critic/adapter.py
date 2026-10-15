@@ -34,6 +34,7 @@ from scenesmith.scenebenchmark_critic.opening_geometry import (
     normalized_wall_direction,
     opening_physical_bounds,
 )
+from scenesmith.scenebenchmark_critic.object_taxonomy import canonical_object_category
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.constants import (
     BEDS,
     MEDIA,
@@ -1042,7 +1043,17 @@ def _category_for_object(obj: SceneObject) -> str:
         # ``farmhouse_bed``). Contracts bind the functional noun, while the
         # original semantic name remains available in metadata for visual and
         # orientation checks.
-        return _canonical_category(str(semantic_name))
+        category = _canonical_category(str(semantic_name))
+        semantic_category = canonical_object_category(semantic_name)
+        if (
+            _scene_object_type(obj) == "furniture"
+            and category in {"floor", "wall", "ceiling", "door", "window", "opening"}
+            and semantic_category != category
+        ):
+            # An interior anchor word in a furniture compound (floor_rack,
+            # door_stop) is not evidence that the asset is room geometry.
+            return semantic_category
+        return category
     if obj.metadata.get("repair_placeholder"):
         # Repair placeholders are generated from a canonical inventory
         # category.  Their free-form description repeats that name and can
