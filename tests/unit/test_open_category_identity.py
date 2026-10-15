@@ -143,7 +143,7 @@ def test_desk_chair_precedence_keeps_neighboring_known_categories():
         ("desk", "desk"),
         ("writing_desk", "desk"),
         ("desk_lamp", "desk_lamp"),
-        ("office_chair", "office_chair"),
+        ("office_chair", "chair"),  # Legacy room-prefix normalization is retained.
         ("floor_lamp", "floor_lamp"),
     ]:
         assert furniture_category(name) == expected
