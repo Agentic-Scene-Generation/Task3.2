@@ -244,8 +244,84 @@ def _coverage_row(
     }
 
 
+def _direct_lower_endpoint_pairs(
+    text: str, catalog: dict[str, dict[str, Any]]
+) -> list[frozenset[str]] | None:
+    """Locate explicit lower predicates only to scope contradiction rejection.
+
+    Ambiguous names, pronouns and nonlocal phrasing return no resolution. This
+    does not create relations, infer inverse relations or modify SemanticIR.
+    """
+    mentions: dict[tuple[int, int], set[str]] = {}
+    for ref, entry in catalog.items():
+        name = str(entry.get("canonical_category") or "")
+        words = re.findall(r"[a-z0-9]+", name.lower())
+        if not words:
+            continue
+        pattern = r"(?<![a-z0-9])" + r"[\s_-]+".join(words) + r"(?![a-z0-9])"
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            mentions.setdefault(match.span(), set()).add(ref)
+    pairs = []
+    for cue in re.finditer(r"\b(?:below|beneath|under|underneath)\b", text, re.I):
+        before = [span for span in mentions if span[1] <= cue.start()]
+        after = [span for span in mentions if span[0] >= cue.end()]
+        if not before or not after:
+            return None
+        left = max(before, key=lambda span: (span[1], -span[0]))
+        right = min(after, key=lambda span: (span[0], -span[1]))
+        # Only direct, named predicates qualify. Keep the conservative legacy
+        # boundary for anaphora, intervening clauses and unknown endpoint names.
+        if not re.fullmatch(
+            r"\s+(?:(?:is|are|was|were|sits|stands|rests|lies|placed|"
+            r"positioned|located|directly|just|centered)\s+)*",
+            text[left[1] : cue.start()],
+            re.IGNORECASE,
+        ):
+            return None
+        gap = text[cue.end() : right[0]]
+        words = re.findall(r"[a-z]+", gap.lower())
+        if (
+            not re.fullmatch(r"[\s\w-]*", gap)
+            or len(words) > 5
+            or set(words)
+            & {
+                "and",
+                "or",
+                "with",
+                "while",
+                "holding",
+                "holds",
+                "has",
+                "is",
+                "are",
+                "sits",
+                "stands",
+                "rests",
+                "lies",
+                "near",
+                "next",
+                "between",
+                "behind",
+                "in",
+                "on",
+                "of",
+                "beside",
+            }
+            or len(mentions[left]) != 1
+            or len(mentions[right]) != 1
+        ):
+            return None
+        pair = frozenset(mentions[left] | mentions[right])
+        if len(pair) != 2:
+            return None
+        pairs.append(pair)
+    return pairs or None
+
+
 def _validate_directional_coverage(
-    requirements: list[dict[str, Any]], grounding_catalog: dict[str, str]
+    requirements: list[dict[str, Any]],
+    grounding_catalog: dict[str, str],
+    catalog: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     """Reject omitted lateral coverage and an explicit vertical contradiction.
 
@@ -281,14 +357,27 @@ def _validate_directional_coverage(
                     "unregistered lateral direction requires unsupported/unresolved "
                     f"coverage for {direction!r} in grounding {grounding!r}"
                 )
-        if re.search(
-            r"\b(?:below|beneath|under|underneath)\b", text, re.IGNORECASE
-        ) and not re.search(r"\b(?:above|over|higher)\b", text, re.IGNORECASE):
+        if re.search(r"\b(?:below|beneath|under|underneath)\b", text, re.IGNORECASE):
+            lower_pairs = _direct_lower_endpoint_pairs(text, catalog or {})
             for row in rows:
                 if (
                     row.get("kind") == "relation"
                     and row.get("relation") == "centered_above"
                 ):
+                    endpoints = frozenset(
+                        [row.get("subject_ref"), row.get("target_ref")]
+                    )
+                    if (
+                        lower_pairs is not None
+                        and len(endpoints) == 2
+                        and all(ref in (catalog or {}) for ref in endpoints)
+                        and endpoints not in lower_pairs
+                    ):
+                        continue
+                    if lower_pairs is None and re.search(
+                        r"\b(?:above|over|higher)\b", text, re.IGNORECASE
+                    ):
+                        continue
                     raise ValueError(
                         "centered_above contradicts below/beneath/under grounding "
                         f"{grounding!r}; preserve unsupported/unresolved coverage "
@@ -337,7 +426,7 @@ def _admit_semantic_ir(
     requirements = payload.get("requirements")
     if not isinstance(requirements, list):
         raise ValueError("semantic IR requirements must be a list")
-    _validate_directional_coverage(requirements, grounding_catalog)
+    _validate_directional_coverage(requirements, grounding_catalog, catalog)
     seen_ids: set[str] = set()
     covered_groundings: set[str] = set()
     constraints = _task_spec_inventory_constraints(task_spec)

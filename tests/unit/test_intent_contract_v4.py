@@ -2925,6 +2925,144 @@ def test_task_spec_rejects_removed_intent_constraints_field() -> None:
         )
 
 
+def test_live_direction_guard_keeps_distinct_relations_in_one_sentence() -> None:
+    requirements = [
+        {
+            "requirement_id": "table_under_window",
+            "kind": "unsupported",
+            "grounding": "prompt:0",
+            "reason": "No registered relation expresses under a window",
+        },
+        {
+            "requirement_id": "enlarger_centered_on_table",
+            "kind": "relation",
+            "grounding": "prompt:0",
+            "subject_ref": "inventory:photo_enlarger",
+            "target_ref": "inventory:table",
+            "relation": "centered_above",
+        },
+    ]
+    raw = _semantic_ir(requirements)
+    compiler = _compiler_with_responses([_response(raw)])
+    result = compiler.compile(
+        "An enlarging table sits under the frosted window holding a photo "
+        "enlarger at its center.",
+        task_spec={"required_large_objects": ["table", "photo_enlarger"]},
+    )
+    assert result["retry_count"] == 0 and len(compiler._test_calls) == 1
+    relation = next(
+        row for row in result["constraints"] if row["relation"] == "centered_above"
+    )
+    assert relation["subjects"]["category"] == "photo_enlarger"
+    assert relation["targets"]["category"] == "table"
+    assert result["coverage_requirements"][0]["disposition"] == "unsupported"
+    assert compiler.last_trace["attempts"][0]["finish_reason"] == "stop"
+    assert _semantic_ir(requirements) == raw
+
+
+@pytest.mark.parametrize("cue", ["below", "beneath", "under", "underneath"])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_direction_guard_preserves_same_pair_rejection(cue: str, reverse: bool) -> None:
+    subject, target = "inventory:table", "anchor:window"
+    if reverse:
+        subject, target = target, subject
+    row = {
+        "kind": "relation",
+        "grounding": "prompt:0",
+        "subject_ref": subject,
+        "target_ref": target,
+        "relation": "centered_above",
+    }
+    catalog = {
+        "inventory:table": {"canonical_category": "table"},
+        "anchor:window": {"canonical_category": "window"},
+        "inventory:photo_enlarger": {"canonical_category": "photo_enlarger"},
+    }
+    # An unrelated above cue and an unsupported row cannot clear this pair.
+    text = f"A table sits {cue} the window, with a photo enlarger above it."
+    with pytest.raises(ValueError, match="centered_above contradicts"):
+        intent_compiler_module._validate_directional_coverage(
+            [row, {"kind": "unsupported", "grounding": "prompt:0", "reason": cue}],
+            {"prompt:0": text},
+            catalog,
+        )
+
+
+@pytest.mark.parametrize(
+    "text,extra_catalog,target",
+    [
+        (
+            "It sits under the window holding a photo enlarger at its center.",
+            {},
+            "inventory:table",
+        ),
+        (
+            "A table sits under it holding a photo enlarger at its center.",
+            {},
+            "inventory:table",
+        ),
+        (
+            "A table sits under the window holding a photo enlarger at its center.",
+            {"inventory:other_table": {"canonical_category": "table"}},
+            "inventory:table",
+        ),
+        (
+            "A table sits under the window holding a photo enlarger at its center.",
+            {},
+            None,
+        ),
+        (
+            "A table sits under the window holding a photo enlarger at its center.",
+            {},
+            "inventory:missing",
+        ),
+    ],
+)
+def test_direction_guard_keeps_ambiguous_or_unbound_endpoints_conservative(
+    text: str, extra_catalog: dict, target: str | None
+) -> None:
+    catalog = {
+        "inventory:table": {"canonical_category": "table"},
+        "anchor:window": {"canonical_category": "window"},
+        "inventory:photo_enlarger": {"canonical_category": "photo_enlarger"},
+        **extra_catalog,
+    }
+    row = {
+        "kind": "relation",
+        "grounding": "prompt:0",
+        "relation": "centered_above",
+        "subject_ref": "inventory:photo_enlarger",
+        "target_ref": target,
+    }
+    with pytest.raises(ValueError, match="centered_above contradicts"):
+        intent_compiler_module._validate_directional_coverage(
+            [row], {"prompt:0": text}, catalog
+        )
+
+
+def test_direction_guard_handles_named_compound_endpoints_without_filling_ir() -> None:
+    row = {
+        "kind": "relation",
+        "grounding": "prompt:0",
+        "relation": "centered_above",
+        "subject_ref": "inventory:scanner",
+        "target_ref": "inventory:glass_desk",
+    }
+    raw = json.dumps(row, sort_keys=True)
+    intent_compiler_module._validate_directional_coverage(
+        [row],
+        {
+            "prompt:0": "A glass desk is directly beneath the window holding a scanner at its center."
+        },
+        {
+            "inventory:glass_desk": {"canonical_category": "glass_desk"},
+            "anchor:window": {"canonical_category": "window"},
+            "inventory:scanner": {"canonical_category": "scanner"},
+        },
+    )
+    assert json.dumps(row, sort_keys=True) == raw
+
+
 def test_intent_compiler_retries_once_without_task_spec_input() -> None:
     compiler = _compiler_with_responses(
         [
@@ -3512,9 +3650,8 @@ def test_intent_compiler_anchor_inventory_retry_preserves_grounded_relation(
 
     assert result["retry_count"] == 1
     assert len(compiler._test_calls) == 2
-    assert (
-        "inventory cannot bind environment anchor"
-        in (compiler.last_trace["attempts"][0]["error"])
+    assert "inventory cannot bind environment anchor" in (
+        compiler.last_trace["attempts"][0]["error"]
     )
     retry = compiler._test_calls[1]["messages"][-1]["content"]
     assert "Never rename that anchor into an inventory ref" in retry
@@ -4443,9 +4580,8 @@ def test_intent_compiler_retries_when_provider_omits_required_target_ref() -> No
         "semantic IR requirement omitted target_ref"
         in compiler.last_trace["attempts"][0]["error"]
     )
-    assert (
-        "Every SemanticIR requirement needs the target_ref field"
-        in (compiler._test_calls[1]["messages"][1]["content"])
+    assert "Every SemanticIR requirement needs the target_ref field" in (
+        compiler._test_calls[1]["messages"][1]["content"]
     )
 
 
