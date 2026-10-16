@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 import numpy as np
@@ -235,7 +235,7 @@ class SceneExpertMemoryTest(unittest.TestCase):
 
         self.assertEqual(brief, reconciled)
 
-    def test_empty_stage_inventory_uses_noop_brief(self) -> None:
+    def test_empty_stage_inventory_keeps_native_stage_active(self) -> None:
         context = HarnessContext(
             stage="wall_mounted",
             task_spec=SceneTaskSpec(
@@ -246,7 +246,17 @@ class SceneExpertMemoryTest(unittest.TestCase):
             ),
             memory_pack=MemoryPack(),
         )
-        planner = object.__new__(GlobalPlanner)
+        client = Mock()
+        client.complete.return_value = SimpleNamespace(
+            value=StageBrief(
+                stage="wall_mounted",
+                stage_objective="Complete the native wall-mounted stage.",
+            ),
+            attempts=[],
+            final_error_kind="",
+            final_error="",
+        )
+        planner = GlobalPlanner(model="test-model", llm_client=client)
 
         brief = planner.generate_stage_brief(
             context,
@@ -255,9 +265,17 @@ class SceneExpertMemoryTest(unittest.TestCase):
             ),
         )
 
-        self.assertIn("empty wall_mounted stage", brief.stage_objective)
-        self.assertIn("No objects are allocated", brief.constraints_for_designer[0])
-        self.assertNotIn("television", "\n".join(brief.constraints_for_designer))
+        client.complete.assert_called_once()
+        self.assertEqual("wall_mounted", client.complete.call_args.kwargs["stage"])
+        self.assertEqual("ok", planner.last_trace["status"])
+        self.assertEqual([], brief.required_objects)
+        self.assertEqual("auto", brief.stage_policy)
+        self.assertTrue(brief.optional_assets_allowed)
+        self.assertIn("does NOT disable or skip the stage", brief.to_injection_text())
+        self.assertIn(
+            "manipuland: television",
+            "\n".join(brief.constraints_for_designer),
+        )
 
     def test_llm_debug_record_marks_scenebenchmark_prompt_context(self) -> None:
         record = build_llm_call_debug_record(
@@ -1694,7 +1712,8 @@ class SceneExpertMemoryTest(unittest.TestCase):
         )
 
     def test_memory_writer_gates_low_quality_success_and_keeps_failure(self) -> None:
-        writer = MemoryWriter.__new__(MemoryWriter)
+        client = Mock()
+        writer = MemoryWriter(model="test-model", llm_client=client)
         full_report = FullVerifyReport(overall_score=0.4, pass_scene=False)
         ops = [
             MemoryUpdateOp(
@@ -1727,6 +1746,7 @@ class SceneExpertMemoryTest(unittest.TestCase):
 
         filtered = writer._gate_and_enrich_ops(ops, full_report)
 
+        client.complete.assert_not_called()
         self.assertEqual(1, len(filtered))
         failure = filtered[0]
         self.assertEqual("failure_case", failure.memory_type)
