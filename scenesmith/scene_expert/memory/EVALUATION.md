@@ -23,10 +23,13 @@
 - `payload_observed`：**完整 accepted item** 出现在实际 Designer 调用审计 payload 的 prompt 中；不是仅在 context metadata 或模型输出中出现。
 - `delivered`：上述请求还存在无异常的调用完成记录。失败调用保留 payload/错误，但不能冒充模型已完成使用；审计缺失不等于确定没送达。
 - `action_observed=true`：同一调用存在成功的相关变更工具结果，call ID 与实际对象 ID 对上。创建新物体还要在真实 post-stage inventory 中确认该新 ID/角色。它只证明相关操作发生，**不证明整套建议被完整执行**。
-- `target_verified`：复用 main 的逐 constraint 证据，核对当前约束内容 hash；整阶段 pass、模型自述或一般文字不能替代它。`false` 是已验证目标失败，`null` 是未知。
+- `contract_target_verified`：复用 main 的逐 constraint 证据，核对当前约束内容 hash。它记录相关硬约束是否达到，不能单独证明记忆中的自由文本建议得到执行。
+- `target_verified`：核查该条记忆建议的实际结果；只有建议观察均为 `verified_pass` 时为 `true`，任一为 `verified_fail` 时为 `false`，否则为 `null`。整阶段 pass、相关动作或 `contract_target_verified=true` 均不能代替建议本身的结果证据。历史记录若没有这种观察，保持未知，不追溯补造。
 - `causal_benefit` 始终不由单条记录自动填写。工具参数/result hash、payload 路径/hash 与 native 检查证据留在记录中，便于复核。
 
 Skill utility 只有实际送达 + 相关动作 + 精确目标结果时才记录对应观察；基础设施失败不自动处罚全部召回记忆。冻结 bank 下仍不写 Writer、utility、晋升或 public events。旧库不迁移、不重建。
+
+检索资格与跨任务评价资格也需分开。默认过滤仅由当前任务支持的记录；已有多任务支持的记录仍可被检索。严格跨任务来源验证要求该条记录的所有已知来源均不同于当前任务。多任务检索资格本身不证明无同任务暴露，历史 bank 含有评价任务来源时也不能声称是未见任务评价。
 
 `first_critic_pass_round=null` 是有意的：当前持久化证据不足以恢复所有原生 Critic 回合的逐目标检查序列。本轮不侵入 main 补造该序列，也不从最终成功推断“首轮通过”。可读完整请求/工具记录与阶段目标结果；如果后续需要真正的首次通过率，应先补齐原生逐回合证据再统计。
 

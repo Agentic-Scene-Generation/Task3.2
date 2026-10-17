@@ -35,7 +35,12 @@ configured `memory.writer.success_min_overall_score` (environment override:
 Retrieval excludes records supported only by the identical prompt task by
 default (`memory.retrieval.exclude_same_task=true`). A record observed across
 multiple task IDs remains eligible, which keeps shared knowledge available
-while preventing same-prompt replay leakage.
+while filtering records supported solely by the current task. This eligibility
+rule does not itself establish freedom from same-task exposure: strict
+cross-task evaluation requires every known source task of the selected record
+to differ from the current task. A bank containing evaluation-task sources
+must not be described as an unseen-task evaluation solely because its selected
+records pass that check.
 
 ## Concurrency and maintenance
 
