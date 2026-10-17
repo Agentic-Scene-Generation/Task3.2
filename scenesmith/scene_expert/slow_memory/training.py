@@ -31,6 +31,7 @@ def apply_training_profile(config: dict[str, Any], profile: str) -> dict[str, An
         minimum_train_pairs=minimum_train,
         minimum_unique_train_groups=minimum_train,
         minimum_validation_pairs=4 if pilot else 0,
+        minimum_unique_validation_groups=4 if pilot else 0,
         minimum_unique_train_stages=1,
         required_task_types=["designer_initial"],
         minimum_pairs_per_required_task_type=minimum_train,
@@ -271,6 +272,15 @@ def validate_training_request(
         errors.append(
             f"validation split has {split_stats['validation']['pair_count']} pairs; "
             f"at least {minimum_validation} are required"
+        )
+    minimum_validation_groups = int(
+        data_cfg.get("minimum_unique_validation_groups", 0) or 0
+    )
+    if split_stats["validation"]["unique_leakage_groups"] < minimum_validation_groups:
+        errors.append(
+            "validation split has "
+            f"{split_stats['validation']['unique_leakage_groups']} independent "
+            f"scenario groups; at least {minimum_validation_groups} are required"
         )
 
     manifest_path = dataset_dir / "manifest.json"
