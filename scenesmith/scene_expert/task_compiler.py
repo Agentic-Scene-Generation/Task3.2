@@ -559,6 +559,61 @@ def _repair_zero_target_relation_payloads(data: dict) -> dict:
     return dict(data)
 
 
+def _prompt_coordinates_counted_aliases(counts: dict[str, int], prompt: str) -> bool:
+    """Identify a counted list of distinct raw names already in the inventory.
+
+    Keep alias deduplication unless every spelling has one non-overlapping,
+    explicitly numbered mention, its number matches the model inventory, and
+    the mentions form one direct conjunction. This conserves supplied units;
+    it never derives additional inventory or promotes suggested objects.
+    """
+    if not prompt or len(counts) < 2:
+        return False
+    text = str(prompt).lower().replace("_", " ")
+    names = sorted(counts, key=len, reverse=True)
+    aliases = "|".join(
+        rf"(?P<alias_{index}>{re.escape(name.replace('_', ' '))}(?:s|es)?)"
+        for index, name in enumerate(names)
+    )
+    numbers = "|".join(
+        [r"\d+", *(word for word in _NUMBER_WORDS if word not in {"a", "an", "single"})]
+    )
+    matches = list(
+        re.finditer(
+            rf"(?<![a-z0-9])(?P<count>{numbers})\s+(?:{aliases})(?![a-z0-9])",
+            text,
+        )
+    )
+    if len(matches) != len(names):
+        return False
+    mentioned = []
+    for match in matches:
+        name = next(
+            name for index, name in enumerate(names) if match.group(f"alias_{index}")
+        )
+        count = match.group("count")
+        if (int(count) if count.isdigit() else _NUMBER_WORDS[count]) != counts[name]:
+            return False
+        mentioned.append(name)
+    if set(mentioned) != set(names):
+        return False
+    if any(
+        not re.fullmatch(r"\s*(?:,\s*(?:and\s+)?|and\s+)\s*", text[a.end() : b.start()])
+        for a, b in zip(matches, matches[1:])
+    ):
+        return False
+    # Ambiguous, alternative, negative and conditional lists retain the old cap.
+    start = max(text.rfind(mark, 0, matches[0].start()) for mark in ".;!?\n") + 1
+    end = min(
+        [pos for mark in ".;!?\n" if (pos := text.find(mark, matches[-1].end())) >= 0]
+        or [len(text)]
+    )
+    return not re.search(
+        r"\b(?:no|not|without|instead|rather|except|excluding|exclude|avoid|remove|if|whether|either|or|called|aka)\b",
+        text[start:end],
+    )
+
+
 def _normalize_stage_ownership(
     task_spec: SceneTaskSpec, *, prompt: str = ""
 ) -> SceneTaskSpec:
@@ -605,7 +660,8 @@ def _normalize_stage_ownership(
 
     # The model may emit aliases as separate inventories (for example four
     # ``floor plant`` rows plus four ``plant`` rows). Repeated identical names
-    # are real cardinality, while alias-equivalent groups describe the same set.
+    # are real cardinality. Alias-equivalent groups usually describe the same
+    # set, except for distinct counted names explicitly coordinated in the prompt.
     alias_counts: dict[str, dict[str, int]] = {}
     for values in inventories.values():
         for value in values:
@@ -616,7 +672,11 @@ def _normalize_stage_ownership(
     for category, counts in alias_counts.items():
         if len(counts) <= 1:
             continue
-        desired_count = max(counts.values())
+        desired_count = (
+            sum(counts.values())
+            if _prompt_coordinates_counted_aliases(counts, prompt)
+            else max(counts.values())
+        )
         owning_stage = next(
             stage
             for stage, values in inventories.items()
