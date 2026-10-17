@@ -11,7 +11,7 @@ import numpy as np
 
 from pydrake.math import RollPitchYaw
 
-from scenesmith.agent_utils.house import HouseScene
+from scenesmith.agent_utils.house import HouseScene, WallDirection
 from scenesmith.agent_utils.room import (
     ObjectType,
     RoomScene,
@@ -670,6 +670,11 @@ def _opening_geometry_proxy(
     center = (lower + upper) / 2.0
     size = upper - lower
     opening_id = str(getattr(opening, "opening_id", "") or "")
+    wall_direction = normalized_wall_direction(opening)
+    # Bounds are available only for cardinal walls. Preserve their existing
+    # room-facing direction: a fixed yaw of zero points outside a north wall.
+    inward = WallDirection(wall_direction).get_inward_normal()
+    yaw = math.degrees(math.atan2(-inward[0], inward[1]))
     return {
         "id": opening_id,
         "room": scene.room_id,
@@ -678,7 +683,7 @@ def _opening_geometry_proxy(
         "object_type": "structural",
         "category": category,
         "category_norm": category,
-        "yaw_deg": 0.0,
+        "yaw_deg": yaw,
         "bbox_world": {
             "center": center.tolist(),
             "size": size.tolist(),
@@ -697,7 +702,7 @@ def _opening_geometry_proxy(
         "metadata": {
             "structural_proxy": True,
             "opening_id": opening_id,
-            "wall_direction": normalized_wall_direction(opening),
+            "wall_direction": wall_direction,
         },
         "nav_obstacle_class": "structural",
     }
