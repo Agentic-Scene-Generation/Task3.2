@@ -22,6 +22,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--worker-group", type=Path)
+    parser.add_argument("--worker-candidate", choices=("B", "C", "D"), default="B")
     mode.add_argument("--audit-root", type=Path)
     parser.add_argument(
         "--audit-output",
@@ -121,7 +122,7 @@ def main() -> int:
             shadow_environment,
         )
 
-        worker_env = shadow_environment(args.worker_group)
+        worker_env = shadow_environment(args.worker_group, args.worker_candidate)
         os.environ.clear()
         os.environ.update(worker_env)
 
@@ -131,10 +132,10 @@ def main() -> int:
 
         signal.signal(signal.SIGTERM, terminate)
         try:
-            asyncio.run(run_shadow(args.worker_group.resolve()))
+            asyncio.run(run_shadow(args.worker_group.resolve(), args.worker_candidate))
         except Exception as exc:
             write_json(
-                args.worker_group / "B/failure.json",
+                args.worker_group / args.worker_candidate / "failure.json",
                 {"error": str(exc), "type": type(exc).__name__},
             )
             traceback.print_exc()

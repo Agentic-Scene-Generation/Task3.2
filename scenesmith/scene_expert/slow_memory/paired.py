@@ -212,6 +212,17 @@ def validate_pair_inputs(
                         f"group_failure[{status.get('phase', 'unknown')}]: {status['error']}"
                     )
             snapshot = read_json(group / "snapshot.json")
+            from scenesmith.scene_expert.slow_memory.candidate_pool import (
+                candidate_names, validate_pool_execution,
+            )
+            names = candidate_names(snapshot)
+            if len(names) == 4:
+                validate_pool_execution(snapshot, read_json(group / "candidate_pool_execution.json"))
+                for name in names[1:]:
+                    invariant = read_json(group / f"continuation_proof_{name}.json")
+                    if any(invariant[f"{key}_before"] != invariant[f"{key}_after"]
+                           for key in ("canonical", "assets", "memory")):
+                        reasons.append(f"{name}_changed_canonical_state_or_memory")
             proof = read_json(group / "continuation_proof.json")
             if (
                 proof["canonical_before"] != proof["canonical_after"]
@@ -221,22 +232,25 @@ def validate_pair_inputs(
                 reasons.append("shadow_changed_canonical_state_or_memory")
             if tree_hashes(group / "input_scene") != snapshot["files"]:
                 reasons.append("snapshot_files_changed")
-            a = read_json(group / "A/result.json")
-            b = read_json(group / "B/result.json")
+            candidates = {name: read_json(group / name / "result.json") for name in names}
             request_a = read_json(group / "A/first_request.json")
-            request_b = read_json(group / "B/first_request.json")
-            if request_a != request_b:
-                reasons.append("effective_request_mismatch")
+            for name in names[1:]:
+                if request_a != read_json(group / name / "first_request.json"):
+                    reasons.append("effective_request_mismatch")
             if request_a.get("model") != EXPECTED_MODEL:
                 reasons.append("unexpected_model")
+            sampling_hashes = {}
             if snapshot.get("shadow_sampling"):
                 from scenesmith.scene_expert.slow_memory.scope_sampling import validate_sampling_proof
-                sampling_hash = validate_sampling_proof(
-                    group / "B", snapshot["shadow_sampling"], request_a,
-                )
-                if sampling_hash != b.get("shadow_sampling_sha256"):
-                    reasons.append("B_scope_sampling_proof_mismatch")
-            for name, candidate in (("A", a), ("B", b)):
+                for name in names[1:]:
+                    sampling_hashes[name] = validate_sampling_proof(
+                        group / name, snapshot["shadow_sampling"], request_a,
+                    )
+                    if sampling_hashes[name] != candidates[name].get("shadow_sampling_sha256"):
+                        reasons.append(f"{name}_scope_sampling_proof_mismatch")
+            for name, candidate in candidates.items():
+                if len(names) == 4 and candidate.get("candidate") != name:
+                    reasons.append(f"{name}_candidate_identity_mismatch")
                 if require_fresh_physics:
                     from scenesmith.scene_expert.slow_memory.paired_scoring import (
                         validate_scoring_proof,
@@ -296,10 +310,10 @@ def validate_pair_inputs(
                 if candidate_errors or len(candidate_records) != 1:
                     reasons.append(f"{name}_invalid_candidate_capture")
                 for record in candidate_records:
-                    if name == "B" and snapshot.get("shadow_sampling") and (
-                        record.evidence.details.get("shadow_sampling_sha256") != sampling_hash
+                    if name != "A" and snapshot.get("shadow_sampling") and (
+                        record.evidence.details.get("shadow_sampling_sha256") != sampling_hashes[name]
                     ):
-                        reasons.append("B_trajectory_scope_sampling_proof_mismatch")
+                        reasons.append(f"{name}_trajectory_scope_sampling_proof_mismatch")
                     if record.evidence.details.get("relative_profile"):
                         from scenesmith.scene_expert.slow_memory.relative import (
                             report_profile,
@@ -343,10 +357,7 @@ def validate_pair_inputs(
                             reasons.append(f"{name}_media_hash_mismatch")
             if not reasons:
                 sources.extend(
-                    [
-                        group / "A/slow_memory/trajectories.jsonl",
-                        group / "B/slow_memory/trajectories.jsonl",
-                    ]
+                    group / name / "slow_memory/trajectories.jsonl" for name in names
                 )
         except (OSError, ValueError, KeyError, TypeError, IndexError) as exc:
             reasons.append(f"incomplete_group: {exc}")
@@ -418,6 +429,8 @@ def audit_pairs(
         "preference_gate_passed": preference_gate_passed,
         "valid_group_count": sum(group["valid"] for group in groups),
         "candidate_count": len(records),
+        "unique_completion_count": len({record.response_hash for record in records}),
+        "independent_task_group_count": len({record.task_id for record in records}),
         "candidate_verdict_counts": dict(
             Counter(record.evidence.verdict for record in records)
         ),
