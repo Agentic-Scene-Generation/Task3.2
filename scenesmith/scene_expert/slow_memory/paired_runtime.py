@@ -411,7 +411,7 @@ class InitialPair:
         verdict, score, failures = deterministic_verdict(report)
         wire = read_json(directory / "first_request.json")
         sampling_hash = None
-        if candidate == "B" and self.snapshot.get("shadow_sampling"):
+        if candidate != "A" and self.snapshot.get("shadow_sampling"):
             from scenesmith.scene_expert.slow_memory.scope_sampling import validate_sampling_proof
             sampling_hash = validate_sampling_proof(
                 directory, self.snapshot["shadow_sampling"], wire,
@@ -511,8 +511,28 @@ class InitialPair:
         )
 
     async def finish(self, agent: Any, safety_message: str) -> None:
-        """Journal canonical safety effects, then execute B without touching A."""
+        """Run the fixed schedule irrespective of the preceding candidate's quality."""
         self.capture_returned(agent, safety_message, "A")
+        from scenesmith.scene_expert.slow_memory.candidate_pool import candidate_names
+
+        names = candidate_names(self.snapshot)
+        if len(names) == 2:
+            await self._finish_shadow(agent, "B")
+            return
+        execution = {"policy": self.snapshot["candidate_pool"],
+                     "scheduled": list(names[1:]), "worker_exits": {}}
+        write_json(self.group / "candidate_pool_execution.json", execution)
+        for candidate in names[1:]:
+            code = await self._finish_shadow(agent, candidate)
+            execution["worker_exits"][candidate] = code
+            write_json(self.group / "candidate_pool_execution.json", execution)
+        write_json(self.group / "status.json", {
+            "status": "completed" if all(code == 0 for code in execution["worker_exits"].values()) else "pool_failed",
+            "worker_exits": execution["worker_exits"], "canonical": "A",
+        })
+
+    async def _finish_shadow(self, agent: Any, candidate: str) -> int:
+        """Execute one private worker and bind its canonical-invariance proof."""
         before = digest(json_value(agent.scene.to_state_dict()))
         files_before = canonical_asset_hashes(Path(self.snapshot["source_scene_root"]))
         bank = Path(
@@ -524,14 +544,17 @@ class InitialPair:
         write_json(
             self.group / "status.json", {"status": "shadow_running", "canonical": "A"}
         )
-        with (self.group / "shadow.log").open("w", encoding="utf-8") as log:
+        log_name = "shadow.log" if candidate == "B" else f"shadow_{candidate}.log"
+        with (self.group / log_name).open("w", encoding="utf-8") as log:
             process = await asyncio.create_subprocess_exec(
                 sys.executable,
                 str(REPO / "scripts/collect_sceneexpert_initial_pairs.py"),
                 "--worker-group",
                 str(self.group),
+                "--worker-candidate",
+                candidate,
                 cwd=REPO,
-                env=shadow_environment(self.group),
+                env=shadow_environment(self.group, candidate),
                 stdout=log,
                 stderr=subprocess.STDOUT,
                 start_new_session=(os.name == "posix"),
@@ -577,10 +600,16 @@ class InitialPair:
                 pass
         if after != before or bank_after != bank_before or files_after != files_before:
             raise ValueError("shadow execution changed canonical scene")
+        if self.snapshot.get("candidate_pool"):
+            write_json(self.group / f"continuation_proof_{candidate}.json",
+                       read_json(self.group / "continuation_proof.json"))
         write_json(
             self.group / "status.json",
             {
-                "status": "completed" if code == 0 else "shadow_failed",
+                "status": (
+                    "pool_running" if self.snapshot.get("candidate_pool")
+                    else ("completed" if code == 0 else "shadow_failed")
+                ),
                 "shadow_exit": code,
                 "canonical": "A",
             },
@@ -588,8 +617,9 @@ class InitialPair:
         if code:
             LOGGER.error(
                 "Initial-pair shadow failed; canonical scene continues; see %s",
-                self.group / "shadow.log",
+                self.group / log_name,
             )
+        return code
 
 
 def canonical_asset_hashes(root: Path) -> dict[str, str]:
@@ -604,8 +634,10 @@ def canonical_asset_hashes(root: Path) -> dict[str, str]:
     }
 
 
-def shadow_environment(group: Path) -> dict[str, str]:
+def shadow_environment(group: Path, candidate: str = "B") -> dict[str, str]:
     """Disable public bank writes and external audit paths in the child only."""
+    if candidate not in {"B", "C", "D"}:
+        raise ValueError("invalid isolated shadow candidate")
     env = dict(os.environ)
     for key in list(env):
         if key.startswith("SCENEEXPERT_") and (
@@ -614,7 +646,7 @@ def shadow_environment(group: Path) -> dict[str, str]:
             env.pop(key)
     env.pop("SCENEBENCHMARK_CRITIC_TIMING_PATH", None)
     env["SCENEEXPERT_INITIAL_PAIR_SHADOW"] = "1"
-    env["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] = str(group / "B/private_memory")
+    env["SCENEEXPERT_ACTIVE_MEMORY_BANK_DIR"] = str(group / candidate / "private_memory")
     env["SCENEEXPERT_ACTIVE_MEMORY_BANK_READ_ONLY"] = "true"
     env["SCENEEXPERT_COMPONENT_MEMORY_WRITER_ENABLED"] = "false"
     return env
@@ -642,9 +674,12 @@ def _shadow_designer_run_config(agent: Any, snapshot: dict[str, Any]) -> Any:
     return run_config
 
 
-async def run_shadow(group: Path) -> None:
+async def run_shadow(group: Path, candidate: str = "B") -> None:
     """Reconstruct fresh clients, tools, renderer and empty sessions for B."""
     snapshot = read_json(group / "snapshot.json")
+    from scenesmith.scene_expert.slow_memory.candidate_pool import candidate_names
+    if candidate not in candidate_names(snapshot)[1:]:
+        raise ValueError("worker candidate is absent from the frozen schedule")
     verify_pair_code_provenance(snapshot.get("code_provenance", {}), repo_root=REPO)
     if tree_hashes(group / "input_scene") != snapshot["files"]:
         raise ValueError("snapshot files changed; refuse shadow replay")
@@ -660,7 +695,7 @@ async def run_shadow(group: Path) -> None:
     from scenesmith.utils.logging import ConsoleLogger
     from scenesmith.utils.openai import configure_reasoning_persistence
 
-    destination = group / "B"
+    destination = group / candidate
     if (destination / "result.json").exists():
         if (
             read_json(destination / "result.json").get("status") == "completed"
@@ -787,8 +822,8 @@ async def run_shadow(group: Path) -> None:
                     run_config=_shadow_designer_run_config(agent, snapshot),
                 )
         pair = InitialPair(group, snapshot)
-        pair.capture_raw(agent, result, candidate="B")
+        pair.capture_raw(agent, result, candidate=candidate)
         message = agent._end_furniture_design_transaction(transaction)
-        pair.capture_returned(agent, message, "B")
+        pair.capture_returned(agent, message, candidate)
     finally:
         agent.cleanup()

@@ -113,6 +113,9 @@ def rescore_pairs(
     # execution, frozen context, raw assets and continuation before new scoring.
     _, source_groups, errors = validate_pair_inputs(source, require_fresh_physics=False)
     groups = _select_valid_groups(source_groups, group_names)
+    if any(read_json(source / row["group"] / "snapshot.json").get("candidate_pool")
+           for row in groups):
+        raise ValueError("four-candidate pools require their original native labels; legacy A/B rescoring is unsupported")
     output.mkdir(parents=True)
     origin = {
         "schema_version": "sceneexpert.initial_pairs_rescore.v1",

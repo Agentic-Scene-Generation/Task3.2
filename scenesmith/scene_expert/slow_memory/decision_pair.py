@@ -199,6 +199,12 @@ class DecisionPair(InitialPair):
             snapshot["boundary_selection"] = (
                 "first_natural_A_design_response_before_tools;B_bounded_scope_sampling_v1"
             )
+        count = int(os.environ.get("SCENEEXPERT_POOL_CANDIDATES", "2"))
+        if count != 2:
+            from scenesmith.scene_expert.slow_memory.candidate_pool import pool_policy
+
+            snapshot["candidate_pool"] = pool_policy(count)
+            snapshot["boundary_selection"] += ";fixed_four_candidate_pool_v1"
         snapshot["files"] = copy_scene_tree(
             Path(snapshot["source_scene_root"]), self.group / "input_scene"
         )
