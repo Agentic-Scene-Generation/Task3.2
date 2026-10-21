@@ -214,6 +214,7 @@ def test_sdk_wire_capture_sees_serialized_request_and_never_headers(tmp_path, mo
 
 
 def test_candidate_capture_preserves_images_and_exports_identical_contexts(tmp_path):
+    source = {"identity_kind": "source_bundle_sha256", "source_bundle_hash": "fixture"}
     image = b"\x89PNG\r\n\x1a\nfixture"
     image_url = "data:image/png;base64," + base64.b64encode(image).decode()
     messages = [
@@ -233,6 +234,7 @@ def test_candidate_capture_preserves_images_and_exports_identical_contexts(tmp_p
             run_id=name,
             task_spec=SceneTaskSpec(room_type="bedroom", style="minimal"),
             model_id=EXPECTED_MODEL,
+            code_provenance=source,
         )
         collector.capture_candidate(
             payload={
@@ -268,11 +270,54 @@ def test_candidate_capture_preserves_images_and_exports_identical_contexts(tmp_p
     assert len(records) == 2
     assert records[0].context_hash == records[1].context_hash
     assert all(record.image_refs and record.prompt_complete for record in records)
+    assert all(record.provenance["code_provenance"] == source for record in records)
     manifest = export_dpo_dataset(
         trajectory_sources=[tmp_path / "A", tmp_path / "B"], output_dir=tmp_path / "dpo"
     )
     assert manifest["stats"]["eligible_pair_count"] == 1
     assert list((tmp_path / "dpo/images").rglob("*.png"))
+
+
+@pytest.mark.parametrize(
+    "policy", [None, "only_last_designer_call_receives_stage_outcome"]
+)
+def test_non_independent_capture_keeps_existing_record_provenance(tmp_path, policy):
+    source = {"source_bundle_hash": "fixture"}
+    collector = TrajectoryCollector(
+        scene_debug_dir=tmp_path,
+        prompt="Place a bed",
+        scene_id="bedroom",
+        run_id="observer",
+        task_spec=SceneTaskSpec(room_type="bedroom", style="minimal"),
+        model_id=EXPECTED_MODEL,
+        code_provenance=source,
+    )
+    collector.capture_candidate(
+        payload={
+            "stage": "furniture",
+            "agent_role": "designer",
+            "event": "request_initial_design",
+            "prompt": "Place a bed",
+            "output": "Placed a bed",
+            "capture_policy": policy,
+        },
+        evidence=PreferenceEvidence(
+            evidence_id="observer",
+            kind="deterministic",
+            verdict="accepted",
+            authoritative=True,
+            quality_score=1.0,
+            source="raw",
+        ),
+        outcome=TrajectoryOutcome(execution_complete=True, causal_link_verified=True),
+        scene_state_path="raw_state.json",
+    )
+    row = read_json(collector.trajectory_path)
+    assert "code_provenance" not in row["provenance"]
+    assert row["metadata"]["capture_policy"] == (
+        policy or "only_last_designer_call_receives_stage_outcome"
+    )
+    assert read_json(collector.manifest_path)["code_provenance"] == source
 
 
 def test_local_tool_rng_restores_without_consuming_canonical_draws():
