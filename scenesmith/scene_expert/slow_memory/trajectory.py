@@ -1074,6 +1074,13 @@ class TrajectoryCollector:
                 "tool_schema_hash": _stable_hash(tools, 64) if tools else "",
                 "image_hashes": [item.get("sha256", "") for item in image_refs],
                 "tool_media_refs": list(unique_embedded_media.values()),
+                **(
+                    {"code_provenance": self.code_provenance}
+                    if payload.get("capture_policy")
+                    == "independently_scored_raw_initial_candidate"
+                    and self.code_provenance
+                    else {}
+                ),
             },
             metadata={
                 "task_spec": self.task_spec.model_dump(mode="json"),

@@ -22,6 +22,12 @@ from scenesmith.scene_expert.slow_memory.paired import (
     write_json,
 )
 from scenesmith.scene_expert.slow_memory.paired_runtime import InitialPair
+from scenesmith.scene_expert.schemas import SceneTaskSpec
+from scenesmith.scene_expert.slow_memory.schemas import (
+    PreferenceEvidence,
+    TrajectoryOutcome,
+)
+from scenesmith.scene_expert.slow_memory.trajectory import TrajectoryCollector
 from tests.unit.test_fixed_candidate_pool import four_group
 
 
@@ -128,6 +134,62 @@ def test_default_policy_remains_v1():
     assert not is_pair_local(
         {"decision_boundary": "first_mutation", "candidate_pool": pool_policy(4)}
     )
+
+
+@pytest.mark.parametrize("source", ["frozen", "missing", "different"])
+def test_real_candidate_capture_source_reaches_strict_pool_admission(tmp_path, source):
+    """Exercise the producer, rather than inserting provenance into a fixture row."""
+    group = local_group(tmp_path)
+    snapshot = read_json(group / "snapshot.json")
+    supplied = {
+        "frozen": snapshot["code_provenance"],
+        "missing": None,
+        "different": {"source_bundle_hash": "another-runtime"},
+    }[source]
+    for name in "ABCD":
+        path = group / name / "slow_memory/trajectories.jsonl"
+        original = read_json(path)
+        collector = TrajectoryCollector(
+            scene_debug_dir=tmp_path / "producer" / name,
+            prompt="Place a bed",
+            scene_id="bedroom",
+            run_id=name,
+            task_spec=SceneTaskSpec(room_type="bedroom", style="minimal"),
+            model_id=snapshot["model"],
+            code_provenance=supplied,
+        )
+        collector.capture_candidate(
+            payload={
+                "stage": "furniture",
+                "agent_role": "designer",
+                "event": "request_initial_design",
+                "prompt": snapshot["input"],
+                "conversation_messages": snapshot["input"],
+                "context_snapshot": {"initial_snapshot_sha256": digest(snapshot)},
+                "output": "Placed bed " + name,
+                "agent_trace": {
+                    "tool_calls": original["completion_messages"][0]["tool_calls"]
+                },
+                "capture_policy": "independently_scored_raw_initial_candidate",
+            },
+            evidence=PreferenceEvidence.model_validate(original["evidence"]),
+            outcome=TrajectoryOutcome.model_validate(original["outcome"]),
+            scene_state_path="raw_state.json",
+        )
+        # Copy the actual serialized producer output without editing its fields.
+        path.write_bytes(collector.trajectory_path.read_bytes())
+        result = read_json(group / name / "result.json")
+        result["trajectory_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        write_json(group / name / "result.json", result)
+    sources, groups, errors = validate_pair_inputs(tmp_path)
+    if source == "frozen":
+        assert not errors
+        assert len(sources) == 4
+        assert groups[0]["pair_candidate_pool_eligible"] is True
+    else:
+        assert not sources
+        assert any("trajectory_source_mismatch" in error for error in errors)
+        assert groups[0]["pair_candidate_pool_eligible"] is False
 
 
 def test_partial_A_preserves_failure_and_exports_only_complete_direct_candidates(
