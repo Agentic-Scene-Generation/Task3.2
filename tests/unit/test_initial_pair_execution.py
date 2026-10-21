@@ -308,6 +308,7 @@ def test_non_independent_capture_keeps_existing_record_provenance(tmp_path, poli
             authoritative=True,
             quality_score=1.0,
             source="raw",
+            report_ref="report.json",
         ),
         outcome=TrajectoryOutcome(execution_complete=True, causal_link_verified=True),
         scene_state_path="raw_state.json",
