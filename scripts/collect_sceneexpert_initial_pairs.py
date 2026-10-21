@@ -134,9 +134,15 @@ def main() -> int:
         try:
             asyncio.run(run_shadow(args.worker_group.resolve(), args.worker_candidate))
         except Exception as exc:
+            failure = {"error": str(exc), "type": type(exc).__name__}
+            from scenesmith.scene_expert.slow_memory.candidate_pool import is_pair_local, shared_failure
+            from scenesmith.scene_expert.slow_memory.paired import read_json
+
+            if is_pair_local(read_json(args.worker_group / "snapshot.json")):
+                failure["failure_scope"] = "global" if shared_failure(str(exc)) else "candidate"
             write_json(
                 args.worker_group / args.worker_candidate / "failure.json",
-                {"error": str(exc), "type": type(exc).__name__},
+                failure,
             )
             traceback.print_exc()
             return 2

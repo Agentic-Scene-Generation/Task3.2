@@ -61,6 +61,7 @@ def _parse_args() -> argparse.Namespace:
             "full",
             "furniture_initial",
             "furniture_initial_pilot",
+            "furniture_initial_pairlocal_pilot_v2",
             "pipeline_smoke",
         ),
         default="full",
@@ -672,7 +673,7 @@ def main() -> int:
     if eval_dataset is not None:
         evaluation_metrics, evaluation_pair_scores = _evaluate_with_pair_audit(
             trainer, dataset_dir=dataset_dir, output_dir=output_dir,
-            capture_pairs=args.profile == "furniture_initial_pilot",
+            capture_pairs=args.profile in {"furniture_initial_pilot", "furniture_initial_pairlocal_pilot_v2"},
         )
         trainer.save_metrics("eval", evaluation_metrics)
         if not math.isfinite(float(evaluation_metrics.get("eval_loss", float("nan")))):
@@ -752,7 +753,7 @@ def main() -> int:
     if args.profile == "pipeline_smoke":
         print("Pipeline smoke completed; this adapter is not an effectiveness result.")
         return 0
-    if args.profile == "furniture_initial_pilot":
+    if args.profile in {"furniture_initial_pilot", "furniture_initial_pairlocal_pilot_v2"}:
         print(
             "Exploratory pilot completed; inspect validation metrics. Adapter is not promotable."
         )

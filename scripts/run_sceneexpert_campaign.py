@@ -100,6 +100,10 @@ def publish_audit(
             row["split"] != "test" for row in plan["tasks"]
         ),
         "generation_exit": generation_exit,
+        "candidate_pool_execution_failed": any(
+            group.get("native_failure_preserved", False)
+            for attempt in audits for group in attempt["groups"]
+        ),
         "selected_task_ids": [row["task_id"] for row in selected],
         "selected_missing_task_ids": [
             row["task_id"] for row in selected if row["task_id"] not in completed
@@ -159,6 +163,7 @@ def main() -> int:
     )
     parser.add_argument("--shadow-scope-samples", type=int, default=1)
     parser.add_argument("--candidates-per-context", type=int, choices=(2, 4), default=2)
+    parser.add_argument("--pool-completion-policy", choices=("all_four_v1", "pair_local_v2"), default="all_four_v1")
     parser.add_argument("--shared-base-failure-policy", choices=("strict", "isolated"), default="strict")
     parser.add_argument("--sceneeval-ids", default="",
                         help="Optional mechanism pilot filter; preserves the frozen task splits.")
@@ -169,6 +174,8 @@ def main() -> int:
         parser.error("scope sampling requires first_mutation")
     if args.candidates_per_context == 4 and args.decision_boundary != "first_mutation":
         parser.error("four-candidate pools require first_mutation")
+    if args.pool_completion_policy == "pair_local_v2" and args.candidates_per_context != 4:
+        parser.error("pair-local completion requires four candidates")
     root = args.root.resolve()
     plan = read_json(root / "campaign.json")
     task_filter = select_task_filter(plan, args.sceneeval_ids)
@@ -210,7 +217,7 @@ def main() -> int:
             protocol["shadow_sampling"] = sampling_policy(args.shadow_scope_samples)
         if args.candidates_per_context == 4:
             from scenesmith.scene_expert.slow_memory.candidate_pool import pool_policy
-            protocol["candidate_pool"] = pool_policy(4)
+            protocol["candidate_pool"] = pool_policy(4, args.pool_completion_policy)
         if args.shared_base_failure_policy == "isolated":
             protocol["collection_failure_policy"] = {
                 "protocol": "sceneexpert.collection_fault_isolation.v1",
@@ -307,6 +314,7 @@ def main() -> int:
                     "SCENEEXPERT_PAIR_BOUNDARY": args.decision_boundary,
                     "SCENEEXPERT_SHADOW_SCOPE_SAMPLES": str(args.shadow_scope_samples),
                     "SCENEEXPERT_POOL_CANDIDATES": str(args.candidates_per_context),
+                    "SCENEEXPERT_POOL_COMPLETION_POLICY": args.pool_completion_policy,
                     "SCENEEXPERT_CONTINUE_PARTIAL_SHARED_BASE": str(args.shared_base_failure_policy == "isolated").lower(),
                     "SCENEEXPERT_PAIR_SOURCE_HASH": provenance["source_bundle_hash"],
                     "SCENEEXPERT_CODE_PROVENANCE_GIT_ENABLED": "false",
@@ -337,7 +345,7 @@ def main() -> int:
                 break
         # An intentionally bounded batch may finish while the larger frozen
         # campaign still has pending tasks. That is a successful resumable run.
-        exit_code = 2 if generation_exit or summary["selected_missing_task_ids"] else 0
+        exit_code = 2 if generation_exit or summary["selected_missing_task_ids"] or summary["candidate_pool_execution_failed"] else 0
         exit_marker.write_text(f"exit_code={exit_code}\n", encoding="utf-8")
         return exit_code
 

@@ -194,6 +194,121 @@ def validate_tool_execution(
             )
 
 
+def validate_candidate_artifacts(
+    group: Path, snapshot: dict[str, Any], name: str, candidate: dict[str, Any],
+    *, require_fresh_physics: bool, names: tuple[str, ...], sampling_hashes: dict[str, str],
+) -> list[str]:
+    """Apply the same raw, physics, safety, trajectory and media checks in both protocols."""
+    reasons: list[str] = []
+    if len(names) == 4 and candidate.get("candidate") != name:
+        reasons.append(f"{name}_candidate_identity_mismatch")
+    if require_fresh_physics:
+        from scenesmith.scene_expert.slow_memory.paired_scoring import (
+            validate_scoring_proof,
+        )
+
+        validate_scoring_proof(group / name, candidate)
+    if candidate.get("status") != "completed":
+        reasons.append(f"{name}_execution_failed")
+    if digest(
+        read_json(group / name / "returned_state.json")
+    ) != candidate.get("returned_state_hash") or digest(
+        read_json(group / name / "safety.json")
+    ) != candidate.get(
+        "safety_hash"
+    ):
+        reasons.append(f"{name}_safety_proof_changed")
+    if candidate.get("snapshot_hash") != digest(snapshot):
+        reasons.append(f"{name}_snapshot_mismatch")
+    if (
+        candidate.get("evaluation_state_hash")
+        != candidate.get("raw_state_hash")
+        and not require_fresh_physics
+    ):
+        # Historical direct captures must match exactly; rescored
+        # captures need the full verified-restoration chain even here.
+        from scenesmith.scene_expert.slow_memory.paired_scoring import (
+            validate_scoring_proof,
+        )
+
+        validate_scoring_proof(group / name, candidate)
+    if digest(read_json(group / name / "raw_state.json")) != candidate.get(
+        "raw_state_hash"
+    ):
+        reasons.append(f"{name}_raw_state_changed")
+    if tree_hashes(group / name / "raw_scene") != candidate.get(
+        "raw_files"
+    ):
+        reasons.append(f"{name}_raw_assets_changed")
+    verdict, score, _ = deterministic_verdict(
+        read_json(group / name / "report.json")
+    )
+    if verdict != candidate.get("verdict") or score != candidate.get(
+        "score"
+    ):
+        reasons.append(f"{name}_evidence_mismatch")
+    if candidate.get("model") != EXPECTED_MODEL:
+        reasons.append(f"{name}_model_mismatch")
+    if not (group / name / "slow_memory/trajectories.jsonl").is_file():
+        reasons.append(f"{name}_trajectory_missing")
+    if hashlib.sha256(
+        (group / name / "slow_memory/trajectories.jsonl").read_bytes()
+    ).hexdigest() != candidate.get("trajectory_sha256"):
+        reasons.append(f"{name}_trajectory_bytes_changed")
+    candidate_records, candidate_errors = load_trajectories(
+        [group / name / "slow_memory/trajectories.jsonl"]
+    )
+    if candidate_errors or len(candidate_records) != 1:
+        reasons.append(f"{name}_invalid_candidate_capture")
+    for record in candidate_records:
+        if name != "A" and snapshot.get("shadow_sampling") and (
+            record.evidence.details.get("shadow_sampling_sha256") != sampling_hashes[name]
+        ):
+            reasons.append(f"{name}_trajectory_scope_sampling_proof_mismatch")
+        if record.evidence.details.get("relative_profile"):
+            from scenesmith.scene_expert.slow_memory.relative import (
+                report_profile,
+            )
+
+            if record.evidence.details[
+                "relative_profile"
+            ] != report_profile(read_json(group / name / "report.json")):
+                reasons.append(f"{name}_relative_profile_mismatch")
+        if (
+            record.task_type != "designer_initial"
+            or record.stage != "furniture"
+            or record.model_id != EXPECTED_MODEL
+            or not record.prompt_complete
+            or not record.response_complete
+        ):
+            reasons.append(f"{name}_invalid_candidate_scope")
+        if record.spatial_context.get("initial_snapshot_sha256") != digest(
+            snapshot
+        ):
+            reasons.append(f"{name}_incomplete_pairing_context")
+        if (
+            record.evidence.details.get("raw_state_sha256")
+            != candidate.get("raw_state_hash")
+            or record.evidence.verdict != verdict
+            or record.evidence.quality_score != score
+            or record.evidence.source
+            != "main_raw_candidate_deterministic_checks"
+        ):
+            reasons.append(f"{name}_trajectory_evidence_mismatch")
+        for reference in [
+            *record.image_refs,
+            *record.provenance.get("tool_media_refs", []),
+        ]:
+            media_path = Path(reference["path"])
+            if not media_path.is_absolute():
+                media_path = group / name / "slow_memory" / media_path
+            with media_path.open("rb") as stream:
+                actual = hashlib.file_digest(stream, "sha256").hexdigest()
+            if actual != reference.get("sha256"):
+                reasons.append(f"{name}_media_hash_mismatch")
+    return reasons
+
+
 def validate_pair_inputs(
     root: Path, *, require_fresh_physics: bool = True
 ) -> tuple[list[Path], list[dict[str, Any]], list[str]]:
@@ -204,6 +319,17 @@ def validate_pair_inputs(
     for group in sorted(root.glob("group_*")):
         reasons: list[str] = []
         try:
+            snapshot = read_json(group / "snapshot.json")
+            from scenesmith.scene_expert.slow_memory.candidate_pool import is_pair_local
+            if is_pair_local(snapshot):
+                from scenesmith.scene_expert.slow_memory.pair_local import validate_local_group
+                files, details, local_errors = validate_local_group(
+                    group, snapshot, require_fresh_physics=require_fresh_physics,
+                )
+                sources.extend(files)
+                groups.append(details)
+                errors.extend(f"{group.name}: {reason}" for reason in local_errors)
+                continue
             status = read_json(group / "status.json")
             if status.get("status") != "completed":
                 reasons.append("group_execution_incomplete")
@@ -249,112 +375,10 @@ def validate_pair_inputs(
                     if sampling_hashes[name] != candidates[name].get("shadow_sampling_sha256"):
                         reasons.append(f"{name}_scope_sampling_proof_mismatch")
             for name, candidate in candidates.items():
-                if len(names) == 4 and candidate.get("candidate") != name:
-                    reasons.append(f"{name}_candidate_identity_mismatch")
-                if require_fresh_physics:
-                    from scenesmith.scene_expert.slow_memory.paired_scoring import (
-                        validate_scoring_proof,
-                    )
-
-                    validate_scoring_proof(group / name, candidate)
-                if candidate.get("status") != "completed":
-                    reasons.append(f"{name}_execution_failed")
-                if digest(
-                    read_json(group / name / "returned_state.json")
-                ) != candidate.get("returned_state_hash") or digest(
-                    read_json(group / name / "safety.json")
-                ) != candidate.get(
-                    "safety_hash"
-                ):
-                    reasons.append(f"{name}_safety_proof_changed")
-                if candidate.get("snapshot_hash") != digest(snapshot):
-                    reasons.append(f"{name}_snapshot_mismatch")
-                if (
-                    candidate.get("evaluation_state_hash")
-                    != candidate.get("raw_state_hash")
-                    and not require_fresh_physics
-                ):
-                    # Historical direct captures must match exactly; rescored
-                    # captures need the full verified-restoration chain even here.
-                    from scenesmith.scene_expert.slow_memory.paired_scoring import (
-                        validate_scoring_proof,
-                    )
-
-                    validate_scoring_proof(group / name, candidate)
-                if digest(read_json(group / name / "raw_state.json")) != candidate.get(
-                    "raw_state_hash"
-                ):
-                    reasons.append(f"{name}_raw_state_changed")
-                if tree_hashes(group / name / "raw_scene") != candidate.get(
-                    "raw_files"
-                ):
-                    reasons.append(f"{name}_raw_assets_changed")
-                verdict, score, _ = deterministic_verdict(
-                    read_json(group / name / "report.json")
-                )
-                if verdict != candidate.get("verdict") or score != candidate.get(
-                    "score"
-                ):
-                    reasons.append(f"{name}_evidence_mismatch")
-                if candidate.get("model") != EXPECTED_MODEL:
-                    reasons.append(f"{name}_model_mismatch")
-                if not (group / name / "slow_memory/trajectories.jsonl").is_file():
-                    reasons.append(f"{name}_trajectory_missing")
-                if hashlib.sha256(
-                    (group / name / "slow_memory/trajectories.jsonl").read_bytes()
-                ).hexdigest() != candidate.get("trajectory_sha256"):
-                    reasons.append(f"{name}_trajectory_bytes_changed")
-                candidate_records, candidate_errors = load_trajectories(
-                    [group / name / "slow_memory/trajectories.jsonl"]
-                )
-                if candidate_errors or len(candidate_records) != 1:
-                    reasons.append(f"{name}_invalid_candidate_capture")
-                for record in candidate_records:
-                    if name != "A" and snapshot.get("shadow_sampling") and (
-                        record.evidence.details.get("shadow_sampling_sha256") != sampling_hashes[name]
-                    ):
-                        reasons.append(f"{name}_trajectory_scope_sampling_proof_mismatch")
-                    if record.evidence.details.get("relative_profile"):
-                        from scenesmith.scene_expert.slow_memory.relative import (
-                            report_profile,
-                        )
-
-                        if record.evidence.details[
-                            "relative_profile"
-                        ] != report_profile(read_json(group / name / "report.json")):
-                            reasons.append(f"{name}_relative_profile_mismatch")
-                    if (
-                        record.task_type != "designer_initial"
-                        or record.stage != "furniture"
-                        or record.model_id != EXPECTED_MODEL
-                        or not record.prompt_complete
-                        or not record.response_complete
-                    ):
-                        reasons.append(f"{name}_invalid_candidate_scope")
-                    if record.spatial_context.get("initial_snapshot_sha256") != digest(
-                        snapshot
-                    ):
-                        reasons.append(f"{name}_incomplete_pairing_context")
-                    if (
-                        record.evidence.details.get("raw_state_sha256")
-                        != candidate.get("raw_state_hash")
-                        or record.evidence.verdict != verdict
-                        or record.evidence.quality_score != score
-                        or record.evidence.source
-                        != "main_raw_candidate_deterministic_checks"
-                    ):
-                        reasons.append(f"{name}_trajectory_evidence_mismatch")
-                    for reference in [
-                        *record.image_refs,
-                        *record.provenance.get("tool_media_refs", []),
-                    ]:
-                        media_path = Path(reference["path"])
-                        if not media_path.is_absolute():
-                            media_path = group / name / "slow_memory" / media_path
-                        with media_path.open("rb") as stream:
-                            actual = hashlib.file_digest(stream, "sha256").hexdigest()
-                        if actual != reference.get("sha256"):
-                            reasons.append(f"{name}_media_hash_mismatch")
+                reasons.extend(validate_candidate_artifacts(
+                    group, snapshot, name, candidate, require_fresh_physics=require_fresh_physics,
+                    names=names, sampling_hashes=sampling_hashes,
+                ))
             if not reasons:
                 sources.extend(
                     group / name / "slow_memory/trajectories.jsonl" for name in names
@@ -404,6 +428,8 @@ def audit_pairs(
     records, diagnostics = load_trajectories(sources)
     if diagnostics:
         errors.append("trajectory_load_failed")
+    if any(group.get("native_failure_preserved", False) for group in groups):
+        errors.append("candidate_pool_execution_failed")
     execution_integrity_passed = not errors
     count = manifest["stats"]["eligible_pair_count"]
     preference_gate_passed = count >= min_pairs and (
