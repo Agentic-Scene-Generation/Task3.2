@@ -203,8 +203,14 @@ class DecisionPair(InitialPair):
         if count != 2:
             from scenesmith.scene_expert.slow_memory.candidate_pool import pool_policy
 
-            snapshot["candidate_pool"] = pool_policy(count)
-            snapshot["boundary_selection"] += ";fixed_four_candidate_pool_v1"
+            completion_policy = os.environ.get("SCENEEXPERT_POOL_COMPLETION_POLICY", "all_four_v1")
+            snapshot["candidate_pool"] = pool_policy(count, completion_policy)
+            snapshot["boundary_selection"] += (
+                ";fixed_four_candidate_pool_pair_local_v2" if completion_policy == "pair_local_v2"
+                else ";fixed_four_candidate_pool_v1"
+            )
+        elif os.environ.get("SCENEEXPERT_POOL_COMPLETION_POLICY", "all_four_v1") != "all_four_v1":
+            raise ValueError("pair-local completion requires four frozen candidates")
         snapshot["files"] = copy_scene_tree(
             Path(snapshot["source_scene_root"]), self.group / "input_scene"
         )

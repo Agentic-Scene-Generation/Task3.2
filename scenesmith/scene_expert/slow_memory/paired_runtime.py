@@ -331,6 +331,10 @@ class InitialPair:
 
     def fail(self, phase: str, error: BaseException) -> None:
         """Persist a failed collection attempt without altering canonical policy."""
+        from scenesmith.scene_expert.slow_memory.candidate_pool import shared_failure
+
+        if shared_failure(str(error)):
+            self._shared_evaluation_failure = str(error)
         try:
             write_json(
                 self.group / "status.json",
@@ -512,6 +516,13 @@ class InitialPair:
 
     async def finish(self, agent: Any, safety_message: str) -> None:
         """Run the fixed schedule irrespective of the preceding candidate's quality."""
+        from scenesmith.scene_expert.slow_memory.candidate_pool import is_pair_local
+
+        if is_pair_local(self.snapshot):
+            from scenesmith.scene_expert.slow_memory.pair_local_runtime import finish_pool
+
+            await finish_pool(self, agent, safety_message)
+            return
         self.capture_returned(agent, safety_message, "A")
         from scenesmith.scene_expert.slow_memory.candidate_pool import candidate_names
 
@@ -531,8 +542,14 @@ class InitialPair:
             "worker_exits": execution["worker_exits"], "canonical": "A",
         })
 
-    async def _finish_shadow(self, agent: Any, candidate: str) -> int:
+    async def _finish_shadow(self, agent: Any, candidate: str) -> int | None:
         """Execute one private worker and bind its canonical-invariance proof."""
+        from scenesmith.scene_expert.slow_memory.candidate_pool import is_pair_local
+
+        if is_pair_local(self.snapshot):
+            from scenesmith.scene_expert.slow_memory.pair_local_runtime import finish_shadow
+
+            return await finish_shadow(self, agent, candidate)
         before = digest(json_value(agent.scene.to_state_dict()))
         files_before = canonical_asset_hashes(Path(self.snapshot["source_scene_root"]))
         bank = Path(

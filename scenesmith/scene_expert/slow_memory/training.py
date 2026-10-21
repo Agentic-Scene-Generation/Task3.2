@@ -15,16 +15,19 @@ import yaml
 from scenesmith.scene_expert.slow_memory.dpo import validate_dataset_dir
 from scenesmith.scene_expert.slow_memory.schemas import DPOPreferencePair
 
+PAIR_LOCAL_PILOT = "furniture_initial_pairlocal_pilot_v2"
+PILOT_PROFILES = frozenset({"furniture_initial_pilot", PAIR_LOCAL_PILOT})
+
 
 def apply_training_profile(config: dict[str, Any], profile: str) -> dict[str, Any]:
     """Separate initial-policy research scope from infrastructure-only smoke tests."""
     result = deepcopy(config)
     if profile == "full":
         return result
-    if profile not in {"furniture_initial", "furniture_initial_pilot", "pipeline_smoke"}:
+    if profile not in {"furniture_initial", "pipeline_smoke", *PILOT_PROFILES}:
         raise ValueError("unknown training profile")
     smoke = profile == "pipeline_smoke"
-    pilot = profile == "furniture_initial_pilot"
+    pilot = profile in PILOT_PROFILES
     minimum_train = 1 if smoke else (8 if pilot else 16)
     result["training_profile"] = profile
     result.setdefault("data", {}).update(
@@ -60,6 +63,8 @@ def apply_training_profile(config: dict[str, Any], profile: str) -> dict[str, An
     )
     if smoke or pilot:
         result.setdefault("publish", {})["push_to_hub"] = False
+    if profile == PAIR_LOCAL_PILOT:
+        result["training"].update(seed=42, learning_rate=1e-5, beta=0.1)
     if smoke:
         result["training"].update(
             max_steps=2, gradient_accumulation_steps=1, save_steps=2
@@ -124,6 +129,10 @@ def validate_training_request(
 
     errors: list[str] = []
     warnings: list[str] = []
+    if config.get("training_profile") == PAIR_LOCAL_PILOT:
+        from scenesmith.scene_expert.slow_memory.pairlocal_qualification import validate_qualified_dataset
+
+        errors.extend(validate_qualified_dataset(dataset_dir))
     model_cfg = config.get("model") if isinstance(config.get("model"), dict) else {}
     data_cfg = config.get("data") if isinstance(config.get("data"), dict) else {}
     train_cfg = (
@@ -314,6 +323,7 @@ def validate_training_request(
             if config.get("training_profile") in {
                 "furniture_initial",
                 "furniture_initial_pilot",
+                PAIR_LOCAL_PILOT,
                 "pipeline_smoke",
             }:
                 if manifest.get("completion_view") != "first_turn":
@@ -422,15 +432,15 @@ def evaluate_training_promotion(
         reasons.append(
             "pipeline_smoke verifies infrastructure only and cannot be promoted"
         )
-    if profile == "furniture_initial_pilot":
+    if profile in PILOT_PROFILES:
         reasons.append(
-            "furniture_initial_pilot is exploratory small-data training; "
+            f"{profile} is exploratory small-data training; "
             "it cannot be promoted or establish scene-generation effectiveness"
         )
     return {
         "promotable": not reasons,
         "status": (
-            "pilot_only" if profile == "furniture_initial_pilot"
+            "pilot_only" if profile in PILOT_PROFILES
             else ("candidate_accepted" if not reasons else "candidate_rejected")
         ),
         "offline_validation_passed": offline_validation_passed,
