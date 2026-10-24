@@ -33,6 +33,8 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scenesmith.scene_expert.slow_memory.training import (
+    FEASIBILITY_PILOT,
+    PILOT_PROFILES,
     apply_training_profile,
     evaluate_training_promotion,
     load_training_config,
@@ -62,6 +64,7 @@ def _parse_args() -> argparse.Namespace:
             "furniture_initial",
             "furniture_initial_pilot",
             "furniture_initial_pairlocal_pilot_v2",
+            FEASIBILITY_PILOT,
             "pipeline_smoke",
         ),
         default="full",
@@ -553,6 +556,24 @@ def main() -> int:
             print(json.dumps({"template_preflight": report}, indent=2), flush=True)
         return 0
 
+    scope_approval = None
+    if args.profile == FEASIBILITY_PILOT:
+        from scenesmith.scene_expert.slow_memory.pairlocal_qualification import (
+            verify_feasibility_approval,
+        )
+
+        approval_path = Path(os.environ.get("SCENEEXPERT_FEASIBILITY_APPROVAL_PATH", ""))
+        approval = verify_feasibility_approval(
+            dataset_dir,
+            approval_path,
+            os.environ.get("SCENEEXPERT_FEASIBILITY_APPROVAL_SHA256", ""),
+        )
+        scope_approval = {
+            "receipt_path": str(approval_path.resolve()),
+            "receipt_sha256": _file_sha256(approval_path),
+            "proposal_sha256": approval["proposal_sha256"],
+            "qualification_sha256": approval["qualification_sha256"],
+        }
     output_dir.mkdir(parents=True, exist_ok=True)
     resume = args.resume_from_checkpoint or train_cfg.get("resume_from_checkpoint")
     identity_training = {
@@ -568,6 +589,8 @@ def main() -> int:
         "lora": config["lora"], "training": identity_training,
         "dataset_snapshot": dataset_snapshot, "profile": args.profile,
     }
+    if scope_approval is not None:
+        identity["scope_approval"] = scope_approval
     if resume:
         checkpoint = Path(resume)
         checkpoint_complete(checkpoint)
@@ -673,7 +696,7 @@ def main() -> int:
     if eval_dataset is not None:
         evaluation_metrics, evaluation_pair_scores = _evaluate_with_pair_audit(
             trainer, dataset_dir=dataset_dir, output_dir=output_dir,
-            capture_pairs=args.profile in {"furniture_initial_pilot", "furniture_initial_pairlocal_pilot_v2"},
+            capture_pairs=args.profile in PILOT_PROFILES,
         )
         trainer.save_metrics("eval", evaluation_metrics)
         if not math.isfinite(float(evaluation_metrics.get("eval_loss", float("nan")))):
@@ -707,6 +730,7 @@ def main() -> int:
         },
         "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "training_profile": args.profile,
+        "training_scope_approval": scope_approval,
         "code_provenance": collect_code_provenance(include_git=False),
         "config_path": str(args.config.resolve()),
         "config_fingerprint": preflight["config_fingerprint"],
@@ -753,7 +777,7 @@ def main() -> int:
     if args.profile == "pipeline_smoke":
         print("Pipeline smoke completed; this adapter is not an effectiveness result.")
         return 0
-    if args.profile in {"furniture_initial_pilot", "furniture_initial_pairlocal_pilot_v2"}:
+    if args.profile in PILOT_PROFILES:
         print(
             "Exploratory pilot completed; inspect validation metrics. Adapter is not promotable."
         )
