@@ -10,6 +10,7 @@ from typing import Any
 CERTIFIED_605_IDS = frozenset({368, 371, 238, 479, 302, 266})
 SOURCE_605 = "6ec532643f657e101b173f60dbe55fc920c3fcd281eec448cf85f52fa50f5d18"
 PROFILE = "furniture_initial_pairlocal_pilot_v2"
+FEASIBILITY_SCOPE = "feasibility_4T3V_two_epochs_final_checkpoint_no_promotion"
 ORIGINAL_CAMPAIGN_SHA256 = (
     "cff0490851f3ad5356e547a4a8289c16a20cc4a8e555f4afdbde9a3957826a1d"
 )
@@ -32,7 +33,33 @@ def file_binding(root: Path, binding: dict[str, Any]) -> Path:
     return path
 
 
-def validate_qualified_dataset(dataset_dir: Path) -> list[str]:
+def verify_feasibility_approval(
+    dataset_dir: Path, receipt_path: Path, expected_sha256: str,
+) -> dict[str, Any]:
+    """Require a new direct decision bound to this dataset and scope proposal."""
+    if len(expected_sha256) != 64 or not receipt_path.is_file():
+        raise ValueError("4T3V feasibility needs its direct approval receipt and SHA256")
+    encoded = receipt_path.read_bytes()
+    if hashlib.sha256(encoded).hexdigest() != expected_sha256:
+        raise ValueError("4T3V approval receipt checksum differs")
+    receipt = json.loads(encoded)
+    qualification = dataset_dir / "qualification.json"
+    manifest = json.loads(qualification.read_bytes())
+    proposal = file_binding(dataset_dir, manifest["scope_proposal"])
+    if (
+        receipt.get("source") != "direct_user_response"
+        or receipt.get("approved") is not True
+        or not receipt.get("questionItemId")
+        or not receipt.get("answer")
+        or FEASIBILITY_SCOPE not in receipt.get("scopes", [])
+        or receipt.get("proposal_sha256") != hashlib.sha256(proposal.read_bytes()).hexdigest()
+        or receipt.get("qualification_sha256") != hashlib.sha256(qualification.read_bytes()).hexdigest()
+    ):
+        raise ValueError("approval does not authorize this named 4T3V feasibility scope")
+    return receipt
+
+
+def validate_qualified_dataset(dataset_dir: Path, *, feasibility: bool = False) -> list[str]:
     """Refuse raw exports, unproved source bridging, repeats and sub-floor pilots."""
     errors: list[str] = []
     try:
@@ -40,7 +67,9 @@ def validate_qualified_dataset(dataset_dir: Path) -> list[str]:
         if (
             manifest.get("schema_version")
             != "sceneexpert.pairlocal_qualified_dataset.v1"
-            or manifest.get("profile") != PROFILE
+            or manifest.get("profile") != (
+                "furniture_initial_feasibility_4t3v_v1" if feasibility else PROFILE
+            )
         ):
             raise ValueError("missing named pair-local qualification protocol")
         if (
@@ -156,7 +185,12 @@ def validate_qualified_dataset(dataset_dir: Path) -> list[str]:
             raise ValueError(
                 "gap-filling profile requires exactly the six certified inherited originals"
             )
-        if original_train < 8 or validation < 4:
+        if feasibility and (
+            seen_ids != CERTIFIED_605_IDS | {243}
+            or original_train != 4 or validation != 3
+        ):
+            raise ValueError("4T3V feasibility requires exactly the seven frozen certified originals")
+        if not feasibility and (original_train < 8 or validation < 4):
             raise ValueError(
                 f"pair-local pilot requires actual8originalT4independentV; observed{original_train}T{validation}V"
             )

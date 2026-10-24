@@ -16,7 +16,8 @@ from scenesmith.scene_expert.slow_memory.dpo import validate_dataset_dir
 from scenesmith.scene_expert.slow_memory.schemas import DPOPreferencePair
 
 PAIR_LOCAL_PILOT = "furniture_initial_pairlocal_pilot_v2"
-PILOT_PROFILES = frozenset({"furniture_initial_pilot", PAIR_LOCAL_PILOT})
+FEASIBILITY_PILOT = "furniture_initial_feasibility_4t3v_v1"
+PILOT_PROFILES = frozenset({"furniture_initial_pilot", PAIR_LOCAL_PILOT, FEASIBILITY_PILOT})
 
 
 def apply_training_profile(config: dict[str, Any], profile: str) -> dict[str, Any]:
@@ -28,13 +29,15 @@ def apply_training_profile(config: dict[str, Any], profile: str) -> dict[str, An
         raise ValueError("unknown training profile")
     smoke = profile == "pipeline_smoke"
     pilot = profile in PILOT_PROFILES
-    minimum_train = 1 if smoke else (8 if pilot else 16)
+    feasibility = profile == FEASIBILITY_PILOT
+    minimum_train = 4 if feasibility else (1 if smoke else (8 if pilot else 16))
+    minimum_validation = 3 if feasibility else (4 if pilot else 0)
     result["training_profile"] = profile
     result.setdefault("data", {}).update(
         minimum_train_pairs=minimum_train,
         minimum_unique_train_groups=minimum_train,
-        minimum_validation_pairs=4 if pilot else 0,
-        minimum_unique_validation_groups=4 if pilot else 0,
+        minimum_validation_pairs=minimum_validation,
+        minimum_unique_validation_groups=minimum_validation,
         minimum_unique_train_stages=1,
         required_task_types=["designer_initial"],
         minimum_pairs_per_required_task_type=minimum_train,
@@ -63,7 +66,7 @@ def apply_training_profile(config: dict[str, Any], profile: str) -> dict[str, An
     )
     if smoke or pilot:
         result.setdefault("publish", {})["push_to_hub"] = False
-    if profile == PAIR_LOCAL_PILOT:
+    if profile in {PAIR_LOCAL_PILOT, FEASIBILITY_PILOT}:
         result["training"].update(seed=42, learning_rate=1e-5, beta=0.1)
     if smoke:
         result["training"].update(
@@ -129,10 +132,13 @@ def validate_training_request(
 
     errors: list[str] = []
     warnings: list[str] = []
-    if config.get("training_profile") == PAIR_LOCAL_PILOT:
+    if config.get("training_profile") in {PAIR_LOCAL_PILOT, FEASIBILITY_PILOT}:
         from scenesmith.scene_expert.slow_memory.pairlocal_qualification import validate_qualified_dataset
 
-        errors.extend(validate_qualified_dataset(dataset_dir))
+        errors.extend(validate_qualified_dataset(
+            dataset_dir,
+            feasibility=config.get("training_profile") == FEASIBILITY_PILOT,
+        ))
     model_cfg = config.get("model") if isinstance(config.get("model"), dict) else {}
     data_cfg = config.get("data") if isinstance(config.get("data"), dict) else {}
     train_cfg = (
@@ -324,6 +330,7 @@ def validate_training_request(
                 "furniture_initial",
                 "furniture_initial_pilot",
                 PAIR_LOCAL_PILOT,
+                FEASIBILITY_PILOT,
                 "pipeline_smoke",
             }:
                 if manifest.get("completion_view") != "first_turn":

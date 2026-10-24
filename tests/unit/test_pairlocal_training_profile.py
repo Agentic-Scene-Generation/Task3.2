@@ -7,6 +7,7 @@ import pytest
 
 from scenesmith.scene_expert.slow_memory import pairlocal_qualification as gate
 from scenesmith.scene_expert.slow_memory.training import (
+    FEASIBILITY_PILOT,
     PAIR_LOCAL_PILOT,
     apply_training_profile,
     evaluate_training_promotion,
@@ -45,10 +46,14 @@ def test_new_profile_keeps_recipe_floor_and_is_not_promotable(tmp_path):
     )
 
 
-def qualified_fixture(root, monkeypatch, *, full=True):
+def qualified_fixture(root, monkeypatch, *, full=True, feasibility=False):
     """Software fixture, never a native observation or a qualification decision."""
-    train = [368, 371, 238, 205, 212, 297, 120, 419] if full else [368, 371, 238]
-    val = [479, 302, 266, 188] if full else [479, 302, 266]
+    train = [368, 371, 238, 243] if feasibility else (
+        [368, 371, 238, 205, 212, 297, 120, 419] if full else [368, 371, 238]
+    )
+    val = [479, 302, 266] if feasibility else (
+        [479, 302, 266, 188] if full else [479, 302, 266]
+    )
 
     def put(name, value):
         path = root / name
@@ -112,13 +117,41 @@ def qualified_fixture(root, monkeypatch, *, full=True):
         "qualification.json",
         {
             "schema_version": "sceneexpert.pairlocal_qualified_dataset.v1",
-            "profile": gate.PROFILE,
+            "profile": FEASIBILITY_PILOT if feasibility else gate.PROFILE,
             "source_bridge": bridge,
             "original_campaign": partition,
             "approved_selection": selection,
             "pairs": entries,
         },
     )
+
+
+def test_feasibility_scope_preserves_old_floor_and_full_recipe(tmp_path, monkeypatch):
+    config = apply_training_profile({}, FEASIBILITY_PILOT)
+    assert config["data"]["minimum_train_pairs"] == 4
+    assert config["data"]["minimum_unique_validation_groups"] == 3
+    assert config["data"]["allow_unsafe_small_dataset"] is False
+    assert config["training"]["num_train_epochs"] == 2
+    assert config["training"]["gradient_accumulation_steps"] == 4
+    assert "max_steps" not in config["training"]
+    assert not evaluate_training_promotion(config, evaluation_metrics={})["promotable"]
+    assert apply_training_profile({}, PAIR_LOCAL_PILOT)["data"]["minimum_train_pairs"] == 8
+    qualified_fixture(tmp_path, monkeypatch, feasibility=True)
+    assert not gate.validate_qualified_dataset(tmp_path, feasibility=True)
+    assert gate.validate_qualified_dataset(tmp_path)
+    with pytest.raises(ValueError, match="direct approval"):
+        gate.verify_feasibility_approval(tmp_path, tmp_path / "absent.json", "")
+
+
+def test_feasibility_cannot_add_raw_rows_or_remove_a_validation_group(tmp_path, monkeypatch):
+    qualified_fixture(tmp_path, monkeypatch, feasibility=True)
+    with (tmp_path / "train.jsonl").open("ab") as handle:
+        handle.write(b'{"pair_id":"raw","task_id":"unqualified"}\n')
+    assert gate.validate_qualified_dataset(tmp_path, feasibility=True)
+    qualified_fixture(tmp_path, monkeypatch, feasibility=True)
+    lines = (tmp_path / "validation.jsonl").read_bytes().splitlines()
+    (tmp_path / "validation.jsonl").write_bytes(b"\n".join(lines[:-1]) + b"\n")
+    assert gate.validate_qualified_dataset(tmp_path, feasibility=True)
 
 
 def test_three_T_three_V_never_passes_new_profile(tmp_path, monkeypatch):

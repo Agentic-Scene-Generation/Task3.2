@@ -57,7 +57,10 @@ def load_diagnostic_source(training_run: Path) -> tuple[dict[str, Any], list[dic
     if not completion["completed"]:
         raise ValueError("source training is incomplete: " + "; ".join(completion["errors"]))
     manifest = json.loads((training_run / "training_manifest.json").read_text())
-    if manifest.get("training_profile") != "furniture_initial_pilot":
+    if manifest.get("training_profile") not in {
+        "furniture_initial_pilot", "furniture_initial_pairlocal_pilot_v2",
+        "furniture_initial_feasibility_4t3v_v1",
+    }:
         raise ValueError("this diagnostic supports the furniture initial pilot only")
     if manifest.get("dataset_features", {}).get("has_images"):
         raise ValueError("this diagnostic currently supports the text/tool pilot only")
