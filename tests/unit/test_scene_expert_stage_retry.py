@@ -41,6 +41,33 @@ from scenesmith.scenebenchmark_critic.metrics.functional_dependency.extensions.i
 )
 
 
+def _hook_runner_stub() -> SceneExpertHookRunner:
+    """Initialize lifecycle evidence through the production constructor."""
+    runner = SceneExpertHookRunner(
+        prompt="Test room",
+        scene_id=0,
+        output_dir=Path("unused-test-output"),
+        mode="harness_only",
+        component_flags={"trace": False},
+        task_spec=SceneTaskSpec(room_type="office", style="standard"),
+        harness=Mock(),
+        global_planner=Mock(),
+        relation_projector=Mock(),
+        retriever=None,
+        stage_verifier=Mock(),
+        full_verifier=Mock(),
+        repair_controller=Mock(),
+        trace_logger=None,
+        memory_writer=None,
+        memory_store=None,
+        qwen_model="test",
+    )
+    # These tests exercise commit/retry decisions, not administrative writers.
+    runner._memory_activity = Mock()
+    runner._write_stage_policy_audit = Mock()
+    return runner
+
+
 def _failed_report(stage: str) -> StageVerifyReport:
     return StageVerifyReport(
         stage=stage,
@@ -326,7 +353,7 @@ def test_finalization_keeps_ordinary_quality_failure_degradable() -> None:
 def test_hook_finalize_refreshes_final_deterministic_payload(tmp_path) -> None:
     fresh_payload = _binding_failure_payload(earliest_stage="manipuland")
     scene = SimpleNamespace()
-    runner = object.__new__(SceneExpertHookRunner)
+    runner = _hook_runner_stub()
     runner._mode = "harness_only"
     runner._component_flags = {"verifier": True, "trace": True}
     runner._scene_id = 1
@@ -363,7 +390,7 @@ def test_hook_finalize_refreshes_final_deterministic_payload(tmp_path) -> None:
 
 
 def test_hook_finalize_does_not_promote_partial_shared_base(tmp_path) -> None:
-    runner = object.__new__(SceneExpertHookRunner)
+    runner = _hook_runner_stub()
     runner._mode = "harness_memory"
     runner._scene_id = 1
     runner._stage_reports = [StageVerifyReport(stage="floor_plan", pass_stage=True)]
@@ -393,7 +420,7 @@ def test_hook_finalize_does_not_promote_partial_shared_base(tmp_path) -> None:
 def test_terminal_fresh_and_reuse_runs_are_memory_writer_eligible(
     start_stage: str,
 ) -> None:
-    runner = object.__new__(SceneExpertHookRunner)
+    runner = _hook_runner_stub()
     runner._start_stage = start_stage
     runner._configured_stop_stage = "manipuland"
     runner._allow_long_term_memory_updates = True
@@ -413,7 +440,7 @@ def test_terminal_fresh_and_reuse_runs_are_memory_writer_eligible(
 
 
 def test_floor_plan_shared_base_is_memory_writer_ineligible() -> None:
-    runner = object.__new__(SceneExpertHookRunner)
+    runner = _hook_runner_stub()
     runner._start_stage = "floor_plan"
     runner._configured_stop_stage = "floor_plan"
     runner._allow_long_term_memory_updates = False
@@ -432,7 +459,7 @@ def test_floor_plan_shared_base_is_memory_writer_ineligible() -> None:
 
 
 def test_reuse_initial_completed_stages_follow_generation_order() -> None:
-    runner = object.__new__(SceneExpertHookRunner)
+    runner = _hook_runner_stub()
 
     assert runner._initial_completed_stages("furniture") == ["floor_plan"]
     assert runner._initial_completed_stages("manipuland") == [
@@ -458,7 +485,7 @@ def test_wall_post_stage_passes_fresh_deterministic_payload_to_verifier(
             }
         ]
     }
-    runner = object.__new__(SceneExpertHookRunner)
+    runner = _hook_runner_stub()
     runner._mode = "harness_only"
     runner._component_flags = {"verifier": True}
     runner._current_stage = stage
@@ -518,7 +545,7 @@ def test_failed_hook_stage_is_uncommitted_until_retry_verifies(tmp_path) -> None
         failure_type="missing_object",
         repair_action="Place the missing wastebasket on the floor.",
     )
-    runner = object.__new__(SceneExpertHookRunner)
+    runner = _hook_runner_stub()
     runner._mode = "harness_only"
     runner._component_flags = {"verifier": True, "repair": True}
     runner._current_stage = stage
@@ -581,7 +608,7 @@ def test_failed_hook_stage_is_uncommitted_until_retry_verifies(tmp_path) -> None
 
 
 def test_legacy_noop_signal_never_skips_native_stage() -> None:
-    runner = object.__new__(SceneExpertHookRunner)
+    runner = _hook_runner_stub()
     runner._current_stage = "wall_mounted"
     runner._current_planner_trace = {"status": "no_op"}
     runner._stage_policies = {"wall_mounted": "auto"}
@@ -657,7 +684,7 @@ def test_degraded_policy_does_not_advance_typed_blocker(tmp_path, blocker) -> No
 
 
 def test_accept_degraded_stage_advances_harness_for_next_stage() -> None:
-    runner = object.__new__(SceneExpertHookRunner)
+    runner = _hook_runner_stub()
     runner._current_stage = "wall_mounted"
     runner._completed_stages = ["floor_plan", "furniture"]
     runner._pending_stage_repairs = {"wall_mounted": (Mock(), Mock())}
@@ -684,7 +711,7 @@ def test_exhausted_quality_failure_is_retained_for_final_verification(
     tmp_path,
 ) -> None:
     failed_report = _failed_report("furniture")
-    runner = object.__new__(SceneExpertHookRunner)
+    runner = _hook_runner_stub()
     runner._mode = "harness_only"
     runner._component_flags = {"verifier": True, "repair": True}
     runner._current_stage = "furniture"
@@ -742,7 +769,7 @@ def test_non_deterministic_containment_named_issue_is_not_a_stage_blocker(
             )
         ],
     )
-    runner = object.__new__(SceneExpertHookRunner)
+    runner = _hook_runner_stub()
     runner._mode = "harness_only"
     runner._component_flags = {"verifier": True, "repair": True}
     runner._current_stage = "furniture"
@@ -792,7 +819,7 @@ def test_support_readiness_is_a_non_degradable_stage_blocker(tmp_path) -> None:
             )
         ],
     )
-    runner = object.__new__(SceneExpertHookRunner)
+    runner = _hook_runner_stub()
     runner._mode = "harness_only"
     runner._component_flags = {"verifier": True, "repair": True}
     runner._current_stage = "furniture"
