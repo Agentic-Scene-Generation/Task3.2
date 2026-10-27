@@ -245,6 +245,39 @@ class TestSupportSurfaceMeshScaling(unittest.TestCase):
         self.assertEqual(surfaces, [])
         self.assertEqual(furniture.support_surfaces, surfaces)
 
+    def test_baked_hssd_geometry_still_scales_source_annotations(self):
+        """The baked-mesh flag must not skip source-space annotation scaling."""
+        furniture = SceneObject(
+            object_id=UniqueID("table_0"),
+            object_type=ObjectType.FURNITURE,
+            name="table",
+            description="HSSD table",
+            transform=RigidTransform(),
+            geometry_path=self.mesh_path,
+            scale_factor=2.0,
+            metadata={
+                "asset_source": "hssd",
+                "hssd_mesh_id": "table",
+                "geometry_scale_baked": True,
+            },
+        )
+        self.scene.objects = {furniture.object_id: furniture}
+        local = SupportSurface(
+            surface_id=UniqueID("local"),
+            transform=RigidTransform(p=[0, 0, 0.5]),
+            bounding_box_min=np.array([-0.5, -0.5, 0.01]),
+            bounding_box_max=np.array([0.5, 0.5, 0.51]),
+        )
+        with patch(
+            "scenesmith.agent_utils.hssd_retrieval.support_surface_loader.load_hssd_support_surfaces",
+            return_value=[local],
+        ):
+            surface = extract_and_propagate_support_surfaces(
+                self.scene, furniture, self.config
+            )[0]
+        np.testing.assert_allclose(surface.bounding_box_max[:2], [1.0, 1.0])
+        np.testing.assert_allclose(surface.transform.translation(), [0.0, 0.0, 1.0])
+
     def test_upholstered_policy_passes_unscaled_bounds_without_propagation(self):
         """A relaxed seat surface remains scoped to its hard target instance."""
         geometry_path = self.mesh_path

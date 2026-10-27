@@ -1025,6 +1025,7 @@ class SceneExpertHookRunner:
         task_compiler_trace: dict[str, Any] | None = None,
         critic_config: Any | None = None,
         stage_policies: dict[str, str] | None = None,
+        support_surface_config: dict[str, Any] | None = None,
     ) -> None:
         self._prompt = prompt
         self._scene_id = scene_id
@@ -1073,6 +1074,7 @@ class SceneExpertHookRunner:
         self._intent_trace = dict(intent_trace or {})
         self._critic_config = critic_config
         self._stage_policies = dict(stage_policies or {})
+        self._support_surface_config = support_surface_config
         self._stage_order_baseline = self._initial_completed_stages(start_stage)
         self._room_start_stage = (
             "furniture" if start_stage == "floor_plan" else start_stage
@@ -2257,6 +2259,32 @@ class SceneExpertHookRunner:
                     stage=f"{stage}_post_stage",
                     annotate_assets=False,
                 )
+                from scenesmith.scene_expert.support_readiness import (
+                    prepare_stage_support_evidence,
+                )
+
+                support_evidence = prepare_stage_support_evidence(
+                    scene,
+                    deterministic_critic_payload,
+                    getattr(self, "_support_surface_config", None),
+                )
+                if support_evidence:
+                    evidence_path = (
+                        self._scene_debug_dir / "timing" / "support_readiness.jsonl"
+                    )
+                    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+                    with evidence_path.open("a", encoding="utf-8") as stream:
+                        stream.write(
+                            json.dumps({"stage": stage, "targets": support_evidence})
+                            + "\n"
+                        )
+                    if any(row["surfaces"] for row in support_evidence):
+                        deterministic_critic_payload = evaluate_room_scene(
+                            scene,
+                            config=critic_config,
+                            stage=f"{stage}_post_stage",
+                            annotate_assets=False,
+                        )
                 self._latest_deterministic_payload = deterministic_critic_payload
             verify_report = self._run_stage_verifier(
                 stage=stage,
@@ -3755,4 +3783,7 @@ def build_hook_runner(
         task_compiler_trace=task_compiler_trace,
         critic_config=critic_config,
         stage_policies=stage_policies,
+        support_surface_config=(
+            cfg_dict.get("manipuland_agent", {}).get("support_surface_extraction")
+        ),
     )
