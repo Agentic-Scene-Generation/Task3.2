@@ -145,3 +145,52 @@ def test_asset_factory_marks_final_geometry_baked(tmp_path):
     )
     assert obj.metadata["geometry_scale_baked"] is True
     assert obj.scale_factor == 1.4  # Retained for source HSSD annotations.
+
+
+def test_hook_rechecks_native_evidence_before_verification(tmp_path, support_config):
+    from scenesmith.scene_expert.hooks import SceneExpertHookRunner
+    from scenesmith.scene_expert.schemas import SceneTaskSpec, StageVerifyReport
+    from scenesmith.scenebenchmark_critic.config import CriticConfig
+
+    scene, obj = _rug(tmp_path)
+    runner = SceneExpertHookRunner(
+        prompt="Block on rug",
+        scene_id=0,
+        output_dir=tmp_path,
+        mode="harness_only",
+        component_flags={"trace": False},
+        task_spec=SceneTaskSpec(room_type="playroom", style="standard"),
+        harness=Mock(),
+        global_planner=Mock(),
+        relation_projector=Mock(),
+        retriever=None,
+        stage_verifier=Mock(),
+        full_verifier=Mock(),
+        repair_controller=Mock(),
+        trace_logger=None,
+        memory_writer=None,
+        memory_store=None,
+        qwen_model="test",
+        critic_config=CriticConfig(enabled=True),
+        support_surface_config=support_config,
+    )
+    runner._extract_scene_state_info_from_scene = Mock(return_value={})
+    runner._record_memory_post_stage_activity = Mock()
+    runner._commit_stage_memory = Mock()
+    runner._write_stage_policy_audit = Mock()
+    runner._stage_verifier.verify.side_effect = lambda **kw: StageVerifyReport(
+        stage="furniture",
+        pass_stage=all(
+            r["label"] == "pass" for r in kw["deterministic_critic_payload"]["results"]
+        ),
+    )
+    with patch(
+        "scenesmith.scenebenchmark_critic.api.evaluate_room_scene",
+        side_effect=lambda *a, **kw: {"results": _readiness(scene, obj)},
+    ) as evaluate:
+        result = runner.post_stage("furniture", scene, tmp_path)
+    assert result.passed
+    assert evaluate.call_count == 2
+    assert (
+        tmp_path / "scene_000/scene_expert/timing/support_readiness.jsonl"
+    ).is_file()
