@@ -3223,6 +3223,10 @@ class AssetManager:
         if additional_metadata:
             metadata.update(additional_metadata)
 
+        # final_gltf_path and the SDF already contain the requested mesh scale.
+        # scale_factor is retained separately for source-space HSSD annotations.
+        metadata["geometry_scale_baked"] = True
+
         scene_obj = SceneObject(
             object_id=self.registry.generate_unique_id(config.short_name),
             object_type=object_type,

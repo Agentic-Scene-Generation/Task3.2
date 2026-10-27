@@ -1742,6 +1742,7 @@ def extract_and_propagate_support_surfaces(
     Raises:
         ValueError: If furniture object has no geometry path.
     """
+    config = config or SupportSurfaceExtractionConfig()
     # Return existing support surfaces if already computed.
     if furniture_object.support_surfaces:
         console_logger.info(
@@ -1848,11 +1849,20 @@ def extract_and_propagate_support_surfaces(
             f"(source: {source}): {surfaces_summary}"
         )
 
+    # HSSD annotations use source dimensions; mesh extraction uses the actual
+    # geometry file. AssetManager has already baked its scale into that file.
+    mesh_space_surfaces = source != "HSSD"
+
+    def surface_scale(obj: SceneObject) -> float:
+        if mesh_space_surfaces and obj.metadata.get("geometry_scale_baked") is True:
+            return 1.0
+        return obj.scale_factor
+
     # Transform surfaces from object-local to world frame.
     # The HSM algorithm extracts surfaces in mesh-local frame (identity transform).
     # We need to transform them to world frame using furniture's transform and scale.
     world_surfaces = []
-    scale = furniture_object.scale_factor
+    scale = surface_scale(furniture_object)
     for surface in surfaces:
         # Scale surface translation to match the scaled collision geometry.
         scaled_translation = surface.transform.translation() * scale
@@ -1912,7 +1922,7 @@ def extract_and_propagate_support_surfaces(
 
         # Transform each surface to this object's world frame with scaling.
         obj_surfaces = []
-        obj_scale = obj.scale_factor
+        obj_scale = surface_scale(obj)
         for surface in surfaces:
             # Apply this object's scale_factor to surface translation.
             obj_scaled_translation = surface.transform.translation() * obj_scale
