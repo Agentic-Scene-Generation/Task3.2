@@ -129,10 +129,10 @@ def _load_scores_yaml(scores_yaml_path: Path) -> tuple[dict[str, float], str]:
 
 
 def _critique_is_final(summary: str) -> bool:
-    """Reject obvious tool-use preambles accidentally persisted as conclusions."""
+    """Reject placeholders and tool-use preambles persisted as conclusions."""
 
     normalized = " ".join(str(summary or "").split())
-    if not normalized:
+    if not normalized or normalized.casefold() == "placeholder":
         return False
     if any(pattern.search(normalized) for pattern in _INCOMPLETE_CRITIQUE_PATTERNS):
         return False
