@@ -4205,10 +4205,13 @@ def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> b
     # Generated decor can retain a furniture category for retrieval, such as
     # ``dresser_mirror_tabletop``. It is still a manipuland and must not bind
     # a furniture contract endpoint solely because its parent noun appears in
-    # the asset category.
+    # the asset category. An explicit semantic identity still takes precedence:
+    # a support relation can move a known category such as plant to manipuland
+    # execution without changing what the object is.
     if (
         scene_object_type == "manipuland"
         and category not in MANIPULAND_CATEGORIES
+        and not exact_semantic_category
         and not open_vocabulary_adapter_category
         and not open_vocabulary_composite_match
     ):
