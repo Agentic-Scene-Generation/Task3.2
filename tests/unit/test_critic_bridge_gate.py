@@ -55,6 +55,29 @@ class CriticBridgeGateTest(unittest.TestCase):
         self.assertTrue(all(value == 0.0 for value in report.visual_scores.values()))
         self.assertIn("unusable scene", report.critique_summary)
 
+    def test_completed_retrospective_keeps_original_visual_scores(self) -> None:
+        summary = (
+            "The reading nook has clear circulation. I validated orientation "
+            "programmatically before drawing conclusions. No major issue remains."
+        )
+        original = (
+            "realism: {grade: 8, comment: Consistent furniture scale}\n"
+            "functionality: {grade: 8, comment: Doorway remains clear}\n"
+            f"summary: {summary}\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            scores_path = Path(tmp) / "scene_states" / "furniture" / "scores.yaml"
+            scores_path.parent.mkdir(parents=True)
+            scores_path.write_text(original, encoding="utf-8")
+            report = StageVerifier().verify(
+                stage="furniture",
+                stage_output_dir=tmp,
+                task_spec=SceneTaskSpec(room_type="living_room", style="cozy"),
+            )
+            self.assertEqual(scores_path.read_text(encoding="utf-8"), original)
+        self.assertTrue(report.visual_scores)
+        self.assertEqual(report.critique_summary, summary)
+
     def test_disabled_bridge_ignores_authoritative_scores_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             scores_path = Path(tmp) / "scene_states" / "furniture" / "scores.yaml"

@@ -22,10 +22,26 @@ def test_stage_score_lookup_never_borrows_another_stage(tmp_path: Path) -> None:
 
 
 def test_incomplete_critic_preamble_is_not_authoritative_evidence() -> None:
-    assert not _critique_is_final(
-        "I'll validate all orientation-dependent furniture before drawing conclusions."
-    )
+    for summary in (
+        "I'll validate all orientation-dependent furniture before drawing conclusions.",
+        "Before drawing conclusions, I need to inspect the furniture orientation.",
+        "Before drawing conclusions: let me first check the doorway.",
+        "I must review the furniture state before drawing conclusions.",
+    ):
+        assert not _critique_is_final(summary)
     assert _critique_is_final("No collision or functional issue remains.")
+
+
+def test_completed_critic_retrospective_is_authoritative_evidence() -> None:
+    for summary in (
+        "This is a well-executed reading nook. I validated all orientation-dependent "
+        "relationships and reviewed the physics, scale, and spatial data before "
+        "drawing conclusions.",
+        "The scene is well composed. I validated orientation programmatically "
+        "before drawing conclusions. No major issue remains.",
+        "Before drawing conclusions, I reviewed the doorway. It is blocked.",
+    ):
+        assert _critique_is_final(summary)
 
 
 def test_relation_satisfaction_uses_only_evaluated_deterministic_relations() -> None:
