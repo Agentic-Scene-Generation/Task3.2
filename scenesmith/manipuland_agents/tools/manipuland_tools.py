@@ -80,6 +80,7 @@ from scenesmith.floor_plan_agents.tools.polygon_geometry import (
     exact_surface_covers_object,
 )
 from scenesmith.scenebenchmark_critic import room_scene_to_case_pack
+from scenesmith.scene_expert.tool_contracts import asset_generation_argument_error
 from scenesmith.scenebenchmark_critic.intent_contract import (
     intent_contract_constraints_for_scene,
     selected_ids,
@@ -987,6 +988,20 @@ class ManipulandTools:
                 IDs and details of created manipuland models.
             """
             console_logger.info("Tool called: generate_manipuland_assets")
+            argument_error = asset_generation_argument_error(
+                object_descriptions, short_names, desired_dimensions
+            )
+            if argument_error:
+                return AssetGenerationResult(
+                    success=False,
+                    assets=[],
+                    successful_count=0,
+                    failed_count=len(object_descriptions),
+                    message=(
+                        f"Invalid generate_manipuland_assets arguments: {argument_error} "
+                        "No assets were generated. Correct the arguments and retry."
+                    ),
+                ).to_json()
             existing_coverings = existing_floor_covering_ids(self.scene)
             skipped_coverings: list[str] = []
             skipped_indices = redundant_floor_covering_request_indices(
