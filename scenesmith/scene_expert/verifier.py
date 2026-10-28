@@ -83,10 +83,11 @@ _SCENESMITH_SCORE_MAPPING = {
 _DETERMINISTIC_HARD_CHECK_MARKER = "DETERMINISTIC HARD-CHECK FAILED BEFORE VLM SCORING"
 _INCOMPLETE_CRITIQUE_PATTERNS = (
     re.compile(
-        r"^(?:i'll|i will|let me)\s+(?:first\s+)?(?:validate|check|inspect|review)\b",
+        r"^(?:before drawing conclusions\s*[,;:]?\s*)?"
+        r"(?:i'll|i will|i need to|i must|let me)\s+"
+        r"(?:first\s+)?(?:validate|check|inspect|review)\b",
         re.I,
     ),
-    re.compile(r"\bbefore drawing conclusions\b", re.I),
 )
 
 
