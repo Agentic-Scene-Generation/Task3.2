@@ -56,6 +56,7 @@ from scenesmith.wall_agents.tools.response_dataclasses import (
     WallSurfaceInfo,
 )
 from scenesmith.wall_agents.tools.wall_surface import WallSurface
+from scenesmith.scene_expert.tool_contracts import asset_generation_argument_error
 
 console_logger = logging.getLogger(__name__)
 
@@ -191,6 +192,20 @@ class WallTools:
                 f"object_descriptions={object_descriptions}, "
                 f"short_names={short_names})"
             )
+            argument_error = asset_generation_argument_error(
+                object_descriptions, short_names, desired_dimensions
+            )
+            if argument_error:
+                return AssetGenerationResultDTO(
+                    success=False,
+                    assets=[],
+                    successful_count=0,
+                    failed_count=len(object_descriptions),
+                    message=(
+                        f"Invalid generate_wall_assets arguments: {argument_error} "
+                        "No assets were generated. Correct the arguments and retry."
+                    ),
+                ).to_json()
             request = AssetGenerationRequest(
                 object_descriptions=object_descriptions,
                 short_names=short_names,
