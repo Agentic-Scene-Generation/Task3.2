@@ -220,6 +220,16 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
+def _verifier_boolean(
+    value: Any, label: str, warnings: list[str]
+) -> bool | None:
+    """Keep malformed verifier flags unknown instead of applying truthiness."""
+    if value is None or isinstance(value, bool):
+        return value
+    warnings.append(f"invalid_verifier_boolean:{label}")
+    return None
+
+
 def _mean(values: Iterable[float | None]) -> float | None:
     clean = [float(value) for value in values if value is not None]
     return round(statistics.fmean(clean), 6) if clean else None
@@ -835,9 +845,12 @@ def _repair_metrics(
     }
 
 
-def _verification_metrics(stages: list[dict[str, Any]]) -> dict[str, Any]:
+def _verification_metrics(
+    stages: list[dict[str, Any]], warnings: list[str] | None = None
+) -> dict[str, Any]:
     """Summarize final per-stage hard and relation evidence without re-scoring."""
 
+    warnings = warnings if warnings is not None else []
     final_reports: dict[str, dict[str, Any]] = {}
     for stage in stages:
         report = stage.get("verify_report")
@@ -856,10 +869,14 @@ def _verification_metrics(stages: list[dict[str, Any]]) -> dict[str, Any]:
             if isinstance(report.get("hard_check_report"), dict)
             else {}
         )
-        hard_valid = hard_report.get("hard_valid", hard_report.get("hard_passed"))
-        if not isinstance(hard_valid, bool):
-            hard_valid = bool(report.get("pass_stage")) and not issues
-        hard_passes.append(hard_valid)
+        raw_hard_valid = hard_report.get("hard_valid", hard_report.get("hard_passed"))
+        hard_valid = _verifier_boolean(raw_hard_valid, "hard_valid/hard_passed", warnings)
+        if raw_hard_valid is None:
+            hard_valid = (
+                _verifier_boolean(report.get("pass_stage"), "pass_stage", warnings)
+                is True
+            ) and not issues
+        hard_passes.append(hard_valid is True)
         relation_value = hard_report.get(
             "relation_satisfaction",
             hard_report.get("constraint_satisfaction_rate"),
@@ -945,7 +962,7 @@ def _scene_metrics(
         "trace_degraded": bool(trace.get("degraded", False)),
         "sceneexpert_overall_score": _as_float(final_report.get("overall_score")),
         "sceneexpert_pass_scene": (
-            bool(final_report.get("pass_scene")) if final_report else None
+            _verifier_boolean(final_report.get("pass_scene"), "pass_scene", warnings)
         ),
         "generation_status": generation_status,
         "requirement_status": str(final_report.get("requirement_status") or "unknown"),
@@ -1008,7 +1025,7 @@ def _scene_metrics(
         )
     row.update(_writer_metrics(scene_dir, trace, warnings))
     row.update(_repair_metrics(scene_dir, stages, warnings))
-    row.update(_verification_metrics(stages))
+    row.update(_verification_metrics(stages, warnings))
     costs = collect_attempt_costs(scene_dir, int(manifest_row["scene_index"]))
     warnings.extend(costs["warnings"])
     row["attempt_costs"] = costs
@@ -1585,6 +1602,7 @@ def collect_run_metrics(
         and len(critic_observed) == expected
         and len(trace_observed) == expected
         and not missing_stage_invocations
+        and not any(w.startswith("invalid_verifier_boolean:") for w in warnings)
     )
     memory_closed_loop_observed = bool(
         summary["memory_writer_promoted_records"] > 0
