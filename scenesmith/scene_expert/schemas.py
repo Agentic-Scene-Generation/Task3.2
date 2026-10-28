@@ -651,6 +651,9 @@ class FullVerifyReport(BaseModel):
     aesthetic_score: float = 0.0
     plausibility_score: float = 0.0
     style_consistency: float = 0.0
+    # Normal aggregation may populate these fields from critic score proxies.
+    # Numerical values alone do not establish independently measured physics;
+    # consult measured_metrics and metric_sources for measurement provenance.
     collision_free_rate: float = 0.0
     stability_score: float = 0.0
     walkable_area_ratio: float = 0.0
@@ -667,6 +670,12 @@ class FullVerifyReport(BaseModel):
     degraded_reasons: list[str] = Field(default_factory=list)
     measured_metrics: dict[str, bool] = Field(default_factory=dict)
     metric_sources: dict[str, str] = Field(default_factory=dict)
+    # These are independent outcome dimensions. Normal finalization summarizes
+    # execution in generation_status, required-asset coverage in
+    # requirement_status, and aggregate visual scores in quality_status.
+    # A satisfied/passed dimension does not imply deterministic_pass/pass_scene;
+    # hard spatial/physical gates remain separate. Failure finalization may
+    # explicitly mark quality_status failed.
     generation_status: Literal["complete", "partial", "failed", "unknown"] = "unknown"
     requirement_status: Literal[
         "satisfied", "partial", "unsatisfied", "not_applicable", "unknown"
