@@ -46,6 +46,16 @@ def _identity_values(metrics: dict[str, Any], key: str) -> list[str]:
     )
 
 
+def _pass_flag(value: Any, label: str, failures: list[str]) -> bool:
+    """Retain unknown as non-passing and reject malformed JSON evidence."""
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        failures.append(f"{label} must be a JSON boolean or null")
+        return False
+    return value
+
+
 def evaluate_scene_level_promotion(
     baseline: dict[str, Any],
     candidate: dict[str, Any],
@@ -107,9 +117,9 @@ def evaluate_scene_level_promotion(
         failures.append(
             "controlled evaluation is missing a frozen memory bank snapshot"
         )
-    if not baseline.get("quality_comparison_ready"):
+    if baseline.get("quality_comparison_ready") is not True:
         failures.append("base run is not quality-comparison ready")
-    if not candidate.get("quality_comparison_ready"):
+    if candidate.get("quality_comparison_ready") is not True:
         failures.append("adapter run is not quality-comparison ready")
 
     pairs: list[dict[str, Any]] = []
@@ -124,14 +134,26 @@ def evaluate_scene_level_promotion(
         score_delta = _delta(after_score, before_score)
         before_complete = str(before.get("status") or "") in _COMPLETE
         after_complete = str(after.get("status") or "") in _COMPLETE
-        before_hard = bool(
-            before.get("hard_constraint_pass", before.get("critic_zero_fail", False))
+        before_hard = _pass_flag(
+            before.get("hard_constraint_pass", before.get("critic_zero_fail", False)),
+            f"base {case_id}: hard_constraint_pass/critic_zero_fail",
+            failures,
         )
-        after_hard = bool(
-            after.get("hard_constraint_pass", after.get("critic_zero_fail", False))
+        after_hard = _pass_flag(
+            after.get("hard_constraint_pass", after.get("critic_zero_fail", False)),
+            f"adapter {case_id}: hard_constraint_pass/critic_zero_fail",
+            failures,
         )
-        before_scene_pass = bool(before.get("sceneexpert_pass_scene", False))
-        after_scene_pass = bool(after.get("sceneexpert_pass_scene", False))
+        before_scene_pass = _pass_flag(
+            before.get("sceneexpert_pass_scene"),
+            f"base {case_id}: sceneexpert_pass_scene",
+            failures,
+        )
+        after_scene_pass = _pass_flag(
+            after.get("sceneexpert_pass_scene"),
+            f"adapter {case_id}: sceneexpert_pass_scene",
+            failures,
+        )
         before_relation = _metric_number(before.get("relation_satisfaction"))
         after_relation = _metric_number(after.get("relation_satisfaction"))
         relation_delta = _delta(after_relation, before_relation)
