@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import statistics
 import time
 
@@ -34,8 +35,71 @@ def _delta(after: float | None, before: float | None) -> float | None:
     return after - before if after is not None and before is not None else None
 
 
-def _metric_number(value: Any) -> float | None:
-    return float(value) if isinstance(value, (int, float)) else None
+def _metric_number(value: Any, label: str, failures: list[str]) -> float | None:
+    """Keep missing evidence unknown and reject malformed numeric evidence."""
+    if value is None:
+        return None
+    if not isinstance(value, bool) and isinstance(value, (int, float)):
+        try:
+            number = float(value)
+        except OverflowError:
+            number = float("inf")
+        if math.isfinite(number):
+            return number
+    failures.append(f"{label} must be a finite JSON number or null")
+    return None
+
+
+def _case_rows(
+    metrics: dict[str, Any], label: str, failures: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Exclude ambiguous identities instead of selecting a duplicate by order."""
+    rows: dict[str, dict[str, Any]] = {}
+    seen: set[str] = set()
+    raw_rows = metrics.get("scenes")
+    if raw_rows is None:
+        return rows
+    if not isinstance(raw_rows, list):
+        failures.append(f"{label}: scenes must be a list")
+        return rows
+    for row in raw_rows:
+        case_id = row.get("case_id") if isinstance(row, dict) else None
+        if not isinstance(case_id, str) or not case_id.strip():
+            failures.append(f"{label}: each scene must have a nonempty string case_id")
+            continue
+        if case_id in seen:
+            failures.append(f"{label}: duplicate case_id {case_id}")
+            rows.pop(case_id, None)
+            continue
+        seen.add(case_id)
+        rows[case_id] = row
+    return rows
+
+
+def _mean_delta(values: list[float], label: str, failures: list[str]) -> float | None:
+    if not values:
+        return None
+    try:
+        value = statistics.fmean(values)
+    except (OverflowError, ValueError):
+        value = float("nan")
+    if not math.isfinite(value):
+        failures.append(f"{label} is non-finite or overflowed")
+        return None
+    return value
+
+
+def _metric_delta(
+    after: float | None,
+    before: float | None,
+    label: str,
+    failures: list[str],
+) -> float | None:
+    value = _delta(after, before)
+    if value is not None and not math.isfinite(value):
+        failures.append(f"{label} is non-finite or overflowed")
+        return None
+    return value
 
 
 def _identity_values(metrics: dict[str, Any], key: str) -> list[str]:
@@ -67,16 +131,8 @@ def evaluate_scene_level_promotion(
     thresholds = thresholds or {}
     failures: list[str] = []
     warnings: list[str] = []
-    baseline_rows = {
-        str(row.get("case_id") or ""): row
-        for row in baseline.get("scenes") or []
-        if isinstance(row, dict) and row.get("case_id")
-    }
-    candidate_rows = {
-        str(row.get("case_id") or ""): row
-        for row in candidate.get("scenes") or []
-        if isinstance(row, dict) and row.get("case_id")
-    }
+    baseline_rows = _case_rows(baseline, "base", failures)
+    candidate_rows = _case_rows(candidate, "adapter", failures)
     if set(baseline_rows) != set(candidate_rows):
         failures.append("case sets differ between base and adapter runs")
     baseline_models = _identity_values(baseline, "models")
@@ -129,9 +185,15 @@ def evaluate_scene_level_promotion(
         prompt_match = str(before.get("prompt") or "") == str(after.get("prompt") or "")
         if not prompt_match:
             failures.append(f"prompt mismatch: {case_id}")
-        before_score = _metric_number(before.get("critic_score"))
-        after_score = _metric_number(after.get("critic_score"))
-        score_delta = _delta(after_score, before_score)
+        before_score = _metric_number(
+            before.get("critic_score"), f"base {case_id}: critic_score", failures
+        )
+        after_score = _metric_number(
+            after.get("critic_score"), f"adapter {case_id}: critic_score", failures
+        )
+        score_delta = _metric_delta(
+            after_score, before_score, f"{case_id}: critic delta", failures
+        )
         before_complete = str(before.get("status") or "") in _COMPLETE
         after_complete = str(after.get("status") or "") in _COMPLETE
         before_hard = _pass_flag(
@@ -154,9 +216,19 @@ def evaluate_scene_level_promotion(
             f"adapter {case_id}: sceneexpert_pass_scene",
             failures,
         )
-        before_relation = _metric_number(before.get("relation_satisfaction"))
-        after_relation = _metric_number(after.get("relation_satisfaction"))
-        relation_delta = _delta(after_relation, before_relation)
+        before_relation = _metric_number(
+            before.get("relation_satisfaction"),
+            f"base {case_id}: relation_satisfaction",
+            failures,
+        )
+        after_relation = _metric_number(
+            after.get("relation_satisfaction"),
+            f"adapter {case_id}: relation_satisfaction",
+            failures,
+        )
+        relation_delta = _metric_delta(
+            after_relation, before_relation, f"{case_id}: relation delta", failures
+        )
         win = bool(
             (not before_complete and after_complete)
             or (
@@ -229,11 +301,11 @@ def evaluate_scene_level_promotion(
         "candidate_scene_pass_rate": _rate(
             [row["candidate_scene_pass"] for row in pairs]
         ),
-        "mean_critic_score_delta": (
-            statistics.fmean(score_deltas) if score_deltas else None
+        "mean_critic_score_delta": _mean_delta(
+            score_deltas, "mean_critic_score_delta", failures
         ),
-        "mean_relation_satisfaction_delta": (
-            statistics.fmean(relation_deltas) if relation_deltas else None
+        "mean_relation_satisfaction_delta": _mean_delta(
+            relation_deltas, "mean_relation_satisfaction_delta", failures
         ),
         "win_rate": _rate([row["win"] for row in pairs]),
         "loss_rate": _rate([row["loss"] for row in pairs]),
@@ -271,14 +343,19 @@ def evaluate_scene_level_promotion(
     )
     for name, minimum in gates:
         value = summary.get(name)
-        if value is None or float(value) < minimum:
+        if (
+            value is None
+            or not math.isfinite(float(value))
+            or not math.isfinite(minimum)
+            or float(value) < minimum
+        ):
             failures.append(f"{name}={value} is below {minimum}")
     win_minus_loss = float(summary["win_rate"] or 0.0) - float(
         summary["loss_rate"] or 0.0
     )
     summary["win_minus_loss_rate"] = win_minus_loss
     minimum_net_win = float(thresholds.get("minimum_win_minus_loss_rate", 0.0))
-    if win_minus_loss < minimum_net_win:
+    if not math.isfinite(minimum_net_win) or win_minus_loss < minimum_net_win:
         failures.append(
             f"win_minus_loss_rate={win_minus_loss:.6f} is below {minimum_net_win}"
         )
