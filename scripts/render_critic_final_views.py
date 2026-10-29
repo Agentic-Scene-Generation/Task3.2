@@ -48,6 +48,7 @@ from scenesmith.agent_utils.blender.renderer import BlenderRenderer
 from scenesmith.agent_utils.blender.scene_utils import compute_scene_bounds
 from scenesmith.agent_utils.blender.wall_utils import looks_like_wall
 from scenesmith.agent_utils.blender import renderer as renderer_module
+from scenesmith.scene_expert.native_completion import required_final_view_sources
 
 
 def parse_args() -> argparse.Namespace:
@@ -302,16 +303,15 @@ def render_one(blend_path: Path, args: argparse.Namespace) -> Path:
             include_vertical_views=True,
             side_view_start_azimuth_degrees=side_start_azimuth,
         )
+        sources = required_final_view_sources(rendered)
         output_dir = blend_path.parent.parent / "critic_final_views"
         output_dir.mkdir(parents=True, exist_ok=True)
         output_paths = {
             "0_top": output_dir / "00_top.png",
             "0_side": output_dir / "01_side.png",
         }
-        for source in rendered:
-            stem = source.stem
-            if stem in output_paths:
-                shutil.copy2(source, output_paths[stem])
+        for stem, source in sources.items():
+            shutil.copy2(source, output_paths[stem])
         manifest = {
             "input": str(blend_path),
             "renderer": "BlenderRenderer.render_agent_observation_views",
