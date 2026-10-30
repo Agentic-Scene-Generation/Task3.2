@@ -50,6 +50,7 @@ SCENE_SELECTION="${SCENE_SELECTION:-all}"
 MAX_CASES="${MAX_CASES:-0}"
 SCENEEVAL_SIZE="${SCENEEVAL_SIZE:-100}"
 SCENEEVAL_ANNOTATIONS="${SCENEEVAL_ANNOTATIONS:-$PROJECT_ROOT/scripts/assets/annotations.csv}"
+PROMPT_CSV="${PROMPT_CSV:-}"
 DIFFICULTY_SELECTION="${DIFFICULTY_SELECTION:-hard}"
 # Seven workers match the validated Qwen3.8 p7 service profile. Use 1 only for
 # strictly ordered cross-task memory diagnostics.
@@ -217,7 +218,7 @@ case "$SCENEEXPERT_EXPERIMENT" in
 esac
 
 case "${CASE_SET,,}" in
-  new3|legacy8) CASE_SET="${CASE_SET,,}" ;;
+  new3|legacy8|promptcsv) CASE_SET="${CASE_SET,,}" ;;
   old8) CASE_SET=legacy8 ;;
   sceneeval|scene-eval)
     [[ "$SCENEEVAL_SIZE" == 100 || "$SCENEEVAL_SIZE" == 500 ]] || \
@@ -226,7 +227,7 @@ case "${CASE_SET,,}" in
     ;;
   sceneeval100|sceneeval-100|sceneeval_100) CASE_SET=sceneeval100; SCENEEVAL_SIZE=100 ;;
   sceneeval500|sceneeval-500|sceneeval_500) CASE_SET=sceneeval500; SCENEEVAL_SIZE=500 ;;
-  *) die "CASE_SET must be new3, legacy8, sceneeval100, or sceneeval500; got '$CASE_SET'" ;;
+  *) die "CASE_SET must be new3, legacy8, sceneeval100, sceneeval500, or promptcsv; got '$CASE_SET'" ;;
 esac
 [[ -n "$SCENE_SELECTION" ]] || die "SCENE_SELECTION must not be empty"
 [[ "$MAX_CASES" =~ ^[0-9]+$ ]] || die "MAX_CASES must be a non-negative integer"
@@ -234,6 +235,8 @@ esac
   die "ACP_PARALLELISM must be empty or a positive integer"
 if [[ "$CASE_SET" == sceneeval* ]]; then
   require_file SCENEEVAL_ANNOTATIONS "$SCENEEVAL_ANNOTATIONS"
+elif [[ "$CASE_SET" == promptcsv ]]; then
+  require_file PROMPT_CSV "$PROMPT_CSV"
 fi
 [[ "$SHARED_BASE_STOP_STAGE" == "floor_plan" ]] || \
   die "normalized 4c flow requires SHARED_BASE_STOP_STAGE=floor_plan"
@@ -641,6 +644,7 @@ env \
   SCENEEXPERT_STAGE_POLICY_MANIPULAND="$SCENEEXPERT_STAGE_POLICY_MANIPULAND" \
   SCENEEVAL_SIZE="$SCENEEVAL_SIZE" \
   SCENEEVAL_ANNOTATIONS="$SCENEEVAL_ANNOTATIONS" \
+  PROMPT_CSV="$PROMPT_CSV" \
   DIFFICULTY_SELECTION="$DIFFICULTY_SELECTION" \
   SCENEEXPERT_DISABLE_ARTICULATED=1 SCENEEXPERT_DISABLE_MATERIALS=1 \
   SCENEEXPERT_DISABLE_BWRAP=1 SCENEEXPERT_CONVEX_MAX_OMP_THREADS=2 \

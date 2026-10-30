@@ -16,6 +16,7 @@ PROJECT_ROOT="${PROJECT_ROOT:-/mnt/afs/task3_2/L202500276_lwz/projects/Task3.2-d
 
 # TODO(user): CASE_SET = {new3, legacy8, sceneeval100, sceneeval500}.
 CASE_SET="${CASE_SET:-sceneeval100}"
+PROMPT_CSV="${PROMPT_CSV:-}"
 SCENE_SELECTION="${SCENE_SELECTION:-all}"
 MAX_CASES="${MAX_CASES:-0}"
 SCENEEVAL_SIZE="${SCENEEVAL_SIZE:-100}"
@@ -40,6 +41,7 @@ case "${CASE_SET,,}" in
   sceneeval100|sceneeval-100|sceneeval_100) RUN_CASE=sceneeval100 ;;
   sceneeval500|sceneeval-500|sceneeval_500) RUN_CASE=sceneeval500 ;;
   new3|legacy8|old8) RUN_CASE="${CASE_SET,,}" ;;
+  promptcsv) RUN_CASE=promptcsv ;;
   *) echo "ERROR: invalid CASE_SET: $CASE_SET" >&2; exit 2 ;;
 esac
 
@@ -58,6 +60,7 @@ exec env \
   SCENE_SELECTION="$SCENE_SELECTION" \
   MAX_CASES="$MAX_CASES" \
   SCENEEVAL_SIZE="$SCENEEVAL_SIZE" \
+  PROMPT_CSV="$PROMPT_CSV" \
   DIFFICULTY_SELECTION="$DIFFICULTY_SELECTION" \
   ACP_PARALLELISM="$ACP_PARALLELISM" \
   SCENEEXPERT_MEMORY_DIR="$SCENEEXPERT_MEMORY_DIR" \

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import subprocess
@@ -14,6 +13,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 from scenesmith.scene_expert.slow_memory.campaign import freeze_memory
+from scenesmith.scene_expert.slow_memory.campaign_task_source import resolve_campaign_task_source
 from scenesmith.scene_expert.slow_memory.dpo import (
     export_dpo_dataset,
     load_trajectories,
@@ -94,6 +94,7 @@ def publish_audit(
         )["stats"]
     summary = {
         "schema_version": "sceneexpert.campaign_audit.v1",
+        "task_source": plan.get("task_source", {"kind": "legacy_sceneeval500"}),
         "updated_at": time.time(),
         "completed_task_count": len(completed),
         "planned_collection_tasks": sum(
@@ -165,8 +166,8 @@ def main() -> int:
     parser.add_argument("--candidates-per-context", type=int, choices=(2, 4), default=2)
     parser.add_argument("--pool-completion-policy", choices=("all_four_v1", "pair_local_v2"), default="all_four_v1")
     parser.add_argument("--shared-base-failure-policy", choices=("strict", "isolated"), default="strict")
-    parser.add_argument("--sceneeval-ids", default="",
-                        help="Optional mechanism pilot filter; preserves the frozen task splits.")
+    parser.add_argument("--sceneeval-ids", "--task-ids", dest="sceneeval_ids", default="",
+                        help="Optional task-ID filter within the frozen source namespace; excludes test tasks.")
     args = parser.parse_args()
     if not 1 <= args.shadow_scope_samples <= 3:
         parser.error("shadow-scope-samples must be 1..3")
@@ -178,15 +179,8 @@ def main() -> int:
         parser.error("pair-local completion requires four candidates")
     root = args.root.resolve()
     plan = read_json(root / "campaign.json")
+    task_source = resolve_campaign_task_source(plan, REPO)
     task_filter = select_task_filter(plan, args.sceneeval_ids)
-    annotations = REPO / "scripts/assets/annotations.csv"
-    if (
-        hashlib.sha256(annotations.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
-        != plan["annotations_sha256"]
-    ):
-        raise ValueError(
-            "SceneEval annotations changed after the task partition was frozen"
-        )
     if (
         not 1 <= args.parallelism <= 7
         or args.max_tasks < 0
@@ -197,6 +191,10 @@ def main() -> int:
 
     with (root / "campaign.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        input_identity = root / "validated_task_source.json"
+        if input_identity.exists() and read_json(input_identity) != task_source.identity:
+            raise ValueError("campaign task source identity changed; use a new campaign")
+        write_json(input_identity, task_source.identity)
         exit_marker = root / "campaign_exit_status.env"
         exit_marker.unlink(missing_ok=True)
         sources, completed, audits = validated_sources(root)
@@ -293,10 +291,12 @@ def main() -> int:
                     "PROJECT_ROOT": str(REPO),
                     "RUN_ID": f"{root.name}_{attempt.name}",
                     "OUTPUT_ROOT": str(attempt / "runs"),
-                    "PYTHON_BIN": sys.executable,
-                    "CASE_SET": "sceneeval500",
-                    "SCENEEVAL_SIZE": "500",
-                    "SCENEEVAL_ANNOTATIONS": str(annotations),
+                    "PYTHON_BIN": (
+                        os.environ.get("SCENEEXPERT_CAMPAIGN_WORKER_PYTHON", sys.executable)
+                        if task_source.identity["kind"] == "namespaced_promptcsv"
+                        else sys.executable
+                    ),
+                    **task_source.environment,
                     "DIFFICULTY_SELECTION": "all",
                     "SCENE_SELECTION": ",".join(
                         str(row["sceneeval_id"]) for row in pending
