@@ -2029,6 +2029,33 @@ class SceneExpertHookRunner:
         self._stage_start_time = time.time()
         self._qwen_calls = 0
 
+        # A raw initial-candidate evaluator must leave its captured state intact.
+        # Prepare native floor surfaces before the agent and its snapshot exist,
+        # using the same mesh extractor as the later manipuland consumer.
+        critic_config = getattr(self, "_critic_config", None)
+        if stage == "furniture" and critic_config is not None and critic_config.enabled:
+            from scenesmith.scene_expert.support_readiness import (
+                prepare_floor_support_evidence,
+            )
+
+            floor_evidence = prepare_floor_support_evidence(
+                scene, getattr(self, "_support_surface_config", None)
+            )
+            if floor_evidence:
+                evidence_path = self._scene_debug_dir / "timing/support_readiness.jsonl"
+                evidence_path.parent.mkdir(parents=True, exist_ok=True)
+                with evidence_path.open("a", encoding="utf-8") as stream:
+                    stream.write(
+                        json.dumps(
+                            {
+                                "stage": stage,
+                                "phase": "pre_stage",
+                                "targets": floor_evidence,
+                            }
+                        )
+                        + "\n"
+                    )
+
         # Save original text_description for restoration after stage
         self._original_text_descriptions[stage] = scene.text_description
         # Keep an explicit immutable task-facing description on the scene.
