@@ -132,6 +132,12 @@ def test_native_floor_evidence_survives_capture_and_fresh_scene_restore(
     ) as extract:
         assert prepare_floor_support_evidence(restored, support_config) == []
     extract.assert_not_called()
+    # Preparing a floor before capture must not consume the uncheckpointed
+    # sequential furniture-surface counter or collide with its next allocation.
+    original_next = scene.generate_surface_id()
+    restored_next = restored.generate_surface_id()
+    assert original_next == restored_next
+    assert restored_next not in {s.surface_id for s in restored_floor.support_surfaces}
 
 
 def test_missing_floor_geometry_remains_a_failure(
