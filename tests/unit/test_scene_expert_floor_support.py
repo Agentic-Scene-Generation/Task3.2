@@ -184,6 +184,7 @@ def test_hook_prepares_floor_before_stage_context_and_agent_creation(
     def project(**kwargs) -> StageRelationContext:
         assert floor.support_surfaces
         assert kwargs["scene"] is scene
+        assert scene.text_description == "Blocks on the floor"
         return StageRelationContext(stage="furniture")
 
     projector.project.side_effect = project
@@ -214,7 +215,7 @@ def test_hook_prepares_floor_before_stage_context_and_agent_creation(
     runner.pre_stage("furniture", scene)
 
     assert _readiness(scene, floor)[0]["label"] == "pass"
-    assert scene.text_description == "Blocks on the floor"
+    assert scene.scene_expert_original_description == "Blocks on the floor"
     row = json.loads(
         (tmp_path / "scene_000/scene_expert/timing/support_readiness.jsonl").read_text()
     )
