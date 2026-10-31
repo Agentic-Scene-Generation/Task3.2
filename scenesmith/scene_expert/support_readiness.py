@@ -5,11 +5,15 @@ from __future__ import annotations
 import logging
 import time
 
+from collections.abc import Iterator
+from copy import copy
+from itertools import count
 from typing import Any
 
 from omegaconf import OmegaConf
 
 from scenesmith.agent_utils.room import (
+    ObjectType,
     RoomScene,
     UniqueID,
     extract_and_propagate_support_surfaces,
@@ -83,8 +87,23 @@ def _prepare_support_targets(
             "source": "native_support_extraction",
         }
         try:
+            extraction_scene = scene
+            if obj.object_type == ObjectType.FLOOR:
+                # Initial snapshots restore floor surfaces but not the native
+                # scene's sequential ID counter. Give this separately stored
+                # floor its own IDs, so later furniture surfaces neither collide
+                # with it nor differ between canonical and restored candidates.
+                extraction_scene = copy(scene)
+                floor_indices = count()
+
+                def floor_surface_id(
+                    prefix: str = object_id, indices: Iterator[int] = floor_indices
+                ) -> UniqueID:
+                    return UniqueID(f"{prefix}__support_{next(indices)}")
+
+                extraction_scene.generate_surface_id = floor_surface_id
             surfaces = extract_and_propagate_support_surfaces(
-                scene=scene, furniture_object=obj, config=hsm_config
+                scene=extraction_scene, furniture_object=obj, config=hsm_config
             )
             row.update(
                 status="extracted" if surfaces else "empty", surfaces=len(surfaces)
