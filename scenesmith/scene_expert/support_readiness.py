@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import logging
 import time
+
 from typing import Any
 
 from omegaconf import OmegaConf
 
 from scenesmith.agent_utils.room import (
     RoomScene,
+    UniqueID,
     extract_and_propagate_support_surfaces,
 )
 from scenesmith.agent_utils.support_surface_extraction import (
@@ -17,6 +19,23 @@ from scenesmith.agent_utils.support_surface_extraction import (
 )
 
 console_logger = logging.getLogger(__name__)
+
+
+def prepare_floor_support_evidence(
+    scene: RoomScene,
+    config: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Prepare native floor evidence before initial-design snapshots are frozen.
+
+    Rectangular floors are stored outside ``scene.objects`` and normally have
+    their mesh surfaces extracted at the later manipuland stage. Extract those
+    same surfaces before furniture evaluation can require them. Existing polygon
+    surfaces stay intact; no bbox surface or placement is synthesized.
+    """
+    floor = getattr(getattr(scene, "room_geometry", None), "floor", None)
+    if floor is None:
+        return []
+    return _prepare_support_targets(scene, {str(floor.object_id)}, config)
 
 
 def prepare_stage_support_evidence(
@@ -39,14 +58,21 @@ def prepare_stage_support_evidence(
         if row.get("label") == "fail"
         and row.get("diagnostics", {}).get("support_readiness") is True
     }
-    if not target_ids:
+    return _prepare_support_targets(scene, target_ids, config)
+
+
+def _prepare_support_targets(
+    scene: RoomScene,
+    target_ids: set[str],
+    config: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Use the existing native extractor for targets, including the room floor."""
+    if not config or not target_ids:
         return []
     hsm_config = SupportSurfaceExtractionConfig.from_config(OmegaConf.create(config))
     evidence: list[dict[str, Any]] = []
     for object_id in sorted(target_ids):
-        obj = next(
-            (obj for key, obj in scene.objects.items() if str(key) == object_id), None
-        )
+        obj = scene.get_object(UniqueID(object_id))
         if obj is None or obj.support_surfaces:
             continue
         started = time.perf_counter()

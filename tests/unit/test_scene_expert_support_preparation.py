@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 import pytest
 import trimesh
+
 from omegaconf import OmegaConf
 from pydrake.all import RigidTransform
 
@@ -47,6 +48,7 @@ def _rug(tmp_path):
         objects={obj.object_id: obj},
         generate_surface_id=lambda: UniqueID("S_0"),
     )
+    scene.get_object = scene.objects.get
     return scene, obj
 
 
