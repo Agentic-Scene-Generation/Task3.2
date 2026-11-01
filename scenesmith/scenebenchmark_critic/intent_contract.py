@@ -2463,6 +2463,9 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
                 )
             )
 
+    constraints.extend(
+        _explicit_coordinated_desk_pairing_constraints(lowered, required_counts)
+    )
     constraints.extend(_explicit_per_target_constraints(lowered, required_counts))
     constraints.extend(_explicit_corner_distribution_constraints(lowered))
 
@@ -2526,6 +2529,106 @@ def _explicit_prompt_constraints(prompt: str, lowered: str) -> list[dict[str, An
     if edge_constraint is not None:
         constraints.append(edge_constraint)
     return constraints
+
+
+def _explicit_coordinated_desk_pairing_constraints(
+    prompt: str, required_counts: dict[str, int]
+) -> list[dict[str, Any]]:
+    """Recognize a chair later in an explicit counted-desks each-with list.
+
+    Reuse the existing one-to-one ``paired_with`` representation. Decline
+    contradictory totals, multiple desk cohorts, negation, plural seats and
+    cross-sentence antecedents rather than inventing a binding authority.
+    """
+    number_pattern = r"\d+|" + "|".join(
+        re.escape(word) for word in _NUMBER_WORDS if word not in {"a", "an"}
+    )
+    pattern = re.compile(
+        rf"(?<![a-z0-9])(?P<count>{number_pattern})\s+"
+        r"(?P<target>(?:[a-z][a-z0-9-]*\s+){0,2}desks?)\s*,?\s+"
+        r"each\s+with\s+(?P<items>[^.!?;\n]{1,180})",
+        re.IGNORECASE,
+    )
+    matches = list(pattern.finditer(prompt))
+    if len(matches) != 1:
+        return []
+    match = matches[0]
+    sentence_start = max(prompt.rfind(mark, 0, match.start()) for mark in ".!?;\n") + 1
+    prefix = prompt[sentence_start : match.start()].lower()
+    if re.search(
+        r"\b(?:avoid|avoiding|do\s+not|don't|must\s+not|should\s+not|without|no)\b",
+        prefix,
+    ):
+        return []
+    if re.search(
+        r"\b(?:no|not|without|neither|nor|or|either|except|optional|optionally|zero)\b|\bat\s+(?:most|least)\b|\bup\s+to\b",
+        match.group("items"),
+        re.IGNORECASE,
+    ):
+        return []
+    count = _leading_count(match.group("count")) or 0
+    target = selector_for_phrase(match.group("target"), count=count)
+    if count <= 1 or target is None or target.get("category") != "desk":
+        return []
+    if required_counts.get("desk", 0) != count:
+        return []
+    # A literal "one chair" inside this each-with list is per desk, not a
+    # contradictory room total. Only outside count evidence can conflict.
+    outside = prompt[: match.start()] + " " + prompt[match.end() :]
+    outside_counts = [
+        row["subjects"] for row in _explicit_required_count_constraints(outside)
+    ]
+    if any(row.get("category") == "desk" for row in outside_counts):
+        return []
+    if any(
+        row.get("category") in {"chair", "office_chair"} and row.get("count") != count
+        for row in outside_counts
+    ):
+        return []
+    items = [
+        part.strip()
+        for part in re.split(r"\s*,\s*(?:and\s+)?|\s+and\s+", match.group("items"))
+        if part.strip()
+    ]
+    if len(items) < 2:
+        return []
+    for index, phrase in enumerate(items):
+        # An immediate each-with-chair clause already has legacy handling.
+        if index == 0 or not re.fullmatch(
+            r"(?:(?:a|an|one)\s+)?(?:[a-z][a-z0-9-]*\s+){0,3}chair",
+            phrase,
+            re.IGNORECASE,
+        ):
+            continue
+        if _leading_count(phrase) not in {None, 1}:
+            continue
+        subject = selector_for_phrase(phrase)
+        if (
+            subject is None
+            or subject.get("category") not in {"chair", "office_chair"}
+            or subject.get("role")
+        ):
+            continue
+        subject = dict(subject, count=count, quantifier="all")
+        target = dict(target, count=count, quantifier="all")
+        evidence = match.group(0)
+        return [
+            _constraint(
+                "required_count",
+                dict(subject, quantifier="at_least"),
+                None,
+                source="explicit_prompt",
+                evidence_span=evidence,
+            ),
+            _constraint(
+                "paired_with",
+                subject,
+                target,
+                source="explicit_prompt",
+                evidence_span=evidence,
+            ),
+        ]
+    return []
 
 
 def _explicit_per_target_constraints(
