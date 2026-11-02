@@ -276,6 +276,10 @@ GENERIC_CATEGORY_PARENTS = {
 }
 
 _PARENT_CATEGORY_EDGES = {
+    # A bookcase can satisfy generic shelving without allowing a bare shelf
+    # to stand in for a specifically requested bookcase. Keep this out of the
+    # generic role-fallback registry, which also permits the reverse fallback.
+    "bookshelf": "shelf",
     "frame_portrait": "picture_frame",
     "framed_portrait": "picture_frame",
     "vinyl_record": "record",
@@ -477,12 +481,14 @@ def semantic_category_match(requested: Any, observed: Any) -> dict[str, Any]:
             match_path=[observed_raw, requested_category],
         )
         return result
-    parent = _PARENT_CATEGORY_EDGES.get(observed_raw)
+    parent = _PARENT_CATEGORY_EDGES.get(observed_raw) or _PARENT_CATEGORY_EDGES.get(
+        observed_category
+    )
     if parent == requested_category:
         result.update(
             matched=True,
             match_kind="taxonomy_parent",
-            match_path=[observed_raw, parent],
+            match_path=list(dict.fromkeys([observed_raw, observed_category, parent])),
         )
         return result
     if observed_category == requested_category:
