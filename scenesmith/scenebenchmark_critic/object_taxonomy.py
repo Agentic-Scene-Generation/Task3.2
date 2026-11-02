@@ -64,6 +64,7 @@ _CATEGORY_ALIASES = {
     "spoon": "cutlery",
     "spoons": "cutlery",
     "wine_glass": "glass",
+    "wine_barrel": "barrel",
     "drinking_glass": "glass",
     "water_glass": "glass",
     "tumbler": "glass",
