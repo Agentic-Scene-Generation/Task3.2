@@ -8,7 +8,6 @@ module keeps their semantic identity and stage ownership rules in one place.
 from __future__ import annotations
 
 import re
-
 from typing import Any
 
 from scenesmith.scenebenchmark_critic.relation_registry import (
@@ -17,7 +16,6 @@ from scenesmith.scenebenchmark_critic.relation_registry import (
     STAGE_ORDER,
     WALL_MOUNTED_CATEGORIES,
 )
-
 
 _CATEGORY_ALIASES = {
     "entrance_route": "entrance",
@@ -36,6 +34,8 @@ _CATEGORY_ALIASES = {
     "display_monitor": "monitor",
     "display_shelves": "display_shelf",
     "display_shelving": "display_shelf",
+    "shelve": "shelf",
+    "shelves": "shelf",
     "water_cooler": "water_dispenser",
     "drinking_water_dispenser": "water_dispenser",
     "storage_cupboard": "storage_cabinet",
@@ -390,6 +390,18 @@ def canonical_object_category(value: Any) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "_", normalized).strip("_")
     if not normalized:
         return ""
+    # Asset display names sometimes append an instance number (``shelf2``).
+    # Strip it only from an already registered name; open-vocabulary compounds
+    # and model identifiers must retain their identity.
+    instance = re.fullmatch(r"(.+?)_?(\d+)", normalized)
+    if instance is not None:
+        base = instance.group(1).rstrip("_")
+        if (
+            base in _CATEGORY_ALIASES
+            or base in _PHRASE_CATEGORY_MAP
+            or base in _KNOWN_CATEGORIES
+        ):
+            normalized = base
     alias = _CATEGORY_ALIASES.get(normalized)
     if alias is not None:
         return alias
@@ -412,7 +424,9 @@ def canonical_object_category(value: Any) -> str:
     for width in range(len(tokens), 0, -1):
         start = len(tokens) - width
         phrase = "_".join(tokens[start:])
-        phrase_category = _PHRASE_CATEGORY_MAP.get(phrase)
+        phrase_category = _CATEGORY_ALIASES.get(phrase) or _PHRASE_CATEGORY_MAP.get(
+            phrase
+        )
         if phrase_category is None and phrase in _KNOWN_CATEGORIES:
             phrase_category = phrase
         if phrase_category is None:
