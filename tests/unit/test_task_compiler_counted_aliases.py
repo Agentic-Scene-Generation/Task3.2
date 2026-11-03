@@ -147,3 +147,62 @@ def test_count_reconciliation_keeps_true_excess_capped() -> None:
     assert "reconciliation_reason" not in relation
     assert excessive["subjects"]["count"] == 2
     assert excessive["reconciliation_reason"] == "task_inventory_count_cap"
+
+
+@pytest.mark.parametrize(
+    "category,owner,target,expected",
+    [
+        ("pet_bed", "furniture", "floor", "furniture"),
+        ("checkout_counter", "furniture", "floor", "furniture"),
+        ("cabinet", "furniture", "floor", "furniture"),
+        ("bed", "furniture", "table", "manipuland"),
+        ("book", "furniture", "floor", "manipuland"),
+        ("bottle", "manipuland", "floor", "manipuland"),
+        ("pet_toy", "manipuland", "floor", "manipuland"),
+        ("unregistered_object", "", "floor", "manipuland"),
+        ("floor", "furniture", "floor", "manipuland"),
+        ("wall", "furniture", "floor", "manipuland"),
+        ("ceiling", "furniture", "floor", "manipuland"),
+        ("room", "furniture", "floor", "manipuland"),
+        ("brush", "", "rug", "furniture"),
+        ("mirror", "", "dressing_table", "manipuland"),
+    ],
+)
+def test_floor_surface_respects_physical_inventory_and_elevated_supports(
+    category: str, owner: str, target: str, expected: str
+) -> None:
+    from scenesmith.scenebenchmark_critic.object_taxonomy import generation_owner
+
+    assert generation_owner(
+        category,
+        relation="on_top_of",
+        target_category=target,
+        declared_owner=owner,
+    ) == expected
+
+
+def test_floor_supported_pet_beds_keep_furniture_counts_after_reconciliation() -> None:
+    from scenesmith.scene_expert.hooks import _reconcile_task_spec_stage_ownership
+    from scenesmith.scenebenchmark_critic.intent_contract import build_intent_contract
+
+    prompt = "A pet room with two pet beds on the floor and two pet toys."
+    task = SceneTaskSpec(
+        room_type="pet room",
+        style="",
+        required_large_objects=["pet_bed"] * 2,
+        required_small_objects=["pet_toy"] * 2,
+    )
+    contract = build_intent_contract(prompt, task_spec=task)
+
+    reconciled = _reconcile_task_spec_stage_ownership(task, contract)
+
+    bed_count = next(
+        row
+        for row in contract["constraints"]
+        if row["relation"] == "required_count" and row["subjects"]["category"] == "bed"
+    )
+    assert bed_count["stage"] == "furniture"
+    assert bed_count["subjects"]["count"] == 2
+    assert len(reconciled.required_large_objects) == 2
+    assert len(reconciled.required_small_objects) == 2
+    assert contract["prompt"] == prompt
