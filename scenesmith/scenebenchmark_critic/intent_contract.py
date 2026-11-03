@@ -713,6 +713,35 @@ def selected_ids(
     return sorted(dict.fromkeys(ids))
 
 
+def _structural_entrance_category_match(
+    category: str, obj: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Bind entrance wording only to an adapter-certified physical door proxy."""
+    if category not in {"entrance", "entry"} or obj.get("object_type") != "structural":
+        return None
+    metadata = obj.get("metadata") if isinstance(obj.get("metadata"), dict) else {}
+    opening_id = str(metadata.get("opening_id") or "")
+    observed = {
+        _normalize_selector_category(value)
+        for value in (obj.get("category_norm"), obj.get("category"))
+        if value
+    }
+    if (
+        metadata.get("structural_proxy") is not True
+        or not opening_id
+        or opening_id != str(obj.get("id") or "")
+        or observed != {"door"}
+    ):
+        return None
+    return {
+        "requested_category": category,
+        "observed_category": "door",
+        "matched": True,
+        "match_kind": "structural_anchor_alias",
+        "match_path": ["door", category],
+    }
+
+
 def semantic_selector_matches(
     selector: dict[str, Any] | None,
     objects: Iterable[dict[str, Any]],
@@ -732,7 +761,7 @@ def semantic_selector_matches(
             obj.get("category"),
             metadata.get("semantic_name"),
         ]
-        category_match = next(
+        category_match = _structural_entrance_category_match(category, obj) or next(
             (
                 match
                 for value in observed
@@ -4208,6 +4237,8 @@ def _selector_matches_exact_category(
 
 def _selector_matches_object(category: str, role: str, obj: dict[str, Any]) -> bool:
     category = _normalize_selector_category(category)
+    if _structural_entrance_category_match(category, obj) is not None:
+        return _role_matches_object(role, obj)
     normalized_category = category.replace("_", " ")
     object_cat = _normalize_selector_category(object_category(obj))
     metadata = obj.get("metadata") if isinstance(obj.get("metadata"), dict) else {}
