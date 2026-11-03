@@ -34,7 +34,10 @@ from scenesmith.scenebenchmark_critic.opening_geometry import (
     normalized_wall_direction,
     opening_physical_bounds,
 )
-from scenesmith.scenebenchmark_critic.object_taxonomy import canonical_object_category
+from scenesmith.scenebenchmark_critic.object_taxonomy import (
+    canonical_object_category,
+    is_known_object_category,
+)
 from scenesmith.scenebenchmark_critic.metrics.functional_dependency.constants import (
     BEDS,
     MEDIA,
@@ -1075,6 +1078,17 @@ def _category_for_object(obj: SceneObject) -> str:
             # The shared taxonomy already recognizes desk chairs as seating.
             # Its whole-compound identity outranks the legacy interior token;
             # unknown compounds such as desk_chair_holder remain unchanged.
+            return semantic_category
+        if (
+            _scene_object_type(obj) == "furniture"
+            and category
+            in {"display", "monitor", "television", "laptop", "tablet_computer"}
+            and semantic_category != category
+            and (is_known_object_category(semantic_category) or "_" in semantic_category)
+        ):
+            # A device word inside a furniture retrieval label cannot replace
+            # the whole object's category. Keep unknown compounds intact;
+            # this does not certify their visual identity or function.
             return semantic_category
         if (
             _scene_object_type(obj) == "furniture"

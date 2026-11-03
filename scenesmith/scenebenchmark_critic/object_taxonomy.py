@@ -18,6 +18,9 @@ from scenesmith.scenebenchmark_critic.relation_registry import (
 )
 
 _CATEGORY_ALIASES = {
+    "display_table": "table",
+    "laptop_table": "table",
+    "tablet_table": "table",
     "entrance_route": "entrance",
     "entrance_path": "entrance",
     "entry_route": "entrance",
