@@ -382,14 +382,35 @@ def room_scene_to_case_pack(
 
 
 def _physics_evidence_for_scene(scene: RoomScene) -> dict[str, Any] | None:
-    """Read only the structured physics artifact, never a human log string."""
+    """Return structured evidence only when bound to the current scene state."""
     metadata = getattr(scene, "metadata", None)
-    if isinstance(metadata, dict):
-        evidence = metadata.get("scenebenchmark_physics_evidence")
-        if isinstance(evidence, dict):
-            return dict(evidence)
-    evidence = getattr(scene, "scenebenchmark_physics_evidence", None)
-    return dict(evidence) if isinstance(evidence, dict) else None
+    evidence = (
+        metadata.get("scenebenchmark_physics_evidence")
+        if isinstance(metadata, dict)
+        else None
+    )
+    if not isinstance(evidence, dict):
+        evidence = getattr(scene, "scenebenchmark_physics_evidence", None)
+    if not isinstance(evidence, dict):
+        return None
+    result = dict(evidence)
+    if not result.get("available", False):
+        return result
+    try:
+        current_scene_hash = str(scene.content_hash())
+    except Exception as exc:
+        result.update(
+            available=False,
+            error="Current physics state identity unavailable: " + type(exc).__name__,
+        )
+        return result
+    if not result.get("scene_hash") or str(result["scene_hash"]) != current_scene_hash:
+        result.update(
+            available=False,
+            error="Physics evidence is missing a current scene-state binding.",
+            current_scene_hash=current_scene_hash,
+        )
+    return result
 
 
 def house_scene_to_case_pack(
