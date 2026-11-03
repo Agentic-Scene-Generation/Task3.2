@@ -3546,8 +3546,26 @@ def build_hook_runner(
                     "TaskCompiler failed, using fallback task spec from prompt text: %s",
                     e,
                 )
-                current_task_spec = _fallback_spec_from_prompt(prompt)
-            task_compiler_trace = dict(getattr(task_compiler, "last_trace", {}) or {})
+                failure_reason = f"{type(e).__name__}: {e}"
+                current_task_spec = _fallback_spec_from_prompt(prompt).model_copy(
+                    update={
+                        "compiler_status": "degraded",
+                        "compiler_failure_reason": failure_reason,
+                    }
+                )
+                upstream_trace = dict(getattr(task_compiler, "last_trace", {}) or {})
+                task_compiler_trace = {
+                    **upstream_trace,
+                    "status": "fallback",
+                    "failure_reason": failure_reason,
+                    "fallback_source": "hook_compile_exception",
+                    "exception_type": type(e).__name__,
+                    "upstream_trace": upstream_trace,
+                }
+            else:
+                task_compiler_trace = dict(
+                    getattr(task_compiler, "last_trace", {}) or {}
+                )
         else:
             current_task_spec = _fallback_spec_from_prompt(prompt)
             task_compiler_trace = {
