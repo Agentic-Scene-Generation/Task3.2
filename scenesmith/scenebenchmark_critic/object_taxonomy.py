@@ -548,8 +548,12 @@ def generation_owner(
 
     if normalized_endpoint == "subject":
         if normalized_relation in _SURFACE_SUPPORT_RELATIONS:
-            if canonical_object_category(target_category) == "rug":
-                # A floor covering does not turn floor furniture into an
+            if (canonical_object_category(target_category) == "rug" or (
+                canonical_object_category(target_category) == "floor"
+                and declared_owner == "furniture"
+                and normalized_category not in {"floor", "wall", "ceiling", "room"}
+            )):
+                # A floor or floor covering does not turn floor furniture into an
                 # elevated surface placement. Preserve the object's ordinary
                 # owner; small objects still belong to the manipuland stage.
                 owner = generation_owner(
