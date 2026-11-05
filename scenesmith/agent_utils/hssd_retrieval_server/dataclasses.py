@@ -81,7 +81,7 @@ class HssdRetrievalResult:
     """HSSD object identifier (SHA-1 hash)."""
 
     object_name: str
-    """Human-readable object name from description."""
+    """Human-readable source asset name; empty if unknown, never the query echo."""
 
     similarity_score: float
     """CLIP similarity score in range [0, 1], higher is better match."""
@@ -90,7 +90,7 @@ class HssdRetrievalResult:
     """Object size (width, depth, height) in meters."""
 
     category: str
-    """Object category (e.g., 'tables', 'seating')."""
+    """Source asset category/synset, or 'unknown'; not the requested stage type."""
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""

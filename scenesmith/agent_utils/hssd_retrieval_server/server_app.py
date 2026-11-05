@@ -30,6 +30,29 @@ from .dataclasses import (
 console_logger = logging.getLogger(__name__)
 
 
+def _candidate_source_identity(candidate: Any) -> tuple[str, str]:
+    """Return bound asset metadata, keeping query text out of candidate identity."""
+    metadata = getattr(candidate, "metadata", None)
+    name = getattr(metadata, "name", None)
+    category = getattr(metadata, "wordnet_key", None)
+    if metadata is None:
+        # The namespaced all-assets candidate has no HSSD metadata object.
+        from scenesmith.scenebenchmark_critic.current_asset_annotations import (
+            get_current_asset_annotation,
+        )
+
+        try:
+            record = get_current_asset_annotation(candidate.mesh_id)
+        except (KeyError, OSError, ValueError):
+            record = {}
+        category = record.get("category_key") or record.get("category")
+        name = record.get("name") or record.get("object_name") or category
+    return (
+        name.strip() if isinstance(name, str) else "",
+        category.strip() if isinstance(category, str) and category.strip() else "unknown",
+    )
+
+
 class HssdRetrievalApp(flask.Flask):
     """Flask application for HSSD retrieval with round-robin scheduling."""
 
@@ -346,15 +369,6 @@ class HssdRetrievalApp(flask.Flask):
         output_dir = Path(request.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Derive category from HSSD config mapping.
-        category = (
-            "all_assets"
-            if self._hssd_retrieval_backend == "all_assets_embedding"
-            else retriever.config.object_type_mapping.get(
-                request.object_type.upper(), "unknown"
-            )
-        )
-
         results: list[HssdRetrievalResult] = []
         for candidate in candidates:
             mesh_filename = f"{candidate.mesh_id}.glb"
@@ -363,10 +377,11 @@ class HssdRetrievalApp(flask.Flask):
 
             console_logger.debug(f"Exported candidate mesh to {mesh_path}")
 
+            name, category = _candidate_source_identity(candidate)
             result = HssdRetrievalResult(
                 mesh_path=str(mesh_path),
                 hssd_id=candidate.mesh_id,
-                object_name=request.object_description,
+                object_name=name,
                 similarity_score=float(candidate.clip_score),
                 size=tuple(gltf_y_up_dimensions_to_scene_z_up(candidate.mesh.extents)),
                 category=category,
