@@ -59,6 +59,71 @@ _COMPONENT_EQUIVALENTS = {
     ),
 }
 
+_CUTLERY_KINDS = {
+    "fork": "fork",
+    "forks": "fork",
+    "knife": "knife",
+    "knives": "knife",
+    "spoon": "spoon",
+    "spoons": "spoon",
+    "chopstick": "chopstick",
+    "chopsticks": "chopstick",
+}
+_GENERIC_ASSET_CATEGORIES = frozenset(
+    {
+        "",
+        "unknown",
+        "object",
+        "small_object",
+        "small_objects",
+        "kitchenware",
+        "tableware",
+        "cutlery",
+        "utensil",
+        "utensils",
+    }
+)
+
+
+def _specific_cutlery_kind(value: object) -> str | None:
+    """Recognize the utensil noun, keeping holders and blocks distinct."""
+    tokens = normalize_semantic_name(value).split("_")
+    while tokens and tokens[-1].isdigit():
+        tokens.pop()
+    return _CUTLERY_KINDS.get(tokens[-1]) if tokens else None
+
+
+def cutlery_asset_identity_mismatch(
+    asset_id: str, requested_name: object
+) -> str | None:
+    """Reject an explicit source-category contradiction, not certify identity.
+
+    Retrieval result names can echo the query. Only the bound source annotation
+    can establish this negative check; missing or broad annotations stay unknown.
+    """
+    requested = _specific_cutlery_kind(requested_name)
+    if requested is None:
+        return None
+    from scenesmith.scenebenchmark_critic.current_asset_annotations import (
+        get_current_asset_annotation,
+    )
+
+    try:
+        annotation = get_current_asset_annotation(asset_id)
+    except (KeyError, OSError, ValueError):
+        return None
+    category = normalize_semantic_name(
+        annotation.get("category_key") or annotation.get("category")
+    )
+    if category in _GENERIC_ASSET_CATEGORIES:
+        return None
+    if _specific_cutlery_kind(category) == requested:
+        return None
+    return (
+        f"Asset {asset_id} has source category {category!r}, "
+        f"incompatible with requested {requested!r}; a request label cannot rename its geometry"
+    )
+
 
 def _component_matches_forbidden(component: object, forbidden: list[str]) -> bool:
     normalized = normalize_semantic_name(component)
@@ -644,6 +709,49 @@ def choose_hssd_candidate_from_iso_renders(
 ) -> RenderedAssetChoice:
     """Optionally reorder retrieval candidates using pre-rendered visual evidence."""
     fallback_semantic_name = normalize_semantic_name(object_short_name)
+    requested_cutlery_kind = _specific_cutlery_kind(fallback_semantic_name)
+    identity_rejections = {
+        candidate.hssd_id: reason
+        for candidate in candidates
+        if (
+            reason := cutlery_asset_identity_mismatch(
+                candidate.hssd_id, fallback_semantic_name
+            )
+        )
+        is not None
+    }
+    if identity_rejections:
+        # Filter before every skip/error/material fallback. In particular, a
+        # well-rendered spoon cannot replace a knife and inherit its label.
+        _write_choice_audit(
+            audit_path=audit_path,
+            object_description=object_description,
+            scene_context=scene_context,
+            object_short_name=object_short_name,
+            requested_dimensions=requested_dimensions,
+            requested_shape=requested_shape,
+            candidates=candidates,
+            evidence_records=[],
+            top_n=top_n,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            verbosity=verbosity,
+            vision_detail=vision_detail,
+            status="rejected_known_cutlery_identity",
+            retrieval_backend=retrieval_backend,
+            identity_rejections=identity_rejections,
+        )
+        candidates = [
+            candidate
+            for candidate in candidates
+            if candidate.hssd_id not in identity_rejections
+        ]
+        if not candidates:
+            return RenderedAssetChoice(
+                candidates=[],
+                semantic_name=fallback_semantic_name or None,
+                reason="all retrieved candidates contradict the requested cutlery identity",
+            )
     forbidden_components = [
         normalized
         for value in forbidden_components or []
@@ -652,6 +760,11 @@ def choose_hssd_candidate_from_iso_renders(
     allowed_semantic_names = []
     for value in semantic_name_candidates or []:
         normalized = normalize_semantic_name(value)
+        if (
+            requested_cutlery_kind is not None
+            and _specific_cutlery_kind(normalized) != requested_cutlery_kind
+        ):
+            continue
         if normalized and normalized not in allowed_semantic_names:
             allowed_semantic_names.append(normalized)
     if fallback_semantic_name and fallback_semantic_name not in allowed_semantic_names:

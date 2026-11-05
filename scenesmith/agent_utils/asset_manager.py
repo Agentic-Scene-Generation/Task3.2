@@ -28,6 +28,7 @@ from scenesmith.agent_utils.asset_router.dataclasses import (
 from scenesmith.agent_utils.asset_router.rendered_asset_choice import (
     RenderedAssetChoice,
     choose_hssd_candidate_from_iso_renders,
+    cutlery_asset_identity_mismatch,
     hssd_rendered_choice_options,
     infer_floor_covering_footprint_shape,
     is_floor_covering_request,
@@ -1556,6 +1557,11 @@ class AssetManager:
     ) -> SceneObject:
         """Convert one direct HSSD candidate, allowing the caller to retry."""
         short_name = request.short_names[index]
+        identity_error = cutlery_asset_identity_mismatch(candidate.hssd_id, short_name)
+        if identity_error is not None:
+            # The direct path also runs when rendered choice is disabled. Reject
+            # before conversion, scaling, collision generation or registration.
+            raise ValueError(identity_error)
         floor_covering = is_floor_covering_request(
             request.object_descriptions[index], short_name
         )
