@@ -511,7 +511,10 @@ class IntentContract(BaseModel):
                     "wall rather than the X-to-Y layout"
                 )
 
-        required_counts: dict[str, int] = {}
+        # Role-qualified selectors denote different subsets of a category.
+        # For example, 16 cutlery items can include 8 forks and 8 knives;
+        # their counts must not overwrite or contradict the aggregate row.
+        required_counts: dict[tuple[str, str], int] = {}
         for relation in self.constraints:
             if relation.relation != "required_count":
                 continue
@@ -521,18 +524,21 @@ class IntentContract(BaseModel):
                 raise ValueError(
                     f"required_count must declare a positive count for {category!r}"
                 )
-            previous = required_counts.get(category)
+            key = (category, relation.subjects.role)
+            previous = required_counts.get(key)
             if previous is not None and previous != count:
                 raise ValueError(
                     "conflicting required_count relations for "
                     f"{category!r}: {previous} and {count}"
                 )
-            required_counts[category] = count
+            required_counts[key] = count
 
         for relation in self.constraints:
             if relation.relation != "edge_distribution":
                 continue
-            expected = required_counts.get(relation.subjects.category)
+            expected = required_counts.get(
+                (relation.subjects.category, relation.subjects.role)
+            )
             if expected is None or expected == relation.subjects.count:
                 continue
 
@@ -547,6 +553,7 @@ class IntentContract(BaseModel):
                 for candidate in self.constraints
                 if candidate.relation == "required_count"
                 and candidate.subjects.category == relation.subjects.category
+                and candidate.subjects.role == relation.subjects.role
             )
             is_minimum = required.source == "task_compiler_inventory" or (
                 required.subjects.quantifier in {"at_least", "minimum"}
