@@ -708,6 +708,11 @@ def _object_labels_match(required: str, present: str) -> bool:
     present_label = _normalize_object_label(present)
     if not required_label or not present_label:
         return False
+    if required_label == "glass":
+        # A drinking-glass requirement refers to the primary object identity.
+        # Splitting ``glass_vase`` or ``glass_table`` into words would count a
+        # material adjective as an independently present drinking vessel.
+        return present_label == "glass"
     required_components = _object_label_component_categories(required)
     present_components = _object_label_component_categories(present)
     if any(
@@ -744,6 +749,14 @@ def _description_contains_object_label(required: str, description: str) -> bool:
     required_tokens = _normalize_object_label(required).split()
     if not required_tokens:
         return False
+    if required_tokens == ["glass"]:
+        # Descriptions of cabinets and lights also contain the material word
+        # glass. Only an explicit drinkware noun phrase supports this fallback.
+        return re.search(
+            r"\b(?:water|wine|drinking|champagne|beer|juice)\s+glass(?:es)?\b"
+            r"|\b(?:glass\s+)?tumbler\b",
+            str(description).lower(),
+        ) is not None
     description_tokens = [
         _normalize_object_label(token)
         for token in re.sub(r"[^a-z0-9]+", " ", str(description).lower()).split()

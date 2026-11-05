@@ -28,6 +28,7 @@ from scenesmith.scenebenchmark_critic.current_asset_annotations import (
 from scenesmith.scenebenchmark_critic.evaluator import build_all_checks
 from scenesmith.scenebenchmark_critic.intent_contract import (
     attach_intent_contract_to_case_pack,
+    original_prompt_for_scene,
 )
 from scenesmith.scenebenchmark_critic.opening_geometry import (
     normalized_opening_type,
@@ -370,15 +371,15 @@ def room_scene_to_case_pack(
         "scene_id": f"{scene.room_id}:{stage}",
         "stage": stage,
         "source_method": "scenesmith_online",
-        "task_instruction": scene.text_description,
+        "task_instruction": original_prompt_for_scene(scene),
         "room_type": scene.room_type,
         "scene_geometry": scene_geometry,
         "physics_evidence": _physics_evidence_for_scene(scene),
         "checks": [],
     }
-    # Preserve the original task separately from the mutable stage prompt.
-    # SceneExpert may append memory and a StageBrief to ``text_description``;
-    # those instructions must never become critic hard constraints.
+    # Bind every critic consumer to the same original task. SceneExpert keeps
+    # its mutable StageBrief/memory suffix on the scene for designer prompts;
+    # optional hints must never introduce additional critic hard constraints.
     attach_intent_contract_to_case_pack(scene, case_pack)
     case_pack["checks"] = build_all_checks(case_pack, metrics=metrics)
     return case_pack

@@ -29,6 +29,7 @@ PROMPT_GROUP_PATTERNS = {
     "bowl": r"\bbowls?\b",
     "drinkware": (
         r"\bglasses\b|\bglassware\b|\b(?:water|wine|drinking) glass\b|"
+        r"\b(?:a|one) glass(?=\s*(?:[,.;:]|$|and\b|or\b|of\b))|"
         r"\bcups?\b|\bmugs?\b|\bgoblets?\b|\btumblers?\b"
     ),
     "fork": r"\bforks?\b",
@@ -305,6 +306,7 @@ def _requested_place_count(task_instruction: str) -> int:
     patterns = (
         rf"\b(?:table|place)?\s*settings?\s+for\s+({number})\b",
         rf"\b({number})\s+(?:table|place)?\s*settings?\b",
+        rf"\btable\s+(?:is\s+)?set\s+for\s+({number})\b",
     )
     for pattern in patterns:
         match = re.search(pattern, text)
