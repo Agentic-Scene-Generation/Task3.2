@@ -1196,6 +1196,7 @@ def _functional_hints(
     if _asset_annotation_is_not_functional(metadata_hints):
         categories.clear()
     anchor_type = metadata_hints.get("anchor_type") or _anchor_type(categories)
+    runtime_object_type = _scene_object_type(obj)
 
     hints: dict[str, Any] = dict(metadata_hints)
     hints.update(
@@ -1210,8 +1211,13 @@ def _functional_hints(
             "category_keywords": list(
                 metadata_hints.get("category_keywords") or _category_keywords(category)
             ),
-            "scene_object_type": str(
-                metadata_hints.get("scene_object_type") or _scene_object_type(obj)
+            # Asset taxonomies can use broader types such as
+            # furniture_or_equipment. Predicates need the actual scene role;
+            # otherwise real chairs disappear from dining-seat association.
+            "scene_object_type": (
+                runtime_object_type
+                if runtime_object_type != "unknown"
+                else str(metadata_hints.get("scene_object_type") or runtime_object_type)
             ),
         }
     )
