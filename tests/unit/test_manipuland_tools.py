@@ -275,6 +275,8 @@ class TestManipulandTools(unittest.TestCase):
         cutlery.name = "dinner_fork"
         cutlery.description = "silver cutlery"
         cutlery.placement_info = Mock(rotation_2d=0.0)
+        cutlery.bbox_min = None
+        cutlery.bbox_max = None
 
         self.assertAlmostEqual(
             self.manipuland_tools._dining_companion_rotation_degrees(

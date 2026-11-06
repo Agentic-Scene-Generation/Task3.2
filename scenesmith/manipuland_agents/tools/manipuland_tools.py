@@ -3255,8 +3255,20 @@ class ManipulandTools:
         if forward_norm <= 1e-9:
             return ManipulandTools._surface_rotation_degrees(scene_object)
         forward /= forward_norm
-        # At zero local yaw the canonical manipuland long axis is +Y. Rotate
-        # that axis into the seat-forward direction in the support frame.
+        # External assets can retain an X-long collision frame. Use the
+        # placement-frame bounds, rather than assuming every utensil is Y-long.
+        # Visual GLTF axes need not match this collision/placement frame.
+        if scene_object.bbox_min is not None and scene_object.bbox_max is not None:
+            spans = np.asarray(scene_object.bbox_max) - np.asarray(scene_object.bbox_min)
+            if len(spans) >= 2 and np.all(np.isfinite(spans[:2])):
+                if spans[0] > spans[1] > 0.0:
+                    return math.degrees(
+                        math.atan2(
+                            float(np.dot(forward, surface_y)),
+                            float(np.dot(forward, surface_x)),
+                        )
+                    )
+        # Preserve the canonical +Y convention when bounds are absent or Y-long.
         return math.degrees(
             math.atan2(
                 -float(np.dot(forward, surface_x)),
