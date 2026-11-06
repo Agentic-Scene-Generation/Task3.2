@@ -121,3 +121,37 @@ def test_external_source_axis_normalizes_geometry_once(tmp_path, source_axis, ex
     assert second[0].mesh.bounds == pytest.approx(first[0].mesh.bounds)
     # Every request reloads the original; no transform is written back to it.
     assert trimesh.load(mesh_path, force="mesh").extents == pytest.approx([0.20, 0.03, 0.01])
+
+
+def test_source_policy_excludes_unapproved_generated_meshes_before_loading(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("HSSD_ALL_ASSETS_ALLOWED_SOURCES", "hssd,3dfuture,others")
+    mesh_path = tmp_path / "fork.glb"
+    trimesh.creation.box(extents=[0.20, 0.01, 0.03]).export(mesh_path)
+    retriever = AllAssetsZvecRetriever(
+        HssdZvecConfig(collection_path=tmp_path, base_url="http://unused"), top_k=2,
+    )
+    retriever._client = MagicMock()
+    retriever._client.embed_text.return_value = [0.1, 0.2]
+    retriever._collection = MagicMock()
+    retriever._collection.query.return_value = [SimpleNamespace(
+        fields={"asset_id": uid, "asset_path": str(mesh_path)}, score=0.9,
+    ) for uid in ["generated:unapproved_fork", "others:ycb:030_fork"]]
+    load = trimesh.load
+    with (
+        patch.dict(sys.modules, {"zvec": SimpleNamespace(Query=lambda **kw: kw)}),
+        patch("scenesmith.agent_utils.hssd_retrieval.all_assets_zvec.trimesh.load", wraps=load) as loader,
+    ):
+        candidates = retriever.retrieve_multiple("dinner fork", "MANIPULAND")
+    assert [item.mesh_id for item in candidates] == ["others:ycb:030_fork"]
+    assert loader.call_count == 1
+
+
+def test_unknown_source_policy_fails_before_retrieval(tmp_path, monkeypatch):
+    monkeypatch.setenv("HSSD_ALL_ASSETS_ALLOWED_SOURCES", "typo")
+    with pytest.raises(ValueError, match="namespace"):
+        AllAssetsZvecRetriever(HssdZvecConfig(
+            collection_path=tmp_path, base_url="http://unused",
+        ), top_k=1)

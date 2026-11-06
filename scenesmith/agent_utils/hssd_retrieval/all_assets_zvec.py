@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 
 from dataclasses import dataclass
@@ -86,6 +87,12 @@ class AllAssetsZvecRetriever:
             raise ValueError("top_k must be positive")
         self.config = config
         self.top_k = top_k
+        allowed = os.environ.get("HSSD_ALL_ASSETS_ALLOWED_SOURCES", "")
+        self._allowed_sources = frozenset(
+            source.strip() for source in allowed.split(",") if source.strip()
+        )
+        if self._allowed_sources - {"hssd", "3dfuture", "others", "generated"}:
+            raise ValueError("Unknown HSSD_ALL_ASSETS_ALLOWED_SOURCES namespace")
         self._client = LlamaTextEmbeddingClient(config)
         self._collection: Any | None = None
         self._unit_scales = self._load_unit_scales(config.all_assets_manifest_path)
@@ -267,6 +274,9 @@ class AllAssetsZvecRetriever:
         for doc in results:
             fields = getattr(doc, "fields", {}) or {}
             mesh_id = str(fields.get("asset_id") or getattr(doc, "id", ""))
+            source = mesh_id.split(":", 1)[0] if ":" in mesh_id else "hssd"
+            if self._allowed_sources and source not in self._allowed_sources:
+                continue
             asset_path = resolve_all_assets_path(str(fields.get("asset_path") or ""))
             if not mesh_id or mesh_id in seen_ids or not asset_path.is_file():
                 continue
