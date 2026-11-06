@@ -1459,9 +1459,9 @@ def _hssd_annotation_functional_hints(obj: SceneObject) -> dict[str, Any]:
     if not asset_id:
         return {}
     try:
-        if asset_id.lower().startswith("3dfuture:"):
+        if asset_id.lower().startswith(("3dfuture:", "others:")):
             record = get_current_asset_annotation(asset_id)
-            annotation_source = "3dfuture_annotations"
+            annotation_source = asset_id.split(":", 1)[0].lower() + "_annotations"
         else:
             record = get_hssd_asset_annotations(asset_id)
             annotation_source = "hssd_annotations"

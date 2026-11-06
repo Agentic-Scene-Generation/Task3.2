@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from scenesmith.agent_utils.asset_manager import (
     _get_scenebenchmark_front_axis_annotation_record,
     _normalize_hssd_annotation_front_axis,
@@ -32,3 +34,23 @@ def test_critic_uses_3dfuture_front_hints_from_legacy_mesh_id() -> None:
     assert hints["asset_annotation_asset_uid"] == ASSET_UID
     assert hints["canonical_orientation_is_semantic_front"] is True
     assert hints["asset_local_front_axis"] == [0.0, 0.0, 1.0]
+
+
+@pytest.mark.parametrize("uid,axis", [
+    ("others:ycb:030_fork", [0.0, 0.0, 1.0]),
+    ("others:ycb:032_knife", [0.0, 0.0, -1.0]),
+])
+def test_external_cutlery_preserves_annotation_frame_and_provenance(uid, axis):
+    record = _get_scenebenchmark_front_axis_annotation_record(uid)
+    assert record is not None
+    front = record["canonical_front"]
+    assert front["asset_local_front_axis"] == axis
+    assert front["luna_front_status"] == "multiple_valid"
+    assert front["is_strict_positive_front"] is False
+    hints = _hssd_annotation_functional_hints(
+        SimpleNamespace(metadata={"hssd_mesh_id": uid})
+    )
+    assert hints["asset_annotation_source"] == "others_annotations"
+    assert hints["classification_source"] == "others_annotations"
+    assert hints["asset_annotation_asset_uid"] == uid
+    assert hints["asset_local_front_axis"] == axis

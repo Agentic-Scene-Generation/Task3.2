@@ -16,6 +16,9 @@ import trimesh
 from scenesmith.agent_utils.hssd_retrieval.alignment import (
     apply_hssd_alignment_transform,
 )
+from scenesmith.agent_utils.hssd_retrieval.all_assets_paths import (
+    resolve_all_assets_path,
+)
 from scenesmith.agent_utils.hssd_retrieval.config import HssdZvecConfig
 from scenesmith.agent_utils.hssd_retrieval.data_loader import (
     HssdMeshMetadata,
@@ -86,6 +89,7 @@ class AllAssetsZvecRetriever:
         self._client = LlamaTextEmbeddingClient(config)
         self._collection: Any | None = None
         self._unit_scales = self._load_unit_scales(config.all_assets_manifest_path)
+        self._source_axes = self._load_source_axes(config.all_assets_manifest_path)
         self._hssd_metadata_by_id = self._load_hssd_orientation_metadata(
             hssd_preprocessed_path
         )
@@ -110,6 +114,17 @@ class AllAssetsZvecRetriever:
     ) -> trimesh.Trimesh:
         """Restore source-specific mesh-frame normalization before export."""
         if not mesh_id.startswith("hssd:"):
+            # External files retain their source coordinates. The manifest's
+            # normalized_axis_frame describes annotation coordinates, not an
+            # already rotated mesh (for example the released YCB cutlery).
+            source_axis = self._source_axes.get(mesh_id)
+            if source_axis == "z_up":
+                mesh.apply_transform(
+                    np.array(
+                        [[1, 0, 0, 0], [0, 0, 1, 0], [0, -1, 0, 0], [0, 0, 0, 1]],
+                        dtype=float,
+                    )
+                )
             return mesh
 
         raw_hssd_id = mesh_id.removeprefix("hssd:")
@@ -120,6 +135,23 @@ class AllAssetsZvecRetriever:
                 f"{mesh_id}"
             )
         return apply_hssd_alignment_transform(mesh, metadata)
+
+    @staticmethod
+    def _load_source_axes(manifest_path: Path | None) -> dict[str, str]:
+        """Read explicit source-to-Y-up contracts without inferring missing axes."""
+        if manifest_path is None:
+            return {}
+        axes: dict[str, str] = {}
+        with manifest_path.open(encoding="utf-8") as stream:
+            for line in stream:
+                record = json.loads(line)
+                geometry = record.get("geometry_ref") or {}
+                if geometry.get("normalized_axis_frame") != "asset_local_y_up":
+                    continue
+                source_axis = geometry.get("source_axis")
+                if source_axis in {"z_up", "y_up"}:
+                    axes[str(record["asset_uid"])] = source_axis
+        return axes
 
     @staticmethod
     def _load_unit_scales(manifest_path: Path | None) -> dict[str, float]:
@@ -235,7 +267,7 @@ class AllAssetsZvecRetriever:
         for doc in results:
             fields = getattr(doc, "fields", {}) or {}
             mesh_id = str(fields.get("asset_id") or getattr(doc, "id", ""))
-            asset_path = Path(str(fields.get("asset_path") or ""))
+            asset_path = resolve_all_assets_path(str(fields.get("asset_path") or ""))
             if not mesh_id or mesh_id in seen_ids or not asset_path.is_file():
                 continue
             try:

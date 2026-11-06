@@ -635,6 +635,10 @@ def _manifest_image_paths_by_asset_uid(
 
 
 def _all_assets_manifest_image_paths(asset_uid: str) -> tuple[Path, ...]:
+    from scenesmith.agent_utils.hssd_retrieval.all_assets_paths import (
+        resolve_all_assets_path,
+    )
+
     manifest_path_text = os.environ.get("HSSD_ALL_ASSETS_MANIFEST_PATH")
     if not manifest_path_text:
         return ()
@@ -649,7 +653,10 @@ def _all_assets_manifest_image_paths(asset_uid: str) -> tuple[Path, ...]:
             "Could not load all-assets render manifest %s: %s", manifest_path, exc
         )
         return ()
-    return tuple(path for path in manifest_images.get(asset_uid, ()) if path.is_file())
+    paths = (
+        resolve_all_assets_path(path) for path in manifest_images.get(asset_uid, ())
+    )
+    return tuple(path for path in paths if path.is_file())
 
 
 def _evenly_spaced_paths(image_paths: tuple[Path, ...], limit: int) -> tuple[Path, ...]:

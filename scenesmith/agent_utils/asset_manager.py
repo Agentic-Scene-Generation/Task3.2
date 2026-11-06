@@ -246,10 +246,10 @@ def _get_scenebenchmark_front_axis_annotation_record(
 
     The all-assets retrieval server deliberately returns its namespaced ID through
     the legacy ``hssd_id`` field.  Keep custom HSSD lookup paths working as-is,
-    but route 3D-FUTURE IDs to the synchronized multi-source release.
+    but route 3D-FUTURE and external IDs to the synchronized multi-source release.
     """
     normalized = str(asset_id or "").strip()
-    if normalized.lower().startswith("3dfuture:"):
+    if normalized.lower().startswith(("3dfuture:", "others:")):
         from scenesmith.scenebenchmark_critic.current_asset_annotations import (
             get_current_asset_annotation,
         )
