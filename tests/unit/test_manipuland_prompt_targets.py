@@ -966,6 +966,7 @@ def test_final_dining_contract_repairs_incomplete_layout_without_alignment() -> 
 
 def _joint_repair_agent() -> StatefulManipulandAgent:
     agent = object.__new__(StatefulManipulandAgent)
+    agent.cfg = SimpleNamespace(code_level_auto_repair=SimpleNamespace(enabled=True))
     agent.scene = Mock()
     agent.scene.to_state_dict.return_value = {"objects": {"settled": True}}
     agent.manipuland_tools = Mock()
