@@ -3,6 +3,7 @@
 import shutil
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -12,6 +13,7 @@ import trimesh
 
 from pydrake.all import RigidTransform
 
+from scenesmith.agent_utils.rescale_helpers import rescale_object_common
 from scenesmith.agent_utils.room import (
     ObjectType,
     RoomScene,
@@ -20,9 +22,11 @@ from scenesmith.agent_utils.room import (
     UniqueID,
     extract_and_propagate_support_surfaces,
 )
+from scenesmith.agent_utils.sdf_generator import rescale_sdf
 from scenesmith.agent_utils.support_surface_extraction import (
     SupportSurfaceExtractionConfig,
 )
+from scenesmith.utils.sdf_utils import extract_uniform_visual_mesh_scale
 
 
 class TestSupportSurfaceMeshScaling(unittest.TestCase):
@@ -277,6 +281,202 @@ class TestSupportSurfaceMeshScaling(unittest.TestCase):
             )[0]
         np.testing.assert_allclose(surface.bounding_box_max[:2], [1.0, 1.0])
         np.testing.assert_allclose(surface.transform.translation(), [0.0, 0.0, 1.0])
+
+    def _baked_table_with_sdf(self, scale: str | None = None) -> SceneObject:
+        """Create a real Z-up mesh with an independent SDF runtime scale."""
+        mesh_path = self.temp_dir / "baked_table.obj"
+        self.test_mesh.export(mesh_path)
+        sdf_path = self.temp_dir / "baked_table.sdf"
+        root = ET.Element("sdf", version="1.7")
+        model = ET.SubElement(root, "model", name="table")
+        ET.SubElement(model, "pose").text = "4 5 6 0 0 0"
+        link = ET.SubElement(model, "link", name="base_link")
+        for tag in ["visual", "collision"]:
+            mesh = ET.SubElement(
+                ET.SubElement(ET.SubElement(link, tag, name=tag), "geometry"), "mesh"
+            )
+            ET.SubElement(mesh, "uri").text = mesh_path.name
+            if scale is not None:
+                ET.SubElement(mesh, "scale").text = scale
+        ET.ElementTree(root).write(sdf_path, encoding="utf-8")
+        return SceneObject(
+            object_id=UniqueID("baked_table_0"),
+            object_type=ObjectType.FURNITURE,
+            name="table",
+            description="Already baked table mesh",
+            transform=RigidTransform(),
+            geometry_path=mesh_path,
+            sdf_path=sdf_path,
+            bbox_min=np.array([-0.5, -0.5, 0.0]),
+            bbox_max=np.array([0.5, 0.5, 0.75]),
+            scale_factor=2.0,
+            metadata={"geometry_scale_baked": True},
+        )
+
+    def test_baked_hsm_support_tracks_actual_sdf_rescale(self):
+        """A real post-bake rescale must not insert the support plane into the table."""
+        for factor in [1.05, 0.5, 1.0]:
+            with self.subTest(factor=factor):
+                table = self._baked_table_with_sdf()
+                self.scene.objects = {table.object_id: table}
+                self.scene.get_object.return_value = table
+                if factor != 1.0:
+                    result = rescale_object_common(
+                        self.scene, str(table.object_id), factor, "furniture"
+                    )
+                    self.assertTrue(result.success)
+                surface = extract_and_propagate_support_surfaces(
+                    self.scene, table, self.config
+                )[0]
+                plane = float(surface.transform.translation()[2])
+                self.assertGreater(plane, 0.75 * factor)
+                self.assertAlmostEqual(plane, 0.76 * factor, places=5)
+                self.assertAlmostEqual(
+                    float(np.abs(surface.mesh.vertices[:, :2]).max()),
+                    0.5 * factor,
+                    places=5,
+                )
+                # The already-baked source scale2 must not be applied again.
+                self.assertAlmostEqual(table.scale_factor, 2.0 * factor)
+                self.assertEqual(
+                    ET.parse(table.sdf_path).findtext(".//model/pose"), "4 5 6 0 0 0"
+                )
+
+    def test_baked_surface_propagation_uses_each_actual_sdf(self):
+        """Shared geometry at different runtime scales keeps distinct physical surfaces."""
+        first = self._baked_table_with_sdf("1.05 1.05 1.05")
+        second_sdf = self.temp_dir / "second.sdf"
+        tree = ET.parse(first.sdf_path)
+        for node in tree.findall(".//mesh/scale"):
+            node.text = "0.5 0.5 0.5"
+        tree.write(second_sdf)
+        second = SceneObject(
+            object_id=UniqueID("baked_table_1"),
+            object_type=ObjectType.FURNITURE,
+            name="table",
+            description="Other instance",
+            transform=RigidTransform(p=[2, 0, 0]),
+            geometry_path=first.geometry_path,
+            sdf_path=second_sdf,
+            scale_factor=1.0,
+            metadata={"geometry_scale_baked": True},
+        )
+        self.scene.objects = {first.object_id: first, second.object_id: second}
+        extract_and_propagate_support_surfaces(self.scene, first, self.config)
+        self.assertAlmostEqual(
+            first.support_surfaces[0].transform.translation()[2], 0.76 * 1.05, places=5
+        )
+        self.assertAlmostEqual(
+            second.support_surfaces[0].transform.translation()[2], 0.76 * 0.5, places=5
+        )
+        self.assertAlmostEqual(
+            float(np.abs(second.support_surfaces[0].mesh.vertices[:, :2]).max()),
+            0.25,
+            places=5,
+        )
+
+    def test_hssd_annotations_keep_source_scale_after_sdf_rescale(self):
+        """Post-bake SDF scale is only for mesh-space extraction, not source annotations."""
+        table = self._baked_table_with_sdf()
+        table.metadata.update(asset_source="hssd", hssd_mesh_id="table")
+        self.scene.objects = {table.object_id: table}
+        self.scene.get_object.return_value = table
+        self.assertTrue(
+            rescale_object_common(
+                self.scene, str(table.object_id), 1.05, "furniture"
+            ).success
+        )
+        local = SupportSurface(
+            surface_id=UniqueID("local"),
+            transform=RigidTransform(p=[0, 0, 0.5]),
+            bounding_box_min=np.array([-0.5, -0.5, 0.01]),
+            bounding_box_max=np.array([0.5, 0.5, 0.51]),
+        )
+        with patch(
+            "scenesmith.agent_utils.hssd_retrieval.support_surface_loader.load_hssd_support_surfaces",
+            return_value=[local],
+        ):
+            surface = extract_and_propagate_support_surfaces(
+                self.scene, table, self.config
+            )[0]
+        self.assertAlmostEqual(surface.transform.translation()[2], 0.5 * 2.1)
+
+    def test_per_link_surfaces_do_not_apply_sdf_scale_twice(self):
+        """Per-link extraction has already incorporated the runtime SDF scale."""
+        table = self._baked_table_with_sdf("1.05 1.05 1.05")
+        table.metadata.update(is_articulated=True, asset_source="hssd")
+        self.scene.objects = {table.object_id: table}
+        config = SupportSurfaceExtractionConfig(recompute_hssd_surfaces=True)
+        local = SupportSurface(
+            surface_id=UniqueID("link_surface"),
+            transform=RigidTransform(p=[0, 0, 0.798]),
+            bounding_box_min=np.array([-0.525, -0.525, 0.01]),
+            bounding_box_max=np.array([0.525, 0.525, 0.798]),
+        )
+        with patch(
+            "scenesmith.agent_utils.room.extract_support_surfaces_articulated",
+            return_value=[local],
+        ):
+            surface = extract_and_propagate_support_surfaces(self.scene, table, config)[
+                0
+            ]
+        self.assertAlmostEqual(surface.transform.translation()[2], 0.798)
+
+    def test_sdf_visual_scale_matches_exact_mesh_and_accumulates_rescale(self):
+        """Ignore other visuals and read the live scale after repeated SDF edits."""
+        table = self._baked_table_with_sdf()
+        tree = ET.parse(table.sdf_path)
+        other = ET.SubElement(
+            ET.SubElement(
+                ET.SubElement(tree.find(".//link"), "visual", name="other"), "geometry"
+            ),
+            "mesh",
+        )
+        ET.SubElement(other, "uri").text = "other.obj"
+        ET.SubElement(other, "scale").text = "3 3 3"
+        tree.write(table.sdf_path)
+        self.assertEqual(
+            extract_uniform_visual_mesh_scale(table.sdf_path, table.geometry_path), 1.0
+        )
+        rescale_sdf(table.sdf_path, 0.5)
+        rescale_sdf(table.sdf_path, 2.1)
+        self.assertAlmostEqual(
+            extract_uniform_visual_mesh_scale(table.sdf_path, table.geometry_path), 1.05
+        )
+        tree = ET.parse(table.sdf_path)
+        tree.find(".//visual/geometry/mesh/uri").text = table.geometry_path.as_uri()
+        tree.write(table.sdf_path)
+        self.assertAlmostEqual(
+            extract_uniform_visual_mesh_scale(table.sdf_path, table.geometry_path), 1.05
+        )
+
+    def test_sdf_visual_scale_rejects_invalid_or_ambiguous_geometry(self):
+        """Reject unsupported physical scale bindings rather than guessing a surface."""
+        for scale in ["1 1 2", "nan nan nan", "-1 -1 -1"]:
+            with self.subTest(scale=scale):
+                table = self._baked_table_with_sdf(scale)
+                with self.assertRaises(ValueError):
+                    extract_uniform_visual_mesh_scale(
+                        table.sdf_path, table.geometry_path
+                    )
+        table = self._baked_table_with_sdf("1 1 1")
+        tree = ET.parse(table.sdf_path)
+        other = ET.SubElement(
+            ET.SubElement(
+                ET.SubElement(tree.find(".//link"), "visual", name="duplicate"),
+                "geometry",
+            ),
+            "mesh",
+        )
+        ET.SubElement(other, "uri").text = table.geometry_path.name
+        ET.SubElement(other, "scale").text = "2 2 2"
+        tree.write(table.sdf_path)
+        with self.assertRaises(ValueError):
+            extract_uniform_visual_mesh_scale(table.sdf_path, table.geometry_path)
+        with self.assertRaises(ValueError):
+            extract_uniform_visual_mesh_scale(
+                table.sdf_path, self.temp_dir / "missing.obj"
+            )
 
     def test_upholstered_policy_passes_unscaled_bounds_without_propagation(self):
         """A relaxed seat surface remains scoped to its hard target instance."""

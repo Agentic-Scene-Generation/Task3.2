@@ -4,6 +4,7 @@ This module provides utilities for working with SDF (Simulation Description Form
 files used by Drake for physics simulation.
 """
 
+import math
 import xml.etree.ElementTree as ET
 
 from pathlib import Path
@@ -66,6 +67,41 @@ def parse_scale(scale_text: str) -> list[float]:
     if len(values) != 3:
         raise ValueError(f"Expected 3 values in scale, got {len(values)}: {scale_text}")
     return values
+
+
+def extract_uniform_visual_mesh_scale(sdf_path: Path, geometry_path: Path) -> float:
+    """Read the SDF scale applied after a mesh's dimensions were baked.
+
+    The mesh file itself does not change when ``rescale_sdf`` changes its scale.
+    Match its actual visual URI so source-space asset scales are not applied a
+    second time. Ambiguous or nonuniform scales cannot use scalar surface math.
+    """
+    geometry_path = geometry_path.resolve()
+    scales = []
+    for mesh in ET.parse(sdf_path).getroot().findall(".//visual/geometry/mesh"):
+        uri = mesh.findtext("uri", "").strip()
+        if uri.startswith("file://"):
+            uri = uri[len("file://") :]
+        path = Path(uri)
+        if not path.is_absolute():
+            path = sdf_path.parent / path
+        if path.resolve() != geometry_path:
+            continue
+        values = parse_scale(mesh.findtext("scale", "1 1 1"))
+        if not all(math.isfinite(v) and v > 0.0 for v in values) or not all(
+            math.isclose(v, values[0], rel_tol=1e-7, abs_tol=1e-9) for v in values
+        ):
+            raise ValueError(
+                f"Support mesh requires a positive uniform SDF scale: {uri}"
+            )
+        scales.append(values[0])
+    if not scales:
+        raise ValueError(f"Support mesh is not bound to an SDF visual: {geometry_path}")
+    if not all(math.isclose(v, scales[0], rel_tol=1e-7, abs_tol=1e-9) for v in scales):
+        raise ValueError(
+            f"Support mesh has conflicting SDF visual scales: {geometry_path}"
+        )
+    return scales[0]
 
 
 def scale_to_string(scale: list[float]) -> str:

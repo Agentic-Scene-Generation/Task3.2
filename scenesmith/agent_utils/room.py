@@ -29,6 +29,7 @@ from scenesmith.utils.path_utils import safe_relative_path
 from scenesmith.utils.sdf_utils import (
     deserialize_rigid_transform,
     extract_base_link_name_from_sdf,
+    extract_uniform_visual_mesh_scale,
     is_static_sdf_model,
     serialize_rigid_transform,
 )
@@ -1759,6 +1760,7 @@ def extract_and_propagate_support_surfaces(
 
     # Check if HSSD asset with pre-validated surfaces.
     # Determine surface loading strategy and source.
+    per_link_surfaces = False
     if (
         furniture_object.metadata.get("asset_source") == "hssd"
         and "hssd_mesh_id" in furniture_object.metadata
@@ -1822,6 +1824,7 @@ def extract_and_propagate_support_surfaces(
             surfaces = extract_support_surfaces_articulated(
                 sdf_dir=sdf_dir, config=config, sdf_path=furniture_object.sdf_path
             )
+            per_link_surfaces = True
             source = "HSM (per-link)"
         else:
             surfaces = extract_support_surfaces_from_mesh(
@@ -1855,6 +1858,12 @@ def extract_and_propagate_support_surfaces(
 
     def surface_scale(obj: SceneObject) -> float:
         if mesh_space_surfaces and obj.metadata.get("geometry_scale_baked") is True:
+            # A later rescale changes the SDF mesh scale, not the baked mesh
+            # file. Per-link extraction already reads the SDF transforms.
+            if not per_link_surfaces and obj.sdf_path and obj.sdf_path.is_file():
+                return extract_uniform_visual_mesh_scale(
+                    obj.sdf_path, obj.geometry_path
+                )
             return 1.0
         return obj.scale_factor
 
