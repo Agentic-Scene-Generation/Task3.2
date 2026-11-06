@@ -283,9 +283,13 @@ class TestSupportSurfaceMeshScaling(unittest.TestCase):
         np.testing.assert_allclose(surface.transform.translation(), [0.0, 0.0, 1.0])
 
     def _baked_table_with_sdf(self, scale: str | None = None) -> SceneObject:
-        """Create a real Z-up mesh with an independent SDF runtime scale."""
-        mesh_path = self.temp_dir / "baked_table.obj"
-        self.test_mesh.export(mesh_path)
+        """Create a baked Y-up mesh, matching the production HSM input convention."""
+        mesh_path = self.temp_dir / "baked_table.glb"
+        mesh = self.test_mesh.copy()
+        mesh.apply_transform(
+            trimesh.transformations.rotation_matrix(-np.pi / 2, [1, 0, 0])
+        )
+        mesh.export(mesh_path)
         sdf_path = self.temp_dir / "baked_table.sdf"
         root = ET.Element("sdf", version="1.7")
         model = ET.SubElement(root, "model", name="table")
