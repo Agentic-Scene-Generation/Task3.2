@@ -34,7 +34,21 @@ def get_current_asset_annotation(asset_uid: str) -> dict[str, Any]:
         style = overlay.get(normalized_uid, overlay.get(key))
         if style is not None:
             record["asset_style"] = style
+    appearance = _appearance_overlay()
+    normalized_uid = asset_uid if ":" in asset_uid else "hssd:" + asset_uid
+    record.update(appearance.get(normalized_uid, appearance.get(key, {})))
     return record
+
+
+@lru_cache(maxsize=1)
+def _appearance_overlay() -> dict[str, Any]:
+    config_path = DATA_ROOT / "config.json"
+    config = json.loads(config_path.read_text()) if config_path.exists() else {}
+    relative = config.get("appearance_overlay")
+    if not relative:
+        return {}
+    with gzip.open(DATA_ROOT / relative, "rt", encoding="utf-8") as stream:
+        return json.load(stream)
 
 @lru_cache(maxsize=1)
 def _style_overlay() -> dict[str, Any]:

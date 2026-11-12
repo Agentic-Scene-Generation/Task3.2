@@ -1,0 +1,8 @@
+{
+  "passed": true,
+  "assets_compared": 14823,
+  "independent_assetlibrary_all_fields_match_shared_inline": true,
+  "task32_all_fields_match_shared_inline": true,
+  "storage_policy": "Git base + authoritative appearance overlay; shared full inline lookup",
+  "non_3dfuture_lookup_files_identical": true
+}

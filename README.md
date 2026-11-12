@@ -1,4 +1,6 @@
-最新资产标注交付：[2026-09-21 中文说明](docs/ANNOTATION_SYNC_20260921_ZH.md)（新增 Luna 正面候选，保留原 canonical_front）。
+最新外观标注交付：[2026-11-12 风格、主题色与材质正式覆盖说明](docs/STYLE9_PALETTE_MATERIAL_RELEASE_20261112_ZH.md)。全库38,497件采用九类多标签风格、主题色和语义材质记录；Front与物理参数保持现状，embedding尚待按新标签刷新。
+
+历史交付：[2026-09-21 中文说明](docs/ANNOTATION_SYNC_20260921_ZH.md)。
 
 <h1 align="center">
   <img src="media/symbol.svg" alt="" height="36" align="absmiddle">&nbsp;SceneSmith
